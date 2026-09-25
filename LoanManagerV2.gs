@@ -258,14 +258,16 @@ function moraGraceDays_() {
   const n = raw === '' ? 0 : Number(raw);
   return (isFinite(n) && n >= 0) ? Math.floor(n) : 0;
 }
-/** Tope acumulado de mora como FRACCIÓN del capital (Configuración "Tope de mora (% del capital)").
- *  Predeterminado 100% (comportamiento contractual previo) si el ajuste falta. */
+/** Tope acumulado de mora como FRACCIÓN del TOTAL A DEVOLVER (capital + interés).
+ *  Ajuste "Tope de mora (% del total a devolver)"; acepta la clave anterior
+ *  "(% del capital)" hasta que corra la migración. Predeterminado 100% si falta. */
 function moraCapFrac_() {
-  const raw = String(getSetting_('Tope de mora (% del capital)') || '').replace(/[^0-9.\-]/g, '').trim();
+  const raw = String(getSetting_('Tope de mora (% del total a devolver)') ||
+    getSetting_('Tope de mora (% del capital)') || '').replace(/[^0-9.\-]/g, '').trim();
   const n = raw === '' ? 100 : Number(raw);
   return (isFinite(n) && n > 0) ? n / 100 : 1;
 }
-/** Texto del tope de mora como % del capital (p. ej. "50%"). */
+/** Texto del tope de mora como % del total a devolver (p. ej. "100%"). */
 function moraCapPctText_() { return round2_(moraCapFrac_() * 100) + '%'; }
 
 // Colores de marca Impulso Crédito
@@ -365,7 +367,7 @@ function applyFeatureUpdates() {
       'Monto máximo por préstamo', 'Tope tramo 25% (15 días)', 'Tope tramo 50% (30 días)',
       // V-32 escalera de graduación + recuperación (mora): claves nuevas.
       'Límite inicial (préstamo nuevo)', 'Límite tras 1 préstamo saldado', 'Límite tras 2 préstamos saldados',
-      'Días de gracia antes de mora', 'Tope de mora (% del capital)',
+      'Días de gracia antes de mora', 'Tope de mora (% del total a devolver)',
     ]);
     done.push(nAdded ? (nAdded + ' ajuste(s) nuevo(s) en «Configuración»') : '«Configuración» ya estaba al día');
     // Prefill del tope de concentración (10%) si quedó en blanco, para que sea visible/editable.
@@ -392,17 +394,26 @@ function applyFeatureUpdates() {
         setSettingValue_(stsh, 'Límite tras 1 préstamo saldado', '300000');
       if (stsh && String(getSetting_('Límite tras 2 préstamos saldados') || '').trim() === '')
         setSettingValue_(stsh, 'Límite tras 2 préstamos saldados', '500000');
-      // Mora: sin días de gracia y tope al 100% del capital. Migra los valores
-      // sembrados por la versión anterior (3 / 50); respeta cualquier otro valor manual.
+      // Mora: sin días de gracia y tope al 100% del TOTAL A DEVOLVER. Migra los valores
+      // sembrados por versiones anteriores (3 / 50 y la clave "% del capital"); respeta
+      // cualquier otro valor manual.
       if (stsh) {
         const grace = String(getSetting_('Días de gracia antes de mora') || '').trim();
         if (grace === '' || grace === '3') setSettingValue_(stsh, 'Días de gracia antes de mora', '0');
-        const tope = String(getSetting_('Tope de mora (% del capital)') || '').trim();
-        if (tope === '' || tope === '50') setSettingValue_(stsh, 'Tope de mora (% del capital)', '100');
-        // Actualiza la Cláusula de Mora solo si conserva el texto sembrado anterior (mencionaba la gracia).
+        const NEW_TOPE = 'Tope de mora (% del total a devolver)', OLD_TOPE = 'Tope de mora (% del capital)';
+        let tope = String(getSetting_(NEW_TOPE) || '').trim();
+        const topeViejo = String(getSetting_(OLD_TOPE) || '').trim();
+        if (tope === '' && topeViejo !== '') { setSettingValue_(stsh, NEW_TOPE, topeViejo); tope = topeViejo; }
+        // Elimina la fila de la clave anterior para no dejar un ajuste duplicado sin efecto.
+        const keys = stsh.getRange(1, 1, stsh.getLastRow(), 1).getValues();
+        for (let i = keys.length - 1; i >= 0; i--)
+          if (hkey_(keys[i][0]) === hkey_(OLD_TOPE)) stsh.deleteRow(i + 1);
+        if (tope === '' || tope === '50') setSettingValue_(stsh, NEW_TOPE, '100');
+        // Actualiza la Cláusula de Mora solo si conserva un texto sembrado anterior
+        // (mencionaba la gracia o el tope como % del capital).
         const clause = String(getSetting_('Cláusula de Mora') || '').trim();
-        if (clause === '' || /tras un período de gracia/.test(clause))
-          setSettingValue_(stsh, 'Cláusula de Mora', 'En caso de mora se aplica un recargo diario sobre el total a devolver por cada día de atraso posterior al vencimiento, con un tope acumulado como porcentaje del capital. Los valores vigentes (recargo diario y tope) se configuran en esta hoja.');
+        if (clause === '' || /tras un período de gracia|porcentaje del capital/.test(clause))
+          setSettingValue_(stsh, 'Cláusula de Mora', 'En caso de mora se aplica un recargo diario sobre el total a devolver por cada día de atraso posterior al vencimiento, con un tope acumulado como porcentaje del total a devolver. Los valores vigentes (recargo diario y tope) se configuran en esta hoja.');
       }
     } catch (e) { logError_('applyFeatureUpdates:concentracionDefault', e); }
     // 2) Acta de firma ampliada (agrega encabezados IP/hash/CUIL/domicilio; no borra filas).
@@ -535,10 +546,10 @@ function setupSettings_(ss) {
     ['Teléfono del Prestamista', ''],
     ['Dirección del Prestamista', ''],
     ['Jurisdicción', 'Buenos Aires, Argentina'],
-    ['Cláusula de Mora', 'En caso de mora se aplica un recargo diario sobre el total a devolver por cada día de atraso posterior al vencimiento, con un tope acumulado como porcentaje del capital. Los valores vigentes (recargo diario y tope) se configuran en esta hoja.'],
+    ['Cláusula de Mora', 'En caso de mora se aplica un recargo diario sobre el total a devolver por cada día de atraso posterior al vencimiento, con un tope acumulado como porcentaje del total a devolver. Los valores vigentes (recargo diario y tope) se configuran en esta hoja.'],
     ['Recargo por Mora diario (%)', '5'],
     ['Días de gracia antes de mora', '0'],
-    ['Tope de mora (% del capital)', '100'],
+    ['Tope de mora (% del total a devolver)', '100'],
     ['Límite inicial (préstamo nuevo)', '150000'],
     ['Límite tras 1 préstamo saldado', '300000'],
     ['Límite tras 2 préstamos saldados', '500000'],
@@ -1189,8 +1200,8 @@ function setupStatements_(ss) {
     // Recargo por Mora (B13) queda automáticamente en 0.
     ['Días de Atraso', `=IFERROR(IF($B$14="","",IF($B$14<=0.009,0,IF(VLOOKUP($B$4,'${B}'!$A:$I,9,FALSE)="","",MAX(0,TODAY()-VLOOKUP($B$4,'${B}'!$A:$I,9,FALSE))))),"")`], // 12
     // Recargo por mora = días de atraso MENOS la gracia, × recargo diario × Total, con
-    // TOPE = (Tope de mora %) × Capital ($B$9). Espeja computeOutstanding_ (gracia + tope).
-    ['Recargo por Mora (acum.)', `=IFERROR(IF(OR($B$12="",$B$12<=0),0,MIN(MAX(0,$B$12-IFERROR(VLOOKUP("Días de gracia antes de mora",'${CFG.SHEETS.SETTINGS}'!$A:$B,2,FALSE),0))*$B$10*IFERROR(VLOOKUP("Recargo por Mora diario (%)",'${CFG.SHEETS.SETTINGS}'!$A:$B,2,FALSE)/100,0.05),$B$9*IFERROR(VLOOKUP("Tope de mora (% del capital)",'${CFG.SHEETS.SETTINGS}'!$A:$B,2,FALSE)/100,1))),"")`], // 13
+    // TOPE = (Tope de mora %) × Total a Pagar ($B$10). Espeja computeOutstanding_ (gracia + tope).
+    ['Recargo por Mora (acum.)', `=IFERROR(IF(OR($B$12="",$B$12<=0),0,MIN(MAX(0,$B$12-IFERROR(VLOOKUP("Días de gracia antes de mora",'${CFG.SHEETS.SETTINGS}'!$A:$B,2,FALSE),0))*$B$10*IFERROR(VLOOKUP("Recargo por Mora diario (%)",'${CFG.SHEETS.SETTINGS}'!$A:$B,2,FALSE)/100,0.05),$B$10*IFERROR(VLOOKUP("Tope de mora (% del total a devolver)",'${CFG.SHEETS.SETTINGS}'!$A:$B,2,FALSE)/100,1))),"")`], // 13
     ['Saldo Pendiente', `=IFERROR(VLOOKUP($B$4,'${B}'!$A:$M,13,FALSE),"")`],  // 14
     ['Fecha de Vencimiento', `=IFERROR(VLOOKUP($B$4,'${B}'!$A:$I,9,FALSE),"")`], // 15
     ['ESTADO', `=IFERROR(VLOOKUP($B$4,'${B}'!$A:$N,14,FALSE),"")`],           // 16
@@ -1867,20 +1878,23 @@ function setupStats_(ss) {
 
 const LATE_HEADERS = ['ID Préstamo', 'Prestatario', 'DNI', 'Correo', 'Teléfono', 'Fecha de Vencimiento',
   'Días de Atraso', 'Total a Pagar', 'Recargo por Mora (acum.)', 'Total Pagado', 'Saldo Pendiente',
-  'Enviar Aviso ✉', 'Último Aviso Enviado', 'Tope de mora', 'Plan de pago 📅 (3 cuotas)', 'Plan enviado'];
+  'Enviar Aviso ✉', 'Último Aviso Enviado', 'Tope de mora', 'Plan de pago 📅 (3 cuotas)', 'Plan enviado',
+  'PDF de cuotas 🧾', 'PDF generado'];
 // Columnas (1-based) de control en "Pagos Atrasados".
-const LATE_SEND_COL = 12, LATE_SENT_COL = 13, LATE_CAP_COL = 14, LATE_PLAN_COL = 15, LATE_PLAN_SENT_COL = 16;
+const LATE_SEND_COL = 12, LATE_SENT_COL = 13, LATE_CAP_COL = 14, LATE_PLAN_COL = 15, LATE_PLAN_SENT_COL = 16,
+  LATE_DOC_COL = 17, LATE_DOC_DONE_COL = 18;
 function setupLate_(ss) {
   const sh = getOrCreate_(ss, CFG.SHEETS.LATE); sh.clear();
   sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).clearDataValidations();
   sh.getRange(1, 1, 1, LATE_HEADERS.length).setValues([LATE_HEADERS])
     .setFontWeight('bold').setBackground('#990000').setFontColor('#fff').setWrap(true);
   sh.setFrozenRows(1);
-  [110, 170, 120, 200, 120, 130, 100, 120, 160, 120, 130, 110, 150, 100, 120, 110].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  [110, 170, 120, 200, 120, 130, 100, 120, 160, 120, 130, 110, 150, 100, 120, 110, 110, 110].forEach((w, i) => sh.setColumnWidth(i + 1, w));
   sh.getRange('A1').setNote('Se actualiza con "⑤ Actualizar" y automáticamente cada día. Lista los préstamos vencidos con saldo.');
   sh.getRange('L1').setNote('Tilde la casilla para enviar un aviso de mora por correo (en español). La casilla se destilda sola y la fecha de envío aparece en "Último Aviso Enviado".');
-  sh.getRange(1, LATE_CAP_COL).setNote('Mora acumulada como % de su tope ("Tope de mora (% del capital)" en Configuración). SÍ (100%) = llegó al tope: candidato a plan de pago en 3 cuotas.');
+  sh.getRange(1, LATE_CAP_COL).setNote('Mora acumulada como % de su tope ("Tope de mora (% del total a devolver)" en Configuración). SÍ (100%) = llegó al tope: candidato a plan de pago en 3 cuotas.');
   sh.getRange(1, LATE_PLAN_COL).setNote('Tilde para reestructurar el préstamo en 3 cuotas mensuales iguales (la deuda con mora se congela a hoy) y enviar el plan por correo al prestatario. La casilla se destilda sola.');
+  sh.getRange(1, LATE_DOC_COL).setNote('Tilde para generar el PDF con el cronograma de cuotas del préstamo (montos, vencimientos, pagado y saldo). Se guarda en la carpeta del prestatario; la fecha queda en "PDF generado". La casilla se destilda sola.');
   return sh;
 }
 
@@ -1898,6 +1912,7 @@ function rebuildLateSheet_(ss) {
   sh.getRange(2, 1, clearH, LATE_HEADERS.length).clearContent().setBackground(null).setFontWeight(null);
   sh.getRange(2, LATE_SEND_COL, clearH, 1).clearDataValidations();
   sh.getRange(2, LATE_PLAN_COL, clearH, 1).clearDataValidations();
+  sh.getRange(2, LATE_DOC_COL, clearH, 1).clearDataValidations();
   if (last < 2) return;
   const today = new Date(), feePct = lateFeeRate_(), grace = moraGraceDays_(), capFrac = moraCapFrac_(), rows = [];
   for (let row = 2; row <= last; row++) {
@@ -1913,13 +1928,13 @@ function rebuildLateSheet_(ss) {
     const out = round2_(base + feeAccum);                                // monto a pagar hoy = saldo + mora
     if (out <= 0) continue; // vencido pero saldado (y sin mora / mora condonada)
     const lastNotice = bs.getRange(row, PB.NOTICE).getValue(); // "Último Aviso" del prestatario
-    // "Tope de mora": % del recargo acumulado respecto de su tope (capital × tope configurado).
-    const capMax = round2_(loan.principal * capFrac);
+    // "Tope de mora": % del recargo acumulado respecto de su tope (total a devolver × tope configurado).
+    const capMax = round2_(loan.totalDue * capFrac);
     const pct = capMax > 0 ? Math.round(feeAccum / capMax * 100) : 0;
     const atCap = capMax > 0 && pct >= 100;
     rows.push([loan.loanId, loan.name, loan.dni, loan.email, loan.phone, loan.dueDate, days,
       loan.totalDue, feeAccum, totalPaid, out, false, (lastNotice instanceof Date) ? lastNotice : '',
-      atCap ? 'SÍ (100%)' : pct + '%', false, '']);
+      atCap ? 'SÍ (100%)' : pct + '%', false, '', false, '']);
   }
   rows.sort((a, b) => b[6] - a[6]); // más atrasados primero
   if (rows.length) {
@@ -1932,6 +1947,8 @@ function rebuildLateSheet_(ss) {
     sh.getRange(2, LATE_SENT_COL, rows.length, 1).setNumberFormat('yyyy-mm-dd');
     sh.getRange(2, LATE_PLAN_COL, rows.length, 1).insertCheckboxes();
     sh.getRange(2, LATE_PLAN_SENT_COL, rows.length, 1).setNumberFormat('yyyy-mm-dd');
+    sh.getRange(2, LATE_DOC_COL, rows.length, 1).insertCheckboxes();
+    sh.getRange(2, LATE_DOC_DONE_COL, rows.length, 1).setNumberFormat('yyyy-mm-dd');
     // Resaltar los préstamos que llegaron al tope de mora (candidatos a plan de pago).
     rows.forEach((r, i) => {
       if (String(r[LATE_CAP_COL - 1]).indexOf('SÍ') === 0)
@@ -1952,10 +1969,11 @@ function setupHelp_(ss) {
     ['4) Verificar: tilde "Verificado?" para aprobar (pasa a "Prestatarios", crea carpeta y envía contrato).'],
     ['   Tilde "Rechazar?" para archivar en "Rechazados" (envía correo de rechazo).'],
     ['5) Pagos: use el Panel del prestamista (menú ▸ Abrir panel) para registrar pagos y enviar recibos.'],
-    ['6) Intereses: 15 días = 25%, 1 mes = 50%, 2 meses = 100%. Tras el vencimiento: recargo por mora de ' + lateFeePctText_() + ' por día sobre el total a devolver' + (moraGraceDays_() > 0 ? ', tras ' + moraGraceDays_() + ' día(s) de gracia' : '') + ', con tope del ' + moraCapPctText_() + ' del capital.'],
+    ['6) Intereses: 15 días = 25%, 1 mes = 50%, 2 meses = 100%. Tras el vencimiento: recargo por mora de ' + lateFeePctText_() + ' por día sobre el total a devolver' + (moraGraceDays_() > 0 ? ', tras ' + moraGraceDays_() + ' día(s) de gracia' : '') + ', con tope del ' + moraCapPctText_() + ' del total a devolver.'],
     ['   Los préstamos vencidos con saldo aparecen en la hoja "Pagos Atrasados".'],
     ['   En "Pagos Atrasados", tilde "Enviar Aviso ✉" para mandar un aviso de mora por correo; la fecha queda en "Último Aviso Enviado".'],
     ['   Cuando "Tope de mora" muestra SÍ (100%), el recargo llegó a su máximo: tilde "Plan de pago 📅 (3 cuotas)" para reestructurar la deuda congelada en 3 cuotas mensuales y enviar el plan por correo al prestatario.'],
+    ['   Tilde "PDF de cuotas 🧾" en "Pagos Atrasados" para generar el PDF con el cronograma de cuotas del préstamo (montos, vencimientos, pagado y saldo); queda guardado en la carpeta del prestatario.'],
     ['7) Estados: ACTIVO, VENCIDO, PAGADO. El Panel muestra indicadores y próximos vencimientos.'],
     ['   Saldados: use "✔ Mover préstamos saldados" (menú o Panel) para archivar los préstamos pagados en la hoja "Saldados".'],
     ['8) Recordatorios: se envían automáticamente antes del vencimiento y en mora.'],
@@ -2002,12 +2020,12 @@ function loanSchedule_(loan) {
 /**
  * Saldo con recargo por mora SIMPLE por día (contrato L-0021, Cláusula 5). Parámetros
  * configurables (Configuración): recargo diario (%), período de gracia (días sin mora tras
- * el vencimiento) y tope acumulado (% del capital).
+ * el vencimiento) y tope acumulado (% del total a devolver).
  *
  * MODELO POR CUOTAS: si se pasa `schedule` (array de {due, amount, principalShare}) — o
  * para préstamos de 1 sola cuota, el pago único derivado del plazo — la mora se acumula
  * POR CUOTA sobre su propio monto, desde el fin de la gracia de CADA vencimiento, con tope
- * por cuota = capFrac × su parte del capital. Los pagos se aplican a la cuota más antigua
+ * por cuota = capFrac × su monto (capital+interés). Los pagos se aplican a la cuota más antigua
  * con saldo, primero a la mora y luego al capital+interés (orden del contrato). Un préstamo
  * de una sola cuota reproduce exactamente el comportamiento anterior.
  */
@@ -2027,7 +2045,7 @@ function computeOutstanding_(principal, rate, loanDate, payments, asOf, paymentC
   const cuotas = sched.map(c => ({
     dueMs: (c.due instanceof Date ? c.due : new Date(c.due)).getTime(),
     amount: round2_(Number(c.amount) || 0),
-    cap: round2_((Number(c.principalShare) || 0) * capFrac),
+    cap: round2_((Number(c.amount) || 0) * capFrac),
     balance: round2_(Number(c.amount) || 0),   // capital+interés pendiente de la cuota
     mora: 0,
     cursor: 0,
@@ -2225,7 +2243,7 @@ function agreementHtml_(loan, sig) {
   }
   const feeDay = round2_(loan.totalDue * lateFeeRate_());              // recargo diario sobre el total
   const moraGrace = moraGraceDays_();                                  // días de gracia antes de la mora
-  const feeCap = round2_(loan.principal * moraCapFrac_());             // tope acumulado del recargo
+  const feeCap = round2_(loan.totalDue * moraCapFrac_());              // tope acumulado del recargo
   const maxTotal = round2_(loan.totalDue + feeCap);                    // total + tope del recargo
   const daysToCap = feeDay > 0 ? moraGrace + Math.ceil(feeCap / feeDay) : 0;
   const payMethod = loan.payMethod || 'Mercado Pago';
@@ -2335,6 +2353,9 @@ function agreementHtml_(loan, sig) {
       <div class="box-title">Hay un máximo</div>
       <p style="margin:0">Los recargos dejan de acumularse cuando llegan a <b>${fmtMoney_(feeCap)}</b>. Lo máximo que el Prestatario
          puede llegar a deber por este contrato es <b>${fmtMoney_(maxTotal)}</b>, aparte de las costas judiciales.${daysToCap ? ' A ' + fmtMoney_(feeDay) + ' por día, ese máximo se alcanza a los ' + daysToCap + ' días.' : ''}</p>
+      <p style="margin:8px 0 0">Si los recargos alcanzan ese máximo, el Prestatario será incorporado a un <b>plan de pago en 3 cuotas
+         mensuales</b>: la deuda total a esa fecha (capital, interés y recargos) queda congelada y se divide en 3 pagos mensuales iguales.
+         Mientras el plan se cumpla, no se generan nuevos recargos; el detalle de montos y vencimientos se informa por correo.</p>
     </div>
     <p>Un juez puede reducir los intereses que considere excesivos. Si eso pasa, el resto de este contrato sigue vigente.</p>
 
@@ -2429,7 +2450,7 @@ function reminderHtml_(loan) {
   const late = due ? daysLate_(loan.dueDate, today) : 0;
   const feeDay = round2_(loan.totalDue * lateFeeRate_());
   const moraGrace = moraGraceDays_();       // días de gracia antes de la mora
-  const feeCap = round2_(loan.principal * moraCapFrac_());   // tope del recargo (% del capital)
+  const feeCap = round2_(loan.totalDue * moraCapFrac_());    // tope del recargo (% del total a devolver)
   // Saldo base (Total a Pagar − Total Pagado): consistente con la hoja y el estado de cuenta,
   // y correcto para plazos en días (15/30/60). La mora se muestra aparte en feeLine.
   const totalPaid = loanPayments_(loan.loanId).reduce((s, p) => s + p.amount, 0);
@@ -2458,13 +2479,13 @@ function reminderHtml_(loan) {
     feeLine = '<p><b>Recargo por mora acumulado:</b> ' + fmtMoney_(feeAccum) +
       ' (' + lateFeePctText_() + ' por día sobre las cuotas vencidas' +
       (moraGrace > 0 ? ', tras ' + moraGrace + ' día(s) de gracia' : '') +
-      (capped ? ', tope del ' + moraCapPctText_() + ' del capital alcanzado' : '') + ').' +
+      (capped ? ', tope del ' + moraCapPctText_() + ' del total a devolver alcanzado' : '') + ').' +
       (capped ? '' : ' El recargo sigue creciendo mientras haya cuotas impagas vencidas, hasta un tope de ' + fmtMoney_(feeCap) + '.') + '</p>';
   } else {
     feeLine = '<p><b>Recargo por mora:</b> si no paga a tiempo se aplicará un recargo del ' +
       lateFeePctText_() + ' por día sobre el total a devolver (' + fmtMoney_(loan.totalDue) + '), es decir <b>' +
       fmtMoney_(feeDay) + ' por día</b> de atraso' + (moraGrace > 0 ? ', tras ' + moraGrace + ' día(s) de gracia' : '') +
-      ', con un tope del ' + moraCapPctText_() + ' del capital (' + fmtMoney_(feeCap) + ').</p>';
+      ', con un tope del ' + moraCapPctText_() + ' del total a devolver (' + fmtMoney_(feeCap) + ').</p>';
   }
   return `<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><style>
     body{font-family:Georgia,serif;color:#222;margin:48px;line-height:1.5;font-size:12pt}
@@ -2508,7 +2529,7 @@ function emailReminder_(loan, file) {
     '<p>Estimado/a ' + esc_(loan.name) + ',</p><p>Le recordamos el pago de su préstamo <b>' + esc_(loan.loanId) + '</b>.' + esc_(when) + '</p>' +
     '<ul><li>Total a pagar: <b>' + fmtMoney_(loan.totalDue) + '</b></li>' +
     '<li>Vencimiento: <b>' + fmtDate_(loan.dueDate) + '</b></li>' +
-    '<li>Recargo por mora: <b>' + fmtMoney_(round2_(loan.totalDue * lateFeeRate_())) + ' por día</b> de atraso (' + lateFeePctText_() + ' sobre el total a devolver, tope 100% del capital)</li></ul>' +
+    '<li>Recargo por mora: <b>' + fmtMoney_(round2_(loan.totalDue * lateFeeRate_())) + ' por día</b> de atraso (' + lateFeePctText_() + ' sobre el total a devolver, tope del ' + moraCapPctText_() + ' del total a devolver)</li></ul>' +
     '<p>Adjuntamos el recordatorio en PDF con el detalle. Si ya realizó el pago, ignore este mensaje.</p>',
     { attachments: [file.getAs('application/pdf')] });
 }
@@ -2867,6 +2888,99 @@ function emailPlanPago_(loan, out, toEmail) {
     '<p>Si ya realizó un pago reciente, será descontado de la primera cuota. Ante cualquier duda, responda este correo.</p>');
 }
 
+/** Cuotas registradas del préstamo en la hoja "Cuotas" (ordenadas por número). */
+function cuotasDeLoan_(loanId) {
+  const cs = getSS_().getSheetByName(CFG.SHEETS.INSTALLMENTS);
+  if (!cs || cs.getLastRow() < 2) return [];
+  const out = [];
+  cs.getRange(2, 1, cs.getLastRow() - 1, CU.STATE).getValues().forEach(cr => {
+    if (String(cr[CU.LOAN_ID - 1]).trim() !== loanId) return;
+    out.push({
+      num: Number(cr[CU.NUM - 1]) || 0,
+      due: (cr[CU.DUE - 1] instanceof Date) ? cr[CU.DUE - 1] : null,
+      monto: round2_(Number(cr[CU.AMOUNT - 1]) || 0),
+      pagado: round2_(Number(cr[CU.PAID - 1]) || 0),
+      saldo: round2_(Number(cr[CU.BALANCE - 1]) || 0),
+      estado: String(cr[CU.STATE - 1] || '').trim(),
+    });
+  });
+  return out.sort((a, b) => a.num - b.num);
+}
+
+/**
+ * Casilla "PDF de cuotas 🧾" de "Pagos Atrasados": genera el PDF con el cronograma de
+ * cuotas del préstamo de la fila (tomado de la hoja "Cuotas"; si el préstamo no tiene
+ * cronograma, su pago único) y lo guarda en la carpeta del prestatario. Sella la fecha
+ * en "PDF generado".
+ */
+function docCuotasDesdeAtrasos_(sh, row) {
+  const ss = getSS_();
+  const loanId = String(sh.getRange(row, 1).getValue()).trim();
+  if (!loanId) { ss.toast('La fila seleccionada no tiene un préstamo.', '⚠ PDF de cuotas', 6); return; }
+  const loan = findLoanById_(loanId);
+  if (!loan) { ss.toast('No se encontró el préstamo ' + loanId + ' en "Prestatarios".', '⚠ PDF de cuotas', 6); return; }
+  let cuotas = cuotasDeLoan_(loanId);
+  if (!cuotas.length) {
+    // Sin filas en "Cuotas": préstamo de pago único → una sola cuota derivada del préstamo.
+    const paid = round2_(loanPayments_(loanId).reduce((s, p) => s + p.amount, 0));
+    const total = round2_(Number(loan.totalDue) || 0);
+    cuotas = [{
+      num: 1, due: (loan.dueDate instanceof Date) ? loan.dueDate : null, monto: total,
+      pagado: Math.min(paid, total), saldo: Math.max(0, round2_(total - paid)),
+      estado: daysLate_(loan.dueDate, new Date()) > 0 ? CST.OVERDUE : CST.PENDING,
+    }];
+  }
+  const f = savePdfToBorrower_(cuotasDocHtml_(loan, cuotas), 'Cuotas ' + loan.loanId + ' - ' + loan.name + '.pdf', loan);
+  sh.getRange(row, LATE_DOC_DONE_COL).setValue(new Date()).setNumberFormat('yyyy-mm-dd');
+  ss.toast('PDF de cuotas de ' + loanId + ' guardado en la carpeta del prestatario.', '🧾 PDF de cuotas', 8);
+  return f;
+}
+
+/** HTML del documento de cuotas: detalle del préstamo + cronograma con pagado/saldo por cuota. */
+function cuotasDocHtml_(loan, cuotas) {
+  const lender = companyName_(), footer = getSetting_('Pie del Contrato');
+  const feeAccum = round2_(accruedMora_(loan) || 0);
+  const totMonto = round2_(cuotas.reduce((s, c) => s + c.monto, 0));
+  const totPag = round2_(cuotas.reduce((s, c) => s + c.pagado, 0));
+  const totSaldo = round2_(cuotas.reduce((s, c) => s + c.saldo, 0));
+  const cell = 'padding:6px 8px;border:1px solid #ccc';
+  const filas = cuotas.map(c => {
+    const late = c.saldo > 0.009 && (c.due instanceof Date) && daysLate_(c.due, new Date()) > 0;
+    return `<tr${late ? ' style="background:#fdecec"' : ''}>` +
+      `<td style="${cell};text-align:center">${c.num} de ${cuotas.length}</td>` +
+      `<td style="${cell}">${c.due instanceof Date ? fmtDate_(c.due) : '—'}</td>` +
+      `<td style="${cell};text-align:right">${fmtMoney_(c.monto)}</td>` +
+      `<td style="${cell};text-align:right">${fmtMoney_(c.pagado)}</td>` +
+      `<td style="${cell};text-align:right"><b>${fmtMoney_(c.saldo)}</b></td>` +
+      `<td style="${cell};text-align:center">${esc_(c.estado)}</td></tr>`;
+  }).join('');
+  return `<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><style>
+    body{font-family:Georgia,serif;color:#222;margin:48px;line-height:1.5;font-size:12pt}
+    h1{text-align:center;font-size:20pt;border-bottom:2px solid #1c4587;padding-bottom:8px}
+    h2{font-size:13pt;color:#1c4587;margin-top:24px;border-bottom:1px solid #ccc;padding-bottom:3px}
+    table{width:100%;border-collapse:collapse;margin-top:8px} td,th{padding:6px 8px;border:1px solid #ccc}
+    th{background:#eef3fb;text-align:left}
+    td.k{background:#eef3fb;font-weight:bold;width:45%}
+    .foot{margin-top:40px;font-size:10pt;color:#666;text-align:center}</style></head><body>
+    ${brandHeaderHtml_()}
+    <h1>CRONOGRAMA DE CUOTAS</h1>
+    <p>Préstamo <b>${esc_(loan.loanId)}</b> de <b>${esc_(loan.name)}</b> (DNI ${esc_(loan.dni)}) con ${esc_(lender)}, al <b>${fmtDate_(new Date())}</b>.</p>
+    <h2>Resumen</h2>
+    <table>
+      <tr><td class="k">Capital</td><td>${fmtMoney_(loan.principal)}</td></tr>
+      <tr><td class="k">Total del cronograma (${cuotas.length} cuota${cuotas.length === 1 ? '' : 's'})</td><td><b>${fmtMoney_(totMonto)}</b></td></tr>
+      <tr><td class="k">Total pagado</td><td>${fmtMoney_(totPag)}</td></tr>
+      ${feeAccum > 0 ? `<tr><td class="k" style="color:#900">Recargo por mora acumulado</td><td style="color:#900"><b>${fmtMoney_(feeAccum)}</b></td></tr>` : ''}
+      <tr><td class="k">Saldo pendiente del cronograma</td><td><b>${fmtMoney_(totSaldo)}</b></td></tr>
+      ${feeAccum > 0 ? `<tr><td class="k">Monto a pagar hoy (saldo + mora)</td><td><b>${fmtMoney_(round2_(totSaldo + feeAccum))}</b></td></tr>` : ''}
+    </table>
+    <h2>Cuotas</h2>
+    <table><tr><th style="text-align:center">Cuota</th><th>Vencimiento</th><th style="text-align:right">Monto</th><th style="text-align:right">Pagado</th><th style="text-align:right">Saldo</th><th style="text-align:center">Estado</th></tr>
+    ${filas}</table>
+    <p style="margin-top:14px;font-size:11pt;color:#555">Los pagos se aplican a la cuota más antigua con saldo. El recargo por mora (si corresponde) se abona junto con la cuota.</p>
+    <p class="foot">${esc_(footer)}</p></body></html>`;
+}
+
 /**
  * Fija/condona/restaura la mora del préstamo de la FILA ACTIVA de "Prestatarios" escribiendo
  * en la columna "Mora (ajuste)". value === '' restaura el cálculo automático; un número la fija
@@ -2910,7 +3024,7 @@ function statementData_(loan) {
   const out = Math.max(0, round2_(loan.totalDue - totalPaid));
   const paid = out <= 0.009;
   const dLate = paid ? 0 : daysLate_(loan.dueDate);
-  // Mora POR CUOTA (recargo diario configurable, tras la gracia, con tope % del capital) —
+  // Mora POR CUOTA (recargo diario configurable, tras la gracia, con tope % del total a devolver) —
   // consistente con computeOutstanding_. Incluye cuotas vencidas aunque el vencimiento final no llegó.
   const feeAccum = paid ? 0 : accruedMora_(loan);
   const overdue = !paid && (feeAccum > 0 || ((loan.dueDate instanceof Date) && new Date().getTime() > loan.dueDate.getTime()));
@@ -3196,7 +3310,7 @@ function intakeHtml_() {
   const lateFeePct = Number(lateFeeRate_() * 100) || 5; // % de mora diario (para el cálculo en vivo)
   const juris = esc_(getSetting_('Jurisdicción') || 'Buenos Aires, Argentina');
   const moraClause = esc_(getSetting_('Cláusula de Mora') ||
-    ('En caso de mora se aplica un recargo del ' + feePct + ' diario sobre el total a devolver por cada día de atraso posterior a la fecha de vencimiento' + (moraGraceDays_() > 0 ? ', tras ' + moraGraceDays_() + ' día(s) de gracia' : '') + ', con un tope acumulado del ' + moraCapPctText_() + ' del capital.'));
+    ('En caso de mora se aplica un recargo del ' + feePct + ' diario sobre el total a devolver por cada día de atraso posterior a la fecha de vencimiento' + (moraGraceDays_() > 0 ? ', tras ' + moraGraceDays_() + ' día(s) de gracia' : '') + ', con un tope acumulado del ' + moraCapPctText_() + ' del total a devolver.'));
   const contractFooter = esc_(getSetting_('Pie del Contrato') ||
     'Este acuerdo es legalmente vinculante desde la firma de ambas partes.');
   return `<!DOCTYPE html><html lang="es"><head><base target="_top"><style>
@@ -3956,6 +4070,15 @@ function onEditInstallable(e) {
           catch (err) { logError_('onEdit:LATE:planPago', err); getSS_().toast(err.message || String(err), '⚠ No se pudo reestructurar', 8); }
         }
       }
+      // Casilla "PDF de cuotas 🧾": genera el PDF con el cronograma de cuotas del préstamo.
+      if (LATE_DOC_COL >= c0 && LATE_DOC_COL <= cN) {
+        for (let row = rN; row >= r0; row--) {
+          if (sh.getRange(row, LATE_DOC_COL).getValue() !== true) continue;
+          sh.getRange(row, LATE_DOC_COL).setValue(false);
+          try { docCuotasDesdeAtrasos_(sh, row); }
+          catch (err) { logError_('onEdit:LATE:docCuotas', err); getSS_().toast(err.message || String(err), '⚠ No se pudo generar el PDF', 8); }
+        }
+      }
     } else if (name === CFG.SHEETS.NEW) {
       const m = headerMap_(sh), verCol = m['Verificado?'], rejCol = m['Rechazar?'], bcraCol = m['Verificar BCRA?'], ovrCol = m['Anular límites'];
       const acts = [];
@@ -4338,7 +4461,7 @@ function dailyTasks() {
       } else if (days < 0) {
         // en mora: avisar como máximo cada 7 días
         const daysSince = lastNotice instanceof Date ? Math.round((today - new Date(lastNotice.getFullYear(), lastNotice.getMonth(), lastNotice.getDate())) / 86400000) : 999;
-        if (daysSince >= 7) { send = true; subject = 'Aviso de mora — préstamo ' + loan.loanId; intro = 'Su préstamo ' + loan.loanId + ' venció el ' + fmtDate_(due) + ' (' + daysLate_(due, today) + ' día(s) de atraso). Se aplica un recargo por mora del ' + lateFeePctText_() + ' por día (' + fmtMoney_(round2_(loan.totalDue * lateFeeRate_())) + ' por día) sobre el total a devolver, con tope del ' + moraCapPctText_() + ' del capital.'; }
+        if (daysSince >= 7) { send = true; subject = 'Aviso de mora — préstamo ' + loan.loanId; intro = 'Su préstamo ' + loan.loanId + ' venció el ' + fmtDate_(due) + ' (' + daysLate_(due, today) + ' día(s) de atraso). Se aplica un recargo por mora del ' + lateFeePctText_() + ' por día (' + fmtMoney_(round2_(loan.totalDue * lateFeeRate_())) + ' por día) sobre el total a devolver, con tope del ' + moraCapPctText_() + ' del total a devolver.'; }
       }
       if (send) {
         try {
@@ -5261,7 +5384,7 @@ function sendOverdueNotice_(loanId) {
     const subject = 'Aviso de mora — préstamo ' + loan.loanId;
     const intro = 'Su préstamo ' + loan.loanId + ' venció el ' + fmtDate_(loan.dueDate) + ' (' + days +
       ' día(s) de atraso). Se aplica un recargo por mora del ' + lateFeePctText_() + ' por día (' +
-      fmtMoney_(feeDay) + ' por día) sobre el total a devolver, con tope del ' + moraCapPctText_() + ' del capital.';
+      fmtMoney_(feeDay) + ' por día) sobre el total a devolver, con tope del ' + moraCapPctText_() + ' del total a devolver.';
     sendBrandedEmail_(loan.email, subject, intro + ' Saldo actual: ' + fmtMoney_(outstanding) + '.',
       '<p>Estimado/a ' + esc_(loan.name) + ',</p>' +
       '<p>' + esc_(intro) + '</p>' +

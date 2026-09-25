@@ -1068,9 +1068,9 @@ function intakeSmartHtml_() {
   const contractFooter = esc_(getSetting_('Pie del Contrato') || 'Este acuerdo es legalmente vinculante desde la firma de ambas partes.');
   const lateFeePct = Number(lateFeeRate_() * 100) || 5; // % de mora diario (para el popup de confirmación)
   const moraGrace = moraGraceDays_();                   // días de gracia antes de la mora
-  const moraCapPct = round2_(moraCapFrac_() * 100);     // tope de mora como % del capital
+  const moraCapPct = round2_(moraCapFrac_() * 100);     // tope de mora como % del total a devolver
   const moraClause = esc_(getSetting_('Cláusula de Mora') ||
-    ('se aplica un recargo del ' + lateFeePctText_() + ' diario sobre el total a devolver por cada día de atraso posterior a la fecha de vencimiento' + (moraGrace > 0 ? ', tras ' + moraGrace + ' día(s) de gracia' : '') + ', con un tope acumulado del ' + moraCapPct + '% del capital.'));
+    ('se aplica un recargo del ' + lateFeePctText_() + ' diario sobre el total a devolver por cada día de atraso posterior a la fecha de vencimiento' + (moraGrace > 0 ? ', tras ' + moraGrace + ' día(s) de gracia' : '') + ', con un tope acumulado del ' + moraCapPct + '% del total a devolver.'));
   return `<!DOCTYPE html><html lang="es"><head><base target="_top"><style>
     :root{
       --brand:#1c4587;--brand-600:#16375f;--brand-050:#eaf1fb;
@@ -1334,7 +1334,7 @@ function intakeSmartHtml_() {
               <span>Me comprometo a devolver el <b>monto total (capital + interés)</b> en la fecha de vencimiento. <span class="req">*</span></span></label>
             <small class="fieldErr" id="e_agreeRepay"></small>
             <label class="agree" id="agreeMoraLabel"><input type="checkbox" name="agreeMora" id="agreeMora" required>
-              <span>Entiendo el <b>recargo por mora (${lateFeePctText_()} por día${moraGrace > 0 ? `, tras ${moraGrace} día(s) de gracia` : ''}, con tope del ${moraCapPct}% del capital)</b> si pago después del vencimiento. <span class="req">*</span></span></label>
+              <span>Entiendo el <b>recargo por mora (${lateFeePctText_()} por día${moraGrace > 0 ? `, tras ${moraGrace} día(s) de gracia` : ''}, con tope del ${moraCapPct}% del total a devolver)</b> si pago después del vencimiento. <span class="req">*</span></span></label>
             <small class="fieldErr" id="e_agreeMora"></small>
             <label class="agree" id="agreeConseqLabel"><input type="checkbox" name="agreeConseq" id="agreeConseq" required>
               <span>Entiendo que, ante el impago, se iniciarán <b>acciones legales</b> para el cobro de la deuda. <span class="req">*</span></span></label>
@@ -1676,7 +1676,7 @@ function intakeSmartHtml_() {
         if(!(a>0)||!t)return false; // recalc setea termEl.value sólo si el monto es válido
         var ti=infoForDays(t),r=ti.rate;
         var interes=a*r,total=a*(1+r),feePct=${lateFeePct},feeDay=total*feePct/100,pct=Math.round(r*100);
-        var grace=${moraGrace},capPct=${moraCapPct},feeCap=a*capPct/100;
+        var grace=${moraGrace},capPct=${moraCapPct},feeCap=total*capPct/100;
         function lateTotal(d){return total+Math.min(feeDay*Math.max(0,d-grace),feeCap);} // recargo tras la gracia, con tope
         var d1=grace+1,d2=grace+3,d3=grace+7;
         var cuota=total/ti.cuotas;
@@ -1689,7 +1689,7 @@ function intakeSmartHtml_() {
           crow('Interés',fmt(interes)+' ('+pct+'%)')+
           crow('Total a devolver','<b>'+fmt(total)+'</b>')+
           crow('Repago',schedTxt)+
-          crow('⚠️ Recargo por mora','<span style="color:#7a5200"><b style="color:#b45309">'+feePct+'% por día</b> sobre el total a devolver ('+fmt(feeDay)+' por día) de atraso posterior al vencimiento'+(grace>0?', tras '+grace+' día(s) de gracia':'')+', con tope del '+capPct+'% del capital</span>')+
+          crow('⚠️ Recargo por mora','<span style="color:#7a5200"><b style="color:#b45309">'+feePct+'% por día</b> sobre el total a devolver ('+fmt(feeDay)+' por día) de atraso posterior al vencimiento'+(grace>0?', tras '+grace+' día(s) de gracia':'')+', con tope del '+capPct+'% del total a devolver</span>')+
           crow('Si pagás tarde','<span style="color:#7a5200">'+d1+' días → <b>'+fmt(lateTotal(d1))+'</b><br>'+d2+' días → <b>'+fmt(lateTotal(d2))+'</b><br>'+d3+' días → <b>'+fmt(lateTotal(d3))+'</b></span>')+
           '</table>'+
           '<p style="margin-top:12px">¿Confirmás que querés pedir este préstamo por <b>'+t+' días</b> a <b>'+pct+'%</b> de interés?</p>';
