@@ -438,6 +438,10 @@ function applyFeatureUpdates() {
         done.push('casilla «Generar recibo» + «Saldo Posterior» vivo en «Pagos»');
       }
     } catch (e) { logError_('applyFeatureUpdates:pagos', e); }
+    // 8) "Pagos Atrasados": columnas "Tope de mora" y "Plan de pago 📅 (3 cuotas)" — la
+    //    reconstrucción reafirma los encabezados nuevos y recalcula el % del tope.
+    try { rebuildLateSheet_(ss); done.push('columnas «Tope de mora» + «Plan de pago 📅» en «Pagos Atrasados»'); }
+    catch (e) { logError_('applyFeatureUpdates:pagosAtrasados', e); }
     // El onEdit (casillas que envían correos) requiere el disparador instalable.
     try { if (typeof ensureTriggers_ === 'function') ensureTriggers_(); } catch (e) { logError_('applyFeatureUpdates:triggers', e); }
     ui.alert('Novedades aplicadas',
@@ -1004,23 +1008,30 @@ function setupCuotas_(ss) {
  * @param {Sheet} cs hoja Cuotas · @param {string} loanId · @param {Date} loanDate
  * @param {number} total Total a Pagar · @param {number} n cantidad de cuotas · @param {number[]} dueDays días de vencimiento (p.ej. [30,60,90] o [15])
  */
-function cuotasForLoan_(cs, loanId, loanDate, total, n, dueDays) {
+function cuotasForLoan_(cs, loanId, loanDate, total, n, dueDays, opts) {
+  // opts (opcional): { dates: Date[] }  → fechas de vencimiento explícitas (plan de pago
+  //   reestructurado) en lugar de offsets sobre loanDate;
+  //   { paidOffset: number } → pagos ANTERIORES al plan: se descuentan del Total Pagado
+  //   del préstamo para que las cuotas (que ya son netas de esos pagos) no los dupliquen.
+  opts = opts || {};
   const LID = colL_(CU.LOAN_ID), NUM = colL_(CU.NUM), AMT = colL_(CU.AMOUNT), DUE = colL_(CU.DUE);
   const B = CFG.SHEETS.BORROWERS, bIdL = colL_(PB.LOAN_ID), bPaidL = colL_(PB.PAID);
   const base = round2_(total / n);
   const rows = [];
   for (let k = 1; k <= n; k++) {
     const monto = (k === n) ? round2_(total - base * (n - 1)) : base;   // la última absorbe el redondeo
-    const due = addDays_(loanDate, dueDays[k - 1]);
+    const due = (opts.dates && opts.dates[k - 1]) ? opts.dates[k - 1] : addDays_(loanDate, dueDays[k - 1]);
     rows.push([loanId + '-' + k, loanId, k, due, monto, '', '', '', '']);
   }
   const start = cs.getLastRow() + 1;
   cs.getRange(start, 1, rows.length, CUOTAS_HEADERS.length).setValues(rows);
   // Fórmulas vivas por fila (reparto del Total Pagado del préstamo, cuota más antigua primero).
+  const paidOffset = round2_(Number(opts.paidOffset) || 0);
   for (let i = 0; i < rows.length; i++) {
     const r = start + i;
     const pagadoAntes = `SUMIFS($${AMT}$2:$${AMT},$${LID}$2:$${LID},$${LID}${r},$${NUM}$2:$${NUM},"<"&$${NUM}${r})`;
-    const loanPaid = `IFERROR(VLOOKUP($${LID}${r},'${B}'!$${bIdL}:$${bPaidL},${PB.PAID},FALSE),0)`;
+    let loanPaid = `IFERROR(VLOOKUP($${LID}${r},'${B}'!$${bIdL}:$${bPaidL},${PB.PAID},FALSE),0)`;
+    if (paidOffset > 0) loanPaid = `MAX(0,${loanPaid}-${paidOffset})`;
     cs.getRange(r, CU.PAID).setFormula(`=MIN($${AMT}${r},MAX(0,${loanPaid}-(${pagadoAntes})))`);
     cs.getRange(r, CU.BALANCE).setFormula(`=$${AMT}${r}-$${colL_(CU.PAID)}${r}`);
     cs.getRange(r, CU.STATE).setFormula(
@@ -1029,6 +1040,21 @@ function cuotasForLoan_(cs, loanId, loanDate, total, n, dueDays) {
   cs.getRange(start, CU.DUE, rows.length, 1).setNumberFormat('yyyy-mm-dd');
   cs.getRange(start, CU.AMOUNT, rows.length, 3).setNumberFormat(CFG.CURRENCY_FMT);
   return rows.length;
+}
+/**
+ * Elimina las filas de "Cuotas" de un préstamo (de abajo hacia arriba). Se usa al
+ * reestructurar: las cuotas viejas (p. ej. VENCIDAS) se reemplazan por las del plan
+ * — si quedaran, la fórmula de Estado de "Prestatarios" seguiría marcando VENCIDO.
+ */
+function deleteCuotasRowsForLoan_(cs, loanId) {
+  if (!cs || cs.getLastRow() < 2) return 0;
+  const id = String(loanId || '').trim(); if (!id) return 0;
+  const ids = cs.getRange(2, CU.LOAN_ID, cs.getLastRow() - 1, 1).getValues();
+  let removed = 0;
+  for (let i = ids.length - 1; i >= 0; i--) {
+    if (String(ids[i][0]).trim() === id) { cs.deleteRow(i + 2); removed++; }
+  }
+  return removed;
 }
 /**
  * Backfill NO destructivo: crea el cronograma para préstamos vigentes que aún no tienen cuotas.
@@ -1834,18 +1860,20 @@ function setupStats_(ss) {
 
 const LATE_HEADERS = ['ID Préstamo', 'Prestatario', 'DNI', 'Correo', 'Teléfono', 'Fecha de Vencimiento',
   'Días de Atraso', 'Total a Pagar', 'Recargo por Mora (acum.)', 'Total Pagado', 'Saldo Pendiente',
-  'Enviar Aviso ✉', 'Último Aviso Enviado'];
+  'Enviar Aviso ✉', 'Último Aviso Enviado', 'Tope de mora', 'Plan de pago 📅 (3 cuotas)', 'Plan enviado'];
 // Columnas (1-based) de control en "Pagos Atrasados".
-const LATE_SEND_COL = 12, LATE_SENT_COL = 13;
+const LATE_SEND_COL = 12, LATE_SENT_COL = 13, LATE_CAP_COL = 14, LATE_PLAN_COL = 15, LATE_PLAN_SENT_COL = 16;
 function setupLate_(ss) {
   const sh = getOrCreate_(ss, CFG.SHEETS.LATE); sh.clear();
   sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).clearDataValidations();
   sh.getRange(1, 1, 1, LATE_HEADERS.length).setValues([LATE_HEADERS])
     .setFontWeight('bold').setBackground('#990000').setFontColor('#fff').setWrap(true);
   sh.setFrozenRows(1);
-  [110, 170, 120, 200, 120, 130, 100, 120, 160, 120, 130, 110, 150].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  [110, 170, 120, 200, 120, 130, 100, 120, 160, 120, 130, 110, 150, 100, 120, 110].forEach((w, i) => sh.setColumnWidth(i + 1, w));
   sh.getRange('A1').setNote('Se actualiza con "⑤ Actualizar" y automáticamente cada día. Lista los préstamos vencidos con saldo.');
   sh.getRange('L1').setNote('Tilde la casilla para enviar un aviso de mora por correo (en español). La casilla se destilda sola y la fecha de envío aparece en "Último Aviso Enviado".');
+  sh.getRange(1, LATE_CAP_COL).setNote('Mora acumulada como % de su tope ("Tope de mora (% del capital)" en Configuración). SÍ (100%) = llegó al tope: candidato a plan de pago en 3 cuotas.');
+  sh.getRange(1, LATE_PLAN_COL).setNote('Tilde para reestructurar el préstamo en 3 cuotas mensuales iguales (la deuda con mora se congela a hoy) y enviar el plan por correo al prestatario. La casilla se destilda sola.');
   return sh;
 }
 
@@ -1854,10 +1882,15 @@ function rebuildLateSheet_(ss) {
   ss = ss || getSS_();
   const sh = ss.getSheetByName(CFG.SHEETS.LATE) || setupLate_(ss) || ss.getSheetByName(CFG.SHEETS.LATE);
   const bs = ss.getSheetByName(CFG.SHEETS.BORROWERS), last = bs.getLastRow();
+  // Reafirmar encabezados: migra hojas existentes (13 columnas) al layout con
+  // "Tope de mora" / "Plan de pago 📅" sin perder datos. Idempotente.
+  sh.getRange(1, 1, 1, LATE_HEADERS.length).setValues([LATE_HEADERS])
+    .setFontWeight('bold').setBackground('#990000').setFontColor('#fff').setWrap(true);
   // limpia datos y casillas previas (conserva encabezados)
   const clearH = Math.max(sh.getMaxRows() - 1, 1);
-  sh.getRange(2, 1, clearH, LATE_HEADERS.length).clearContent();
+  sh.getRange(2, 1, clearH, LATE_HEADERS.length).clearContent().setBackground(null).setFontWeight(null);
   sh.getRange(2, LATE_SEND_COL, clearH, 1).clearDataValidations();
+  sh.getRange(2, LATE_PLAN_COL, clearH, 1).clearDataValidations();
   if (last < 2) return;
   const today = new Date(), feePct = lateFeeRate_(), grace = moraGraceDays_(), capFrac = moraCapFrac_(), rows = [];
   for (let row = 2; row <= last; row++) {
@@ -1873,8 +1906,13 @@ function rebuildLateSheet_(ss) {
     const out = round2_(base + feeAccum);                                // monto a pagar hoy = saldo + mora
     if (out <= 0) continue; // vencido pero saldado (y sin mora / mora condonada)
     const lastNotice = bs.getRange(row, PB.NOTICE).getValue(); // "Último Aviso" del prestatario
+    // "Tope de mora": % del recargo acumulado respecto de su tope (capital × tope configurado).
+    const capMax = round2_(loan.principal * capFrac);
+    const pct = capMax > 0 ? Math.round(feeAccum / capMax * 100) : 0;
+    const atCap = capMax > 0 && pct >= 100;
     rows.push([loan.loanId, loan.name, loan.dni, loan.email, loan.phone, loan.dueDate, days,
-      loan.totalDue, feeAccum, totalPaid, out, false, (lastNotice instanceof Date) ? lastNotice : '']);
+      loan.totalDue, feeAccum, totalPaid, out, false, (lastNotice instanceof Date) ? lastNotice : '',
+      atCap ? 'SÍ (100%)' : pct + '%', false, '']);
   }
   rows.sort((a, b) => b[6] - a[6]); // más atrasados primero
   if (rows.length) {
@@ -1885,6 +1923,13 @@ function rebuildLateSheet_(ss) {
     sh.getRange(2, 7, rows.length, 1).setNumberFormat('0');
     sh.getRange(2, LATE_SEND_COL, rows.length, 1).insertCheckboxes();
     sh.getRange(2, LATE_SENT_COL, rows.length, 1).setNumberFormat('yyyy-mm-dd');
+    sh.getRange(2, LATE_PLAN_COL, rows.length, 1).insertCheckboxes();
+    sh.getRange(2, LATE_PLAN_SENT_COL, rows.length, 1).setNumberFormat('yyyy-mm-dd');
+    // Resaltar los préstamos que llegaron al tope de mora (candidatos a plan de pago).
+    rows.forEach((r, i) => {
+      if (String(r[LATE_CAP_COL - 1]).indexOf('SÍ') === 0)
+        sh.getRange(i + 2, LATE_CAP_COL).setBackground('#f4cccc').setFontWeight('bold');
+    });
   }
 }
 
@@ -1903,6 +1948,7 @@ function setupHelp_(ss) {
     ['6) Intereses: 15 días = 25%, 1 mes = 50%, 2 meses = 100%. Tras el vencimiento: recargo por mora de ' + lateFeePctText_() + ' por día sobre el total a devolver' + (moraGraceDays_() > 0 ? ', tras ' + moraGraceDays_() + ' día(s) de gracia' : '') + ', con tope del ' + moraCapPctText_() + ' del capital.'],
     ['   Los préstamos vencidos con saldo aparecen en la hoja "Pagos Atrasados".'],
     ['   En "Pagos Atrasados", tilde "Enviar Aviso ✉" para mandar un aviso de mora por correo; la fecha queda en "Último Aviso Enviado".'],
+    ['   Cuando "Tope de mora" muestra SÍ (100%), el recargo llegó a su máximo: tilde "Plan de pago 📅 (3 cuotas)" para reestructurar la deuda congelada en 3 cuotas mensuales y enviar el plan por correo al prestatario.'],
     ['7) Estados: ACTIVO, VENCIDO, PAGADO. El Panel muestra indicadores y próximos vencimientos.'],
     ['   Saldados: use "✔ Mover préstamos saldados" (menú o Panel) para archivar los préstamos pagados en la hoja "Saldados".'],
     ['8) Recordatorios: se envían automáticamente antes del vencimiento y en mora.'],
@@ -2660,8 +2706,9 @@ function sbSendDisbursementReceipt(loanId) {
  * @param {Date}   [primeraFecha] vencimiento de la 1.ª cuota (por defecto: hoy + 30 días).
  * @return {{loanId:string, owed:number, plan:Array}} resumen del plan.
  */
-function restructurarPrestamo_(loanId, nCuotas, primeraFecha) {
+function restructurarPrestamo_(loanId, nCuotas, primeraFecha, opts) {
   return guard_('restructurarPrestamo_', function () {
+    opts = opts || {};
     const ss = getSS_(), bs = ss.getSheetByName(CFG.SHEETS.BORROWERS);
     if (!bs || bs.getLastRow() < 2) throw new Error('Falta la hoja "Prestatarios" o no tiene préstamos.');
     // Resolver el ID desde la fila activa si no se pasó explícitamente.
@@ -2702,6 +2749,17 @@ function restructurarPrestamo_(loanId, nCuotas, primeraFecha) {
     const origDue = bs.getRange(row, dueC).getValue();
     bs.getRange(row, dueC).setValue(finalDue).setNumberFormat('yyyy-mm-dd');
 
+    // FIJAR la mora congelada en "Mora (ajuste)": al salir de "Pagos Atrasados" el
+    // recargo automático (VLOOKUP a esa hoja) vuelve a 0 y la deuda congelada se
+    // perdería de "Saldo con Mora"/Estado. La fórmula deja la mora restante del plan:
+    // adeudado congelado − pagos posteriores, sin contar lo que aún cubre capital+interés.
+    const paid0 = round2_(pays.reduce((s, p) => s + p.amount, 0));
+    const moraCongelada = round2_(Math.max(0, owed - Math.max(0, round2_(loan.totalDue - paid0))));
+    const adjC = colByAny_(headerIndex_(bs), ['Mora (ajuste)']) || PB.MORA_ADJ;
+    const TO = colL_(PB.TOTAL), PA = colL_(PB.PAID);
+    if (adjC) bs.getRange(row, adjC).setFormula(
+      `=MAX(0,${round2_(owed + paid0)}-$${PA}${row}-MAX(0,$${TO}${row}-$${PA}${row}))`);
+
     // Registrar el plan como nota auditable en la celda del ID del préstamo.
     const planTxt = plan.map(p => '  Cuota ' + p.n + '/' + n + ': ' + fmtMoney_(p.monto) + ' — vence ' + fmtDate_(p.due)).join('\n');
     bs.getRange(row, PB.LOAN_ID).setNote(
@@ -2710,10 +2768,11 @@ function restructurarPrestamo_(loanId, nCuotas, primeraFecha) {
       'Adeudado congelado (capital + interés + mora a hoy): ' + fmtMoney_(owed) + '.\n' +
       'Plan de pago:\n' + planTxt + '\n' +
       'La mora deja de crecer mientras se cumpla el plan (vencimiento movido al ' + fmtDate_(finalDue) + ').\n' +
+      'Mora congelada (' + fmtMoney_(moraCongelada) + ') fijada en "Mora (ajuste)"; el menú 💸 Mora la puede condonar/cambiar.\n' +
       'Registrá cada pago en la hoja "Pagos" como siempre.');
 
-    try { ss.toast(loanId + ' reestructurado: ' + fmtMoney_(owed) + ' en ' + n + ' cuota(s). Mora congelada al ' + fmtDate_(today) + '.', '🔄 Reestructuración', 8); } catch (e) { }
-    return { loanId: loanId, owed: owed, plan: plan };
+    if (!opts.silent) try { ss.toast(loanId + ' reestructurado: ' + fmtMoney_(owed) + ' en ' + n + ' cuota(s). Mora congelada al ' + fmtDate_(today) + '.', '🔄 Reestructuración', 8); } catch (e) { }
+    return { loanId: loanId, owed: owed, plan: plan, paid0: paid0, mora: moraCongelada, row: row };
   });
 }
 
@@ -2727,6 +2786,78 @@ function restructurarPrestamoUI() {
   const out = restructurarPrestamo_(null, n, null);
   if (out && out.owed) ui.alert('Reestructuración aplicada',
     out.loanId + ': ' + fmtMoney_(out.owed) + ' en ' + out.plan.length + ' cuota(s). El detalle quedó en la nota de la celda del ID. La mora dejó de crecer.', ui.ButtonSet.OK);
+}
+
+/**
+ * Casilla "Plan de pago 📅 (3 cuotas)" de "Pagos Atrasados": reestructura el préstamo
+ * de la fila en 3 cuotas mensuales iguales (deuda con mora congelada a hoy), reemplaza
+ * sus filas de "Cuotas" por las del plan y envía el plan por correo al prestatario.
+ * La columna "Tope de mora" indica los candidatos (SÍ = recargo al máximo), pero se
+ * puede aplicar antes de llegar al tope si el prestamista lo decide.
+ */
+function planPagoDesdeAtrasos_(sh, row) {
+  const ss = getSS_();
+  const loanId = String(sh.getRange(row, 1).getValue()).trim();
+  if (!loanId) { ss.toast('La fila seleccionada no tiene un préstamo.', '⚠ Plan de pago', 6); return; }
+  const loan = findLoanById_(loanId);
+  if (!loan) { ss.toast('No se encontró el préstamo ' + loanId + ' en "Prestatarios".', '⚠ Plan de pago', 6); return; }
+  // Guardas: ya reestructurado / al día (el vencimiento movido queda en el futuro), o
+  // plan ya enviado hoy desde esta misma hoja (evita doble clic → doble correo).
+  if (daysLate_(loan.dueDate, new Date()) <= 0) {
+    ss.toast(loanId + ' ya está reestructurado o al día (vencimiento ' + fmtDate_(loan.dueDate) + '). No se aplicó otro plan.', '⚠ Plan de pago', 8);
+    return;
+  }
+  if (sh.getRange(row, LATE_PLAN_SENT_COL).getValue() instanceof Date) {
+    ss.toast(loanId + ': el plan ya fue enviado (ver "Plan enviado").', '⚠ Plan de pago', 6);
+    return;
+  }
+
+  // 1) Reestructurar (congela mora, mueve vencimiento, fija "Mora (ajuste)", anota el plan).
+  const out = restructurarPrestamo_(loanId, 3, null, { silent: true });
+
+  // 2) Cuotas: reemplazar las filas viejas (VENCIDAS) por las 3 del plan. paidOffset evita
+  //    que los pagos previos al plan se dupliquen en el reparto (el plan ya es neto de ellos).
+  const cs = ss.getSheetByName(CFG.SHEETS.INSTALLMENTS) || (typeof setupCuotas_ === 'function' ? setupCuotas_(ss) : null);
+  if (cs) {
+    deleteCuotasRowsForLoan_(cs, loanId);
+    cuotasForLoan_(cs, loanId, loan.loanDate, out.owed, 3, null, { dates: out.plan.map(p => p.due), paidOffset: out.paid0 });
+  }
+
+  // 3) Correo al prestatario (respaldo: el correo de la fila de "Pagos Atrasados").
+  const email = String(loan.email || sh.getRange(row, 4).getValue() || '').trim();
+  let mailMsg;
+  if (email) { emailPlanPago_(loan, out, email); mailMsg = 'plan enviado a ' + email; }
+  else mailMsg = 'SIN CORREO: plan aplicado pero no se envió aviso';
+
+  // 4) Sello + aviso.
+  sh.getRange(row, LATE_PLAN_SENT_COL).setValue(new Date()).setNumberFormat('yyyy-mm-dd');
+  ss.toast(loanId + ' reestructurado: ' + fmtMoney_(out.owed) + ' en 3 cuotas; ' + mailMsg + '.', '📅 Plan de pago', 8);
+}
+
+/** Correo con el plan de pago en 3 cuotas (deuda congelada, fechas y montos). */
+function emailPlanPago_(loan, out, toEmail) {
+  const to = String(toEmail || loan.email || '').trim();
+  if (!to) return;
+  const cuotasTxt = out.plan.map(p => 'Cuota ' + p.n + ' de ' + out.plan.length + ': ' + fmtMoney_(p.monto) + ' — vence el ' + fmtDate_(p.due)).join('. ');
+  const filas = out.plan.map(p =>
+    '<tr><td style="padding:6px 10px;border:1px solid #d7dee8">Cuota ' + p.n + ' de ' + out.plan.length + '</td>' +
+    '<td style="padding:6px 10px;border:1px solid #d7dee8;text-align:right"><b>' + fmtMoney_(p.monto) + '</b></td>' +
+    '<td style="padding:6px 10px;border:1px solid #d7dee8">' + esc_(fmtDate_(p.due)) + '</td></tr>').join('');
+  sendBrandedEmail_(to, 'Plan de pago en 3 cuotas — préstamo ' + loan.loanId,
+    'Estimado/a ' + loan.name + ': su préstamo ' + loan.loanId + ' fue reestructurado en un plan de 3 cuotas mensuales. ' +
+    'La deuda quedó congelada al día de hoy en ' + fmtMoney_(out.owed) + ' (incluye capital, interés y recargo por mora). ' +
+    cuotasTxt + '. El recargo por mora deja de crecer mientras cumpla el plan. ' +
+    'Si realizó un pago recientemente, se descuenta de la primera cuota.',
+    '<p>Estimado/a ' + esc_(loan.name) + ',</p>' +
+    '<p>Le informamos que su préstamo <b>' + esc_(loan.loanId) + '</b> fue reestructurado en un <b>plan de pago de 3 cuotas mensuales</b>. ' +
+    'El monto total adeudado quedó <b>congelado al día de hoy en ' + fmtMoney_(out.owed) + '</b> (incluye capital, interés y el recargo por mora acumulado).</p>' +
+    '<table style="border-collapse:collapse;margin:10px 0;font-size:14px">' +
+    '<tr><th style="padding:6px 10px;border:1px solid #d7dee8;background:#eef3fb;text-align:left">Cuota</th>' +
+    '<th style="padding:6px 10px;border:1px solid #d7dee8;background:#eef3fb;text-align:right">Monto</th>' +
+    '<th style="padding:6px 10px;border:1px solid #d7dee8;background:#eef3fb;text-align:left">Vencimiento</th></tr>' +
+    filas + '</table>' +
+    '<p><b>El recargo por mora deja de crecer mientras cumpla el plan.</b> Le pedimos abonar cada cuota a más tardar en su fecha de vencimiento.</p>' +
+    '<p>Si ya realizó un pago reciente, será descontado de la primera cuota. Ante cualquier duda, responda este correo.</p>');
 }
 
 /**
@@ -3806,6 +3937,16 @@ function onEditInstallable(e) {
             sh.getRange(row, LATE_SENT_COL).setValue(res.date).setNumberFormat('yyyy-mm-dd');
             getSS_().toast(res.message, 'Aviso de mora', 5);
           } catch (err) { logError_('onEdit:LATE', err); getSS_().toast(err.message || String(err), '⚠ No se pudo enviar', 8); }
+        }
+      }
+      // Casilla "Plan de pago 📅 (3 cuotas)": reestructura la deuda congelada en 3 cuotas
+      // mensuales y envía el plan por correo. La columna "Tope de mora" marca los candidatos.
+      if (LATE_PLAN_COL >= c0 && LATE_PLAN_COL <= cN) {
+        for (let row = rN; row >= r0; row--) {
+          if (sh.getRange(row, LATE_PLAN_COL).getValue() !== true) continue;
+          sh.getRange(row, LATE_PLAN_COL).setValue(false);
+          try { planPagoDesdeAtrasos_(sh, row); }
+          catch (err) { logError_('onEdit:LATE:planPago', err); getSS_().toast(err.message || String(err), '⚠ No se pudo reestructurar', 8); }
         }
       }
     } else if (name === CFG.SHEETS.NEW) {
