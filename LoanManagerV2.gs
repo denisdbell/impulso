@@ -252,11 +252,11 @@ function lateFeeRate_() {
 }
 function lateFeePctText_() { return round2_(lateFeeRate_() * 100) + '%'; }
 
-/** Días de gracia antes de que empiece a correr la mora (Configuración). Predet. 3. */
+/** Días de gracia antes de que empiece a correr la mora (Configuración). Predet. 0 (sin gracia). */
 function moraGraceDays_() {
   const raw = String(getSetting_('Días de gracia antes de mora') || '').replace(/[^0-9.\-]/g, '').trim();
-  const n = raw === '' ? 3 : Number(raw);
-  return (isFinite(n) && n >= 0) ? Math.floor(n) : 3;
+  const n = raw === '' ? 0 : Number(raw);
+  return (isFinite(n) && n >= 0) ? Math.floor(n) : 0;
 }
 /** Tope acumulado de mora como FRACCIÓN del capital (Configuración "Tope de mora (% del capital)").
  *  Predeterminado 100% (comportamiento contractual previo) si el ajuste falta. */
@@ -392,11 +392,18 @@ function applyFeatureUpdates() {
         setSettingValue_(stsh, 'Límite tras 1 préstamo saldado', '300000');
       if (stsh && String(getSetting_('Límite tras 2 préstamos saldados') || '').trim() === '')
         setSettingValue_(stsh, 'Límite tras 2 préstamos saldados', '500000');
-      // Recuperación (mora más gradual): 3 días de gracia + tope de mora al 50% del capital.
-      if (stsh && String(getSetting_('Días de gracia antes de mora') || '').trim() === '')
-        setSettingValue_(stsh, 'Días de gracia antes de mora', '3');
-      if (stsh && String(getSetting_('Tope de mora (% del capital)') || '').trim() === '')
-        setSettingValue_(stsh, 'Tope de mora (% del capital)', '50');
+      // Mora: sin días de gracia y tope al 100% del capital. Migra los valores
+      // sembrados por la versión anterior (3 / 50); respeta cualquier otro valor manual.
+      if (stsh) {
+        const grace = String(getSetting_('Días de gracia antes de mora') || '').trim();
+        if (grace === '' || grace === '3') setSettingValue_(stsh, 'Días de gracia antes de mora', '0');
+        const tope = String(getSetting_('Tope de mora (% del capital)') || '').trim();
+        if (tope === '' || tope === '50') setSettingValue_(stsh, 'Tope de mora (% del capital)', '100');
+        // Actualiza la Cláusula de Mora solo si conserva el texto sembrado anterior (mencionaba la gracia).
+        const clause = String(getSetting_('Cláusula de Mora') || '').trim();
+        if (clause === '' || /tras un período de gracia/.test(clause))
+          setSettingValue_(stsh, 'Cláusula de Mora', 'En caso de mora se aplica un recargo diario sobre el total a devolver por cada día de atraso posterior al vencimiento, con un tope acumulado como porcentaje del capital. Los valores vigentes (recargo diario y tope) se configuran en esta hoja.');
+      }
     } catch (e) { logError_('applyFeatureUpdates:concentracionDefault', e); }
     // 2) Acta de firma ampliada (agrega encabezados IP/hash/CUIL/domicilio; no borra filas).
     setupFirmas_(ss); done.push('columnas de auditoría en «Firmas»');
@@ -528,10 +535,10 @@ function setupSettings_(ss) {
     ['Teléfono del Prestamista', ''],
     ['Dirección del Prestamista', ''],
     ['Jurisdicción', 'Buenos Aires, Argentina'],
-    ['Cláusula de Mora', 'En caso de mora se aplica un recargo diario sobre el total a devolver por cada día de atraso posterior al vencimiento, tras un período de gracia, con un tope acumulado como porcentaje del capital. Los valores vigentes (recargo diario, días de gracia y tope) se configuran en esta hoja.'],
+    ['Cláusula de Mora', 'En caso de mora se aplica un recargo diario sobre el total a devolver por cada día de atraso posterior al vencimiento, con un tope acumulado como porcentaje del capital. Los valores vigentes (recargo diario y tope) se configuran en esta hoja.'],
     ['Recargo por Mora diario (%)', '5'],
-    ['Días de gracia antes de mora', '3'],
-    ['Tope de mora (% del capital)', '50'],
+    ['Días de gracia antes de mora', '0'],
+    ['Tope de mora (% del capital)', '100'],
     ['Límite inicial (préstamo nuevo)', '150000'],
     ['Límite tras 1 préstamo saldado', '300000'],
     ['Límite tras 2 préstamos saldados', '500000'],
@@ -1183,7 +1190,7 @@ function setupStatements_(ss) {
     ['Días de Atraso', `=IFERROR(IF($B$14="","",IF($B$14<=0.009,0,IF(VLOOKUP($B$4,'${B}'!$A:$I,9,FALSE)="","",MAX(0,TODAY()-VLOOKUP($B$4,'${B}'!$A:$I,9,FALSE))))),"")`], // 12
     // Recargo por mora = días de atraso MENOS la gracia, × recargo diario × Total, con
     // TOPE = (Tope de mora %) × Capital ($B$9). Espeja computeOutstanding_ (gracia + tope).
-    ['Recargo por Mora (acum.)', `=IFERROR(IF(OR($B$12="",$B$12<=0),0,MIN(MAX(0,$B$12-IFERROR(VLOOKUP("Días de gracia antes de mora",'${CFG.SHEETS.SETTINGS}'!$A:$B,2,FALSE),3))*$B$10*IFERROR(VLOOKUP("Recargo por Mora diario (%)",'${CFG.SHEETS.SETTINGS}'!$A:$B,2,FALSE)/100,0.05),$B$9*IFERROR(VLOOKUP("Tope de mora (% del capital)",'${CFG.SHEETS.SETTINGS}'!$A:$B,2,FALSE)/100,1))),"")`], // 13
+    ['Recargo por Mora (acum.)', `=IFERROR(IF(OR($B$12="",$B$12<=0),0,MIN(MAX(0,$B$12-IFERROR(VLOOKUP("Días de gracia antes de mora",'${CFG.SHEETS.SETTINGS}'!$A:$B,2,FALSE),0))*$B$10*IFERROR(VLOOKUP("Recargo por Mora diario (%)",'${CFG.SHEETS.SETTINGS}'!$A:$B,2,FALSE)/100,0.05),$B$9*IFERROR(VLOOKUP("Tope de mora (% del capital)",'${CFG.SHEETS.SETTINGS}'!$A:$B,2,FALSE)/100,1))),"")`], // 13
     ['Saldo Pendiente', `=IFERROR(VLOOKUP($B$4,'${B}'!$A:$M,13,FALSE),"")`],  // 14
     ['Fecha de Vencimiento', `=IFERROR(VLOOKUP($B$4,'${B}'!$A:$I,9,FALSE),"")`], // 15
     ['ESTADO', `=IFERROR(VLOOKUP($B$4,'${B}'!$A:$N,14,FALSE),"")`],           // 16
