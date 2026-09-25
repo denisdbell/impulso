@@ -114,6 +114,9 @@ function onOpen() {
       .addItem('Condonar mora (poner en 0)', 'condonarMoraFilaActiva')
       .addItem('Fijar un importe de mora…', 'fijarMoraFilaActiva')
       .addItem('Restaurar mora automática', 'restaurarMoraFilaActiva'))
+    .addSubMenu(SpreadsheetApp.getUi().createMenu('🚫 Bloqueo de clientes (fila activa en Clientes)')
+      .addItem('Bloquear cliente…', 'bloquearClienteFilaActiva')
+      .addItem('Desbloquear cliente', 'desbloquearClienteFilaActiva'))
     .addSeparator()
     .addSubMenu(SpreadsheetApp.getUi().createMenu('🗂 Pestañas')
       .addItem('Ver solo operaciones diarias', 'showDailyOnly')
@@ -3272,6 +3275,9 @@ function submitIntake(form) {
     if (!form.agree) throw new Error('Debe aceptar los Términos y Condiciones para enviar la solicitud.');
     if (!hasFile_(form.dniPhoto)) throw new Error('Adjunte la foto del DNI.');
     if (!hasFile_(form.cuilPhoto)) throw new Error('Adjunte la foto del CUIL.');
+    // V-33 — cliente bloqueado (correo/DNI/teléfono): también en el formulario clásico.
+    if (typeof findClienteBloqueado_ === 'function' && findClienteBloqueado_({ email: email, dni: dni, phone: phone }))
+      throw new Error(typeof BLOQUEO_MSG_CLIENTE !== 'undefined' ? BLOQUEO_MSG_CLIENTE : 'No es posible procesar solicitudes para este cliente.');
     const rate = termRate_(term), interest = round2_(amount * rate), total = round2_(amount * (1 + rate));
     const folder = borrowerFolder_(borrowerFolderName_(name, dni));
     const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd-HHmmss');

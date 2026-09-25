@@ -816,6 +816,13 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
   if (!natId || !workId) return fail('Faltan las fotos del DNI (frente/dorso)');
   // V-02: el DNI no puede pertenecer a otra persona.
   if (typeof dniBelongsToOtherName_ === 'function' && dniBelongsToOtherName_(dnV.norm, name)) return fail('El DNI ya está registrado a nombre de otra persona');
+  // V-33: cliente bloqueado (correo/DNI/CUIL/teléfono). ABSOLUTO: se chequea temprano
+  // (antes que referencias/BCRA, para que el mensaje de bloqueo prevalezca) y NO se
+  // anula con "Anular límites". Desbloquear = vaciar "Bloqueado" en Clientes.
+  if (typeof findClienteBloqueado_ === 'function') {
+    const blk = findClienteBloqueado_({ email: email, dni: dnV.norm, phone: phone, cuil: String(g('CUIL') || '') });
+    if (blk) return fail('V-33 — Cliente bloqueado (' + (blk.id || blk.dniNorm) + '). No se anula con «Anular límites».' + (blk.bloqueoMotivo ? ' Motivo: ' + blk.bloqueoMotivo : ''));
+  }
 
   // V-27: DOS referencias con teléfono válido son OBLIGATORIAS para aprobar.
   // NO se anula con "Anular límites" (override sólo omite fondos/concentración/tope/BCRA).
@@ -834,8 +841,10 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
   const existing = (typeof clienteByDni_ === 'function') ? clienteByDni_(dnV.norm) : null;
   if (typeof validateApprovalV2_ === 'function') {
     // dnV.norm habilita V-32 (escalera de graduación por historial de repago), que
-    // aplica también a prestatarios nuevos (aún sin ID Cliente).
-    const chk = validateApprovalV2_(existing ? existing.id : null, amount, override, dnV.norm);
+    // aplica también a prestatarios nuevos (aún sin ID Cliente). El 5º argumento
+    // amplía la coincidencia del bloqueo V-33 a correo/teléfono/CUIL.
+    const chk = validateApprovalV2_(existing ? existing.id : null, amount, override, dnV.norm,
+      { email: email, phone: phone, cuil: String(g('CUIL') || '') });
     if (!chk.ok) return fail(chk.msg);
   }
 

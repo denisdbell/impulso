@@ -100,7 +100,8 @@ const VALIDATION_RULES = [
   ['V-29', 'Formulario', 'Monto', 'El monto no puede superar el tope configurable (por defecto $500.000).', 'El monto máximo por préstamo es $500.000.', 'BLOQUEA', 'ALTA'],
   ['V-30', 'Formulario', 'Monto/Plazo', 'El plazo/tasa/cuotas se DERIVAN del monto: ≤$150.000→elige 15d/25% o 30d/50% (1 cuota); ≤$300.000→30d/50%/1; >$300.000→90d/100%/3 cuotas.', 'El plazo se calcula según el monto.', 'BLOQUEA', 'ALTA'],
   ['V-31', 'Alta', 'Cuotas', 'Préstamo grande (>$300.000): se genera un cronograma de 3 cuotas mensuales (día 30/60/90), cada una = Total÷3.', '—', 'AUTOMÁTICO', 'ALTA'],
-  ['V-32', 'Aprobación', 'Monto', 'Escalera de graduación: el monto ≤ límite por historial de repago del prestatario. Sin historial o con atrasos/mora → límite inicial; sube al saldar préstamos a tiempo.', 'Supera el límite por historial del prestatario. Se amplía con repagos a tiempo o con «Anular límites».', 'BLOQUEA', 'ALTA'],
+  ['V-32', 'Aprobación', 'Monto', 'Escalera de graduación: el monto ≤ límite por historial de repago del prestatario. Un atraso REINICIA la escalera: solo cuentan los préstamos saldados a tiempo DESPUÉS del último atraso. Mora vigente → límite inicial.', 'Supera el límite por historial del prestatario. Se recupera saldando préstamos a tiempo (aun después de un atraso), o con «Anular límites».', 'BLOQUEA', 'ALTA'],
+  ['V-33', 'Formulario y Aprobación', 'Cliente', 'Cliente BLOQUEADO (columna «Bloqueado» = SÍ en Clientes): se rechaza toda solicitud y aprobación que coincida por correo, DNI, CUIL o teléfono. ABSOLUTO: no se anula con «Anular límites». Desbloquear = vaciar la columna «Bloqueado».', 'No es posible procesar solicitudes para este cliente. Ante cualquier duda, comunicate con el prestamista.', 'BLOQUEA', 'ALTA'],
 ];
 
 /* ==================== VALIDADORES DE CAMPO ==================== */
@@ -205,9 +206,10 @@ function clientesRows_() {
     cEmailN = ccol_('Correo (norm)', 7), cPhoneN = ccol_('Teléfono (norm)', 8), cCuil = ccol_('CUIL', 12),
     cAddr = ccol_('Dirección', 13),
     cR1N = ccol_('Ref 1 Nombre', 0), cR1R = ccol_('Ref 1 Vínculo', 0), cR1P = ccol_('Ref 1 Teléfono', 0),
-    cR2N = ccol_('Ref 2 Nombre', 0), cR2R = ccol_('Ref 2 Vínculo', 0), cR2P = ccol_('Ref 2 Teléfono', 0);
+    cR2N = ccol_('Ref 2 Nombre', 0), cR2R = ccol_('Ref 2 Vínculo', 0), cR2P = ccol_('Ref 2 Teléfono', 0),
+    cBloq = ccol_('Bloqueado', 0), cBloqM = ccol_('Motivo de bloqueo', 0);
   const width = Math.max(cId, cName, cEmail, cDni, cPhone, cDniN, cEmailN, cPhoneN, cCuil, cAddr,
-    cR1N, cR1R, cR1P, cR2N, cR2R, cR2P);
+    cR1N, cR1R, cR1P, cR2N, cR2R, cR2P, cBloq, cBloqM);
   const cell = (r, c) => c ? String(r[c - 1] || '').trim() : '';
   const data = sh.getRange(2, 1, sh.getLastRow() - 1, width).getValues();
   _clientesRowsCache = data.map((r, i) => ({
@@ -220,6 +222,8 @@ function clientesRows_() {
     dniNorm: normDni_(r[cDniN - 1] || r[cDni - 1]),
     emailNorm: normEmail_(r[cEmailN - 1] || r[cEmail - 1]),
     phoneNorm: String(r[cPhoneN - 1] || '').trim() || normPhoneE164_(r[cPhone - 1]),
+    bloqueado: (function () { const v = cell(r, cBloq).toUpperCase(); return v === 'SÍ' || v === 'SI'; })(),
+    bloqueoMotivo: cell(r, cBloqM),
     row: i + 2,
   })).filter(o => o.id || o.dniNorm || o.emailNorm);
   return _clientesRowsCache;
@@ -248,6 +252,64 @@ function phoneDupOtherDni_(phoneNorm, dniNorm) {
   if (!phoneNorm) return [];
   return clientesRows_().filter(o => o.phoneNorm === phoneNorm && o.dniNorm && o.dniNorm !== dniNorm);
 }
+
+/* ==================== BLOQUEO DE CLIENTES (V-33) ==================== */
+
+// V-33 — mensaje único hacia el solicitante (no revela el motivo del bloqueo).
+const BLOQUEO_MSG_CLIENTE = 'No es posible procesar solicitudes para este cliente. Ante cualquier duda, comunicate con el prestamista.';
+
+/**
+ * V-33 — devuelve el PRIMER cliente BLOQUEADO ("Bloqueado" = SÍ en Clientes) que
+ * coincida por ID Cliente, correo, DNI, CUIL o teléfono. Los identificadores llegan
+ * crudos y se normalizan acá; los vacíos nunca coinciden. Solo lectura (usa el caché
+ * de clientesRows_; quienes escriben el bloqueo lo invalidan). null = no bloqueado.
+ */
+function findClienteBloqueado_(ident) {
+  ident = ident || {};
+  const id = String(ident.clientId || '').trim(),
+    em = normEmail_(ident.email || ''), dn = normDni_(ident.dni || ''),
+    cu = String(ident.cuil || '').replace(/\D/g, ''), ph = normPhoneE164_(ident.phone || '');
+  if (!id && !em && !dn && !cu && !ph) return null;
+  return clientesRows_().filter(o => o.bloqueado && (
+    (id && o.id === id) || (em && o.emailNorm === em) || (dn && o.dniNorm === dn) ||
+    (cu && String(o.cuil || '').replace(/\D/g, '') === cu) || (ph && o.phoneNorm === ph)
+  ))[0] || null;
+}
+
+/**
+ * Bloquea/desbloquea el cliente de la FILA ACTIVA de "Clientes" (menú 🚫). Al bloquear
+ * pide el motivo y escribe "SÍ" + motivo con fecha; al desbloquear vacía ambas celdas.
+ */
+function setClienteBloqueoFilaActiva_(bloquear) {
+  const ss = getSS_(), sh = ss.getActiveSheet(), ui = SpreadsheetApp.getUi();
+  if (sh.getName() !== CFG.SHEETS.CLIENTS) { ui.alert('Abrí la hoja "Clientes", seleccioná la fila del cliente y volvé a usar esta opción.'); return; }
+  const row = sh.getActiveRange().getRow();
+  if (row < 2) { ui.alert('Seleccioná la fila de un cliente.'); return; }
+  const cBloq = ccol_('Bloqueado', 0), cBloqM = ccol_('Motivo de bloqueo', 0);
+  if (!cBloq) { ui.alert('Falta la columna "Bloqueado". Ejecutá configurarValidaciones (o el menú de configuración) primero.'); return; }
+  const cId = ccol_('ID Cliente', 1), cName = ccol_('Nombre', 2);
+  const id = String(sh.getRange(row, cId).getValue()).trim();
+  const name = String(sh.getRange(row, cName).getValue()).trim();
+  if (!id && !name) { ui.alert('La fila seleccionada no tiene un cliente.'); return; }
+  const label = (name || id) + (name && id ? ' (' + id + ')' : '');
+  if (bloquear) {
+    const resp = ui.prompt('Bloquear cliente', 'Motivo del bloqueo para ' + label + ':', ui.ButtonSet.OK_CANCEL);
+    if (resp.getSelectedButton() !== ui.Button.OK) return;
+    const motivo = String(resp.getResponseText() || '').trim();
+    sh.getRange(row, cBloq).setValue('SÍ');
+    if (cBloqM) sh.getRange(row, cBloqM).setValue((motivo ? motivo + ' — ' : '') + 'bloqueado el ' + fmtDate_(new Date()));
+  } else {
+    sh.getRange(row, cBloq).clearContent();
+    if (cBloqM) sh.getRange(row, cBloqM).clearContent();
+  }
+  invalidateClientesRows_();
+  if (typeof invalidateClientesCache_ === 'function') invalidateClientesCache_();
+  try { ss.toast(label + (bloquear ? ' BLOQUEADO: no podrá solicitar préstamos (correo/DNI/CUIL/teléfono).' : ' desbloqueado.'), 'Bloqueo de clientes', 5); } catch (e) { }
+}
+/** Menú: bloquea el cliente de la fila activa de "Clientes" (pide el motivo). */
+function bloquearClienteFilaActiva() { setClienteBloqueoFilaActiva_(true); }
+/** Menú: desbloquea el cliente de la fila activa de "Clientes". */
+function desbloquearClienteFilaActiva() { setClienteBloqueoFilaActiva_(false); }
 
 /** Crea un cliente en el esquema extendido de 11 columnas. Devuelve ID Cliente. */
 function appendClienteV2_(name, email, dni, phone, opts) {
@@ -395,6 +457,9 @@ function lookupClienteForIntake(email, dni) {
       found: false, client: null, conflict: false, conflictField: '', hasRefs: false,
     };
     if (!dnV.ok || !emV.ok) return res;   // se necesitan correo y DNI válidos
+    // V-33 — cliente bloqueado: se corta en el paso 1 (mensaje genérico, sin detalles).
+    const blk = findClienteBloqueado_({ email: emV.norm, dni: dnV.norm });
+    if (blk) { res.blocked = true; res.blockedMsg = BLOQUEO_MSG_CLIENTE; return res; }
     // V-32 — límite por historial de repago (escalera de graduación), específico del
     // prestatario. Aplica también a clientes nuevos (aún sin historial → límite inicial).
     const h = repaymentHistory_(dnV.norm);
@@ -402,7 +467,9 @@ function lookupClienteForIntake(email, dni) {
     res.maxAmountFmt = fmtMoney_(res.maxAmount);
     res.settledCount = h.settledCount;
     res.onTimeCount = h.onTimeCount;
-    res.hasArrears = !!(h.everDefaulted || h.lateCount > 0);
+    // Límite reducido HOY: mora vigente, o atrasos sin repagos a tiempo posteriores
+    // (un atraso reinicia la escalera; se recupera saldando a tiempo).
+    res.hasArrears = !!(h.everDefaulted || (h.lateCount > 0 && h.onTimeCount === 0));
     const cByDni = clienteByDni_(dnV.norm);
     if (cByDni && normEmail_(cByDni.email) === emV.norm) {
       res.found = true;                   // mismo cliente (DNI + correo)
@@ -437,6 +504,11 @@ function submitIntakeSmart(form) {
     if (!emV.ok) throw new Error(emV.msg);                 // V-04
     const dnV = vDni_(form.dni);
     if (!dnV.ok) throw new Error(dnV.msg);                 // V-01
+
+    // V-33 — cliente bloqueado: rechazo ABSOLUTO por CUALQUIERA de los cuatro
+    // identificadores del formulario (correo, DNI, CUIL o teléfono).
+    if (findClienteBloqueado_({ email: emV.norm, dni: dnV.norm, cuil: form.cuil, phone: form.phone }))
+      throw new Error(BLOQUEO_MSG_CLIENTE);
 
     const existing = clienteByDni_(dnV.norm);
     const emailOwner = clientesRows_().filter(o => o.emailNorm === emV.norm)[0] || null;
@@ -704,15 +776,21 @@ function clientLoanCount_(clientId) {
  * Detección de ATRASO: se marca `lateCount` si CUALQUIER préstamo (en cualquier estado)
  * tiene un pago posterior a su Fecha de Vencimiento. Como los pagos son cronológicos, el
  * último pago > vencimiento ⇔ hubo al menos un pago tardío. `everDefaulted` = tiene una
- * mora VIGENTE hoy. Un solo atraso (lateCount>0) o una mora vigente basta para que
- * graduationMax_ devuelva al escalón inicial. `onTimeCount` cuenta SOLO préstamos saldados
- * a tiempo (para subir de escalón). Devuelve
- *   { settledCount, onTimeCount, lateCount, everDefaulted }.
+ * mora VIGENTE hoy (fuerza el límite inicial mientras dure).
+ * ESCALERA CON REINICIO: un atraso NO degrada para siempre — reinicia la escalera.
+ * `onTimeCount` cuenta SOLO los préstamos saldados a tiempo DESPUÉS del último atraso
+ * (`lastLateTime` = fecha del pago tardío más reciente; 0 = nunca se atrasó, cuentan
+ * todos). El momento de saldado de cada préstamo es su último pago en "Pagos"
+ * (doMoveCleared_ conserva "Pagos" al archivar); si no hay pagos registrados (datos
+ * migrados) se usa "Fecha de Saldado" de "Saldados"; sin ninguna de las dos, el
+ * préstamo no suma tras un atraso (conservador). Empates: se exige estrictamente
+ * posterior (los pagos suelen guardarse solo con fecha). Devuelve
+ *   { settledCount, onTimeCount, lateCount, everDefaulted, lastLateTime }.
  * Solo lectura: NO escribe ni envía correos.
  */
 function repaymentHistory_(dni) {
   const dniN = normDni_(dni);
-  const res = { settledCount: 0, onTimeCount: 0, lateCount: 0, everDefaulted: false };
+  const res = { settledCount: 0, onTimeCount: 0, lateCount: 0, everDefaulted: false, lastLateTime: 0 };
   if (!dniN) return res;
   const ss = getSS_();
   const cli = clienteByDni_(dniN);
@@ -742,12 +820,13 @@ function repaymentHistory_(dni) {
     if (pay == null || !due || !isFinite(due.getTime())) return false;
     return pay > dayEnd_(due);
   };
-  // Registra un préstamo: `late` cuenta para la degradación (cualquier estado); `settled`
-  // (PAGADO/archivado) suma on-time para la promoción sólo si NO fue tardío.
-  const noteLoan_ = (loanId, dueDate, settled) => {
-    const late = isLate_(loanId, dueDate);
-    if (late) res.lateCount++;
-    if (settled) { res.settledCount++; if (!late) res.onTimeCount++; }
+  // Acumula los préstamos del cliente (deduplicados por ID: un préstamo puede figurar
+  // en ambas hojas a mitad de un archivado) para evaluarlos en dos pasadas.
+  const loans = [], seen = {};
+  const addLoan_ = (loanId, dueDate, settled, fallbackSettle) => {
+    const id = String(loanId || '').trim();
+    if (!id || seen[id]) return; seen[id] = true;
+    loans.push({ id: id, due: dueDate, settled: !!settled, fallbackSettle: fallbackSettle || null });
   };
 
   // 1) "Prestatarios": TODOS los préstamos del cliente (por ID Cliente, cualquier estado).
@@ -764,20 +843,44 @@ function repaymentHistory_(dni) {
       const st = String(r[stC - 1] || '').trim().toUpperCase();
       if (st === ST.OVERDUE) res.everDefaulted = true;   // mora vigente
       // Detecta un pago tardío en cualquier estado (activo/vencido/pagado); cuenta on-time sólo si PAGADO.
-      noteLoan_(r[idC - 1], r[dueC - 1], st === ST.PAID);
+      addLoan_(r[idC - 1], r[dueC - 1], st === ST.PAID);
     });
   }
 
-  // 2) "Saldados": préstamos archivados (todos saldados), por DNI.
+  // 2) "Saldados": préstamos archivados (todos saldados), por DNI. "Fecha de Saldado"
+  //    sirve de respaldo cuando el préstamo no tiene filas en "Pagos" (datos migrados).
   const cs = ss.getSheetByName(CFG.SHEETS.CLEARED);
   if (cs && cs.getLastRow() >= 2) {
     const H = headerIndex_(cs);
     const idC = colByAny_(H, ['ID Préstamo', 'ID Prestamo']) || 1;
     const dniC = colByAny_(H, ['DNI']) || 3;
     const dueC = colByAny_(H, ['Fecha de Vencimiento', 'Vencimiento']) || 12;
-    const data = cs.getRange(2, 1, cs.getLastRow() - 1, Math.max(idC, dniC, dueC)).getValues();
-    data.forEach(r => { if (normDni_(r[dniC - 1]) === dniN) noteLoan_(r[idC - 1], r[dueC - 1], true); });
+    const setC = colByAny_(H, ['Fecha de Saldado']) || 13;
+    const data = cs.getRange(2, 1, cs.getLastRow() - 1, Math.max(idC, dniC, dueC, setC)).getValues();
+    data.forEach(r => { if (normDni_(r[dniC - 1]) === dniN) addLoan_(r[idC - 1], r[dueC - 1], true, r[setC - 1]); });
   }
+
+  // Pasada 1 — atrasos y momento del ÚLTIMO atraso (el pago tardío más reciente).
+  loans.forEach(L => {
+    L.late = isLate_(L.id, L.due);
+    if (L.late) {
+      res.lateCount++;
+      const t = lastPayByLoan[L.id];
+      if (t != null && t > res.lastLateTime) res.lastLateTime = t;
+    }
+  });
+
+  // Pasada 2 — la escalera se RECONSTRUYE: solo suman on-time los préstamos saldados
+  // (sin atraso) DESPUÉS del último atraso. Sin atrasos → cuentan todos, como antes.
+  const toTime_ = v => { const t = (v instanceof Date) ? v.getTime() : Date.parse(v); return isFinite(t) ? t : null; };
+  loans.forEach(L => {
+    if (!L.settled) return;
+    res.settledCount++;
+    if (L.late) return;                                   // saldado tarde: nunca suma
+    if (!res.lastLateTime) { res.onTimeCount++; return; } // nunca se atrasó
+    const settleTime = (lastPayByLoan[L.id] != null) ? lastPayByLoan[L.id] : toTime_(L.fallbackSettle);
+    if (settleTime != null && settleTime > res.lastLateTime) res.onTimeCount++;
+  });
 
   return res;
 }
@@ -785,26 +888,35 @@ function repaymentHistory_(dni) {
 /**
  * V-32 — Techo de monto por HISTORIAL de repago (escalera de graduación). Los tramos
  * se leen de "Configuración" (ajustables sin tocar el código):
- *   • sin historial / con atraso o mora → "Límite inicial (préstamo nuevo)"  (150k)
+ *   • sin historial / con mora vigente  → "Límite inicial (préstamo nuevo)"  (150k)
  *   • ≥1 préstamo saldado a tiempo      → "Límite tras 1 préstamo saldado"   (300k)
  *   • ≥2 préstamos saldados a tiempo    → "Límite tras 2 préstamos saldados" (500k)
- * Un atraso o una mora vigente devuelve al escalón inicial.
+ * Un atraso REINICIA la escalera: solo cuentan los préstamos saldados a tiempo
+ * DESPUÉS del último atraso (onTimeCount ya viene depurado de repaymentHistory_),
+ * así el prestatario puede volver a subir. Una mora VIGENTE fuerza el límite inicial.
  */
 function graduationMax_(dni) {
   const h = repaymentHistory_(dni);
   const starter = settingMoney_('Límite inicial (préstamo nuevo)', 150000);
-  if (h.everDefaulted || h.lateCount > 0) return starter;
+  if (h.everDefaulted) return starter;
   if (h.onTimeCount >= 2) return settingMoney_('Límite tras 2 préstamos saldados', 500000);
   if (h.onTimeCount >= 1) return settingMoney_('Límite tras 1 préstamo saldado', 300000);
   return starter;
 }
 
 /**
- * V-09 + V-10 + V-12 — valida un desembolso propuesto para un cliente.
+ * V-09 + V-10 + V-12 + V-33 — valida un desembolso propuesto para un cliente.
  * Con `override = true` se omiten los topes de cantidad de préstamos y de capital
- * (para el botón "Anular límites" de Nuevos Prestatarios).
+ * (para el botón "Anular límites" de Nuevos Prestatarios). El bloqueo de cliente
+ * (V-33) es ABSOLUTO y se chequea SIEMPRE, aun con override. `ident` (opcional):
+ * { email, cuil, phone } para ampliar la coincidencia del bloqueo más allá del DNI.
  */
-function validateApprovalV2_(clientId, amount, override, dni) {
+function validateApprovalV2_(clientId, amount, override, dni, ident) {
+  // V-33 — cliente bloqueado: primero y fuera del override (no se anula).
+  const blk = findClienteBloqueado_(Object.assign({ clientId: clientId, dni: dni }, ident || {}));
+  if (blk) return { ok: false, code: 'V-33',
+    msg: 'V-33 — Cliente bloqueado (' + (blk.id || blk.dniNorm) + '). No se anula con «Anular límites».' +
+      (blk.bloqueoMotivo ? ' Motivo: ' + blk.bloqueoMotivo : '') };
   const amt = Number(amount) || 0;
   const fs = fundStats_(), avail = fs.available; // avail (acotado ≥ 0) para los topes; fs.net para mostrar el sobregiro
   if (!override) {
@@ -816,11 +928,11 @@ function validateApprovalV2_(clientId, amount, override, dni) {
     if (amt > avail)
       return { ok: false, code: 'V-09', msg: 'El préstamo (' + fmtMoney_(amt) + ') supera el capital disponible para prestar (' + fmtMoney_(fs.net) + (fs.net < 0 ? ' — sobregiro' : '') + ').' };
     // V-32 — escalera de graduación: el monto ≤ límite por historial de repago del
-    // prestatario. Sin historial (o con atrasos/mora) → límite inicial; sube al saldar
-    // préstamos a tiempo. Clave por DNI (sobrevive al archivado en "Saldados").
+    // prestatario. Sin historial o con mora vigente → límite inicial; un atraso reinicia
+    // la escalera (sube de nuevo saldando a tiempo). Clave por DNI (sobrevive a "Saldados").
     const gmax = graduationMax_(dni);
     if (gmax > 0 && amt > gmax)
-      return { ok: false, code: 'V-32', msg: 'El monto (' + fmtMoney_(amt) + ') supera el límite por historial del prestatario (' + fmtMoney_(gmax) + '). Se amplía con préstamos repagados a tiempo, o usá «Anular límites».' };
+      return { ok: false, code: 'V-32', msg: 'El monto (' + fmtMoney_(amt) + ') supera el límite por historial del prestatario (' + fmtMoney_(gmax) + '). Se amplía saldando préstamos a tiempo (los atrasos reinician la escalera), o usá «Anular límites».' };
     // Tope de concentración por prestatario: % configurable del FONDO TOTAL
     // (Configuración ▸ "Tope de concentración…"). Base estable = fondo total (no el
     // efectivo disponible, que se agota al colocar y bloquearía todo préstamo). 0 = sin tope.
@@ -855,6 +967,7 @@ function configurarValidaciones() {
   return guard_('configurarValidaciones', function () {
     const ss = getSS_();
     ensureClientesSchema_(ss);
+    ensureClienteBloqueoColumns_(ss);
     applySheetValidations_(ss);
     buildValidacionesSheet_(ss);
     SpreadsheetApp.flush();
@@ -879,19 +992,39 @@ function ensureClientesSchema_(ss) {
   return sh;
 }
 
+/**
+ * V-33 — agrega (una sola vez) las columnas "Bloqueado" y "Motivo de bloqueo" AL FINAL
+ * de "Clientes", por nombre de encabezado. NO se agregan a CLIENTES_HEADERS_V2: hojas
+ * vivas pueden tener columnas extra al final (p. ej. "Forma de Pago" de Aplicar
+ * novedades) y ensureClientesSchema_ reescribiría esos encabezados sobre los datos.
+ */
+function ensureClienteBloqueoColumns_(ss) {
+  ss = ss || getSS_();
+  const cl = ss.getSheetByName(CFG.SHEETS.CLIENTS);
+  if (!cl) return;
+  clientesHeaderCol_(cl, 'Bloqueado', true);
+  clientesHeaderCol_(cl, 'Motivo de bloqueo', true);
+  invalidateClientesHdrCache_();
+  invalidateClientesRows_();
+  if (typeof invalidateClientesCache_ === 'function') invalidateClientesCache_();
+}
+
 /** Instala validaciones de datos (listas / casillas) consistentes con el catálogo. */
 function applySheetValidations_(ss) {
   ss = ss || getSS_();
   const N = CFG.MAX_ROWS;
 
-  // Clientes: "Correo válido" (SÍ/NO) y "Duplicado" (''/REVISAR/DUPLICADO).
+  // Clientes: "Correo válido" (SÍ/NO), "Duplicado" (''/REVISAR/DUPLICADO) y "Bloqueado" (''/SÍ).
   const cl = ss.getSheetByName(CFG.SHEETS.CLIENTS);
   if (cl) {
-    const cValid = ccol_('Correo válido', 9), cDup = ccol_('Duplicado', 10);
+    const cValid = ccol_('Correo válido', 9), cDup = ccol_('Duplicado', 10), cBloq = ccol_('Bloqueado', 0);
     if (cValid) cl.getRange(2, cValid, N, 1).setDataValidation(
       SpreadsheetApp.newDataValidation().requireValueInList(['SÍ', 'NO'], true).setAllowInvalid(true).build());
     if (cDup) cl.getRange(2, cDup, N, 1).setDataValidation(
       SpreadsheetApp.newDataValidation().requireValueInList(['', 'REVISAR', 'DUPLICADO'], true).setAllowInvalid(true).build());
+    if (cBloq) cl.getRange(2, cBloq, N, 1).setDataValidation(
+      SpreadsheetApp.newDataValidation().requireValueInList(['', 'SÍ'], true).setAllowInvalid(true)
+        .setHelpText('SÍ = cliente bloqueado (no puede solicitar ni recibir préstamos). Vaciar = desbloquear.').build());
   }
 
   // V-13 — Plazo en DÍAS (15/30/60) en "Prestatarios" (col D) y "Nuevos Prestatarios" (col G).
@@ -1397,6 +1530,12 @@ function intakeSmartHtml_() {
         // El servidor revalida el formato; si algo falla, mostralo junto al campo (seguimos en el paso 1).
         if(!r.dniValid){setErr('dni',r.dniMsg,dniEl);dniEl.focus();return;}
         if(!r.emailValid){setErr('email',r.emailMsg,emailEl);emailEl.focus();return;}
+        if(r.blocked){ // V-33 — cliente bloqueado: mensaje genérico, no se avanza del paso 1
+          lookupMsg.style.background='#fdecec';lookupMsg.style.color='#a01c1c';
+          lookupMsg.textContent=r.blockedMsg||'No es posible procesar solicitudes para este cliente.';
+          lookupMsg.style.display='block';
+          return;
+        }
         if(r.conflict){
           if(r.conflictField==='dni'){setErr('dni','Este DNI ya está registrado con otro correo. Ingresá el correo registrado.',dniEl);dniEl.focus();}
           else{setErr('email','Este correo ya está registrado con otro DNI.',emailEl);emailEl.focus();}
@@ -1469,7 +1608,7 @@ function intakeSmartHtml_() {
         if(banner){
           var reason='';
           if(r){
-            if(r.hasArrears) reason=' — por atrasos previos, tu límite vuelve al inicial';
+            if(r.hasArrears) reason=' — por atrasos previos, tu límite volvió al inicial. Se recupera saldando a tiempo';
             else if(r.onTimeCount>=2) reason=' — ampliado por tu historial de pagos a tiempo';
             else if(r.onTimeCount>=1) reason=' — ampliado por tu pago a tiempo';
             else reason=' — límite inicial (aumenta al devolver a tiempo)';
