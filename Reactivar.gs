@@ -66,13 +66,18 @@ function headerIndex_(sh) {
 // Primer índice de columna que coincide con alguno de los nombres candidatos.
 function colByAny_(H, candidates) { for (const c of candidates) { const k = hkey_(c); if (H[k]) return H[k]; } return 0; }
 
-// Bloque de datos contiguo por una columna clave: desde la fila 2 hasta la
-// primera vacía (evita la fila TOTAL, que tiene la clave en blanco).
+// Bloque de datos por una columna clave: desde la fila 2 hasta la ÚLTIMA fila con
+// clave no vacía. Abarca todas las filas de datos AUNQUE haya huecos intermedios
+// (antes cortaba en el primer hueco y dejaba las filas siguientes con valores
+// estáticos migrados, sin fórmulas vivas → pagos que no se acreditaban). Las
+// fórmulas por fila se auto-protegen con IF($clave="","",…), así que los huecos
+// son inocuos. Una fila TOTAL al pie tiene la clave en blanco y queda excluida.
 function dataBlock_(sh, keyCol) {
   const maxR = sh.getLastRow(); if (maxR < 2 || !keyCol) return { first: 2, last: 1, count: 0 };
   const vals = sh.getRange(2, keyCol, maxR - 1, 1).getValues();
-  let count = 0;
-  for (let i = 0; i < vals.length; i++) { if (String(vals[i][0]).trim() === '') break; count++; }
+  let lastIdx = -1;
+  for (let i = 0; i < vals.length; i++) { if (String(vals[i][0]).trim() !== '') lastIdx = i; }
+  const count = lastIdx + 1; // filas 2 … 2+lastIdx (0 si no hay claves)
   return { first: 2, last: 1 + count, count: count };
 }
 
@@ -124,6 +129,21 @@ function ensureMoraColumns_(bs) {
   }
 }
 
+/** Inserta (una sola vez) la columna "Total a Pagar (con mora)" en "Prestatarios", justo
+ *  DESPUÉS de "Saldo con Mora" — TOTAL del plan a pagar (suma de "Monto Cuota" de "Cuotas",
+ *  estable ante los pagos). Desplaza a la derecha lo que hubiera (banner). Idempotente. */
+function ensurePlanColumn_(bs) {
+  if (colByAny_(headerIndex_(bs), ['Total a Pagar (con mora)'])) return;
+  const after = colByAny_(headerIndex_(bs), ['Saldo con Mora'])
+    || colByAny_(headerIndex_(bs), ['Recargo por Mora (acum.)'])
+    || colByAny_(headerIndex_(bs), ['Préstamos (de ' + MAX_LOANS_PER_CLIENT + ')', 'Préstamos'])
+    || PB.BALANCE_MORA;
+  bs.insertColumnsAfter(after, 1);
+  bs.getRange(1, after + 1).setValue('Total a Pagar (con mora)').setFontWeight('bold')
+    .setBackground('#1c4587').setFontColor('#fff').setWrap(true);
+  invalidateHeaderIndexCache_();
+}
+
 /** Escribe las fórmulas de "Recargo por Mora (acum.)" y "Saldo con Mora" en todo el bloque de
  *  datos de "Prestatarios" (respetando "Mora (ajuste)"). "Mora (ajuste)" queda como entrada.
  *  Usado por 🆕 Aplicar novedades para que las columnas no queden vacías sin un reactivar completo. */
@@ -136,6 +156,8 @@ function writeMoraFormulasBlock_(sh) {
   const morC = colByAny_(H, ['Recargo por Mora (acum.)']);
   const adjC = colByAny_(H, ['Mora (ajuste)']);
   const bmC = colByAny_(H, ['Saldo con Mora']);
+  const planC = colByAny_(H, ['Total a Pagar (con mora)']);
+  const TOT = a1col_(colByAny_(H, ['Total a Pagar', 'Total a pagar']) || 11);
   const MOR = morC ? a1col_(morC) : '';
   const ADJ = adjC ? a1col_(adjC) : '';
   if (morC) setColFormulas_(sh, morC, b.first, b.count, r => {
@@ -143,9 +165,11 @@ function writeMoraFormulasBlock_(sh) {
     return ADJ ? `=IF($${A}${r}="","",IF(ISNUMBER($${ADJ}${r}),MAX(0,$${ADJ}${r}),${auto}))` : `=IF($${A}${r}="","",${auto})`;
   });
   if (bmC) setColFormulas_(sh, bmC, b.first, b.count, r => MOR ? `=IF($${A}${r}="","",N($${K}${r})+N($${MOR}${r}))` : `=IF($${A}${r}="","",N($${K}${r}))`);
+  if (planC) setColFormulas_(sh, planC, b.first, b.count, r => borrowerPlanTotalFormula_(r, A, TOT));
   if (morC) fmtCol_(sh, morC, b.first, b.count, CFG.CURRENCY_FMT);
   if (adjC) { fmtCol_(sh, adjC, b.first, b.count, CFG.CURRENCY_FMT); sh.getRange(1, adjC).setNote('AJUSTE MANUAL de la mora. Vacío = automático. 0 = condonar. Un importe = fijar ese recargo.'); }
   if (bmC) fmtCol_(sh, bmC, b.first, b.count, CFG.CURRENCY_FMT);
+  if (planC) { fmtCol_(sh, planC, b.first, b.count, CFG.CURRENCY_FMT); sh.getRange(1, planC).setNote('Total del PLAN a pagar, incluyendo la mora congelada (para préstamos reestructurados = total del plan de cuotas). Suma de "Monto Cuota" de "Cuotas"; NO cambia con los pagos. "Saldo con Mora" muestra lo que aún falta pagar.'); }
 }
 
 /** Agrega/actualiza (idempotente) una regla de formato condicional "≥ n" sobre una
@@ -203,11 +227,12 @@ function installNewFeatureColumns_(ss) {
     }
     bs.getRange(1, cntCol).setNote('Préstamos vigentes del prestatario (máximo ' + MAX_LOANS_PER_CLIENT + ').');
     ensureMoraColumns_(bs); // columnas separadas Recargo / Mora (ajuste) / Saldo con Mora (tras "Préstamos (de N)")
-    writeMoraFormulasBlock_(bs); // rellena las fórmulas para que no queden vacías con 🆕 solo
+    ensurePlanColumn_(bs);  // "Total a Pagar (con mora)" = total del plan (tras "Saldo con Mora")
+    writeMoraFormulasBlock_(bs); // rellena las fórmulas (mora + total del plan) para que no queden vacías con 🆕 solo
 
     if (capC && pagC) {
       try {
-        const capL = a1col_(capC), pagL = a1col_(pagC), bannerCol = cntCol + 4; // deja lugar a las 3 columnas de mora
+        const capL = a1col_(capC), pagL = a1col_(pagC), bannerCol = cntCol + 5; // deja lugar a las 3 columnas de mora + "Total a Pagar (con mora)"
         bs.getRange(1, bannerCol, 1, 3).breakApart();
         const banner = bs.getRange(1, bannerCol, 1, 3).merge();
         banner.setFormula('="Capital disponible (máx. asignable): " & TEXT((' + fondoFormula_() +
@@ -332,6 +357,7 @@ function reactivateBorrowers_(ss) {
   const sh = ss.getSheetByName(CFG.SHEETS.BORROWERS); if (!sh) return 'hoja ausente';
   const pg = ss.getSheetByName(CFG.SHEETS.PAYMENTS);
   ensureMoraColumns_(sh); // columnas separadas de mora (Recargo por Mora / Saldo con Mora)
+  ensurePlanColumn_(sh);  // "Total a Pagar (con mora)" = total del plan (tras "Saldo con Mora")
   const H = headerIndex_(sh);
   const idC = colByAny_(H, ['ID Préstamo', 'ID Prestamo']);
   const cliC = colByAny_(H, ['ID Cliente']);
@@ -347,6 +373,7 @@ function reactivateBorrowers_(ss) {
   const morC = colByAny_(H, ['Recargo por Mora (acum.)']);
   const adjC = colByAny_(H, ['Mora (ajuste)']);
   const bmC = colByAny_(H, ['Saldo con Mora']);
+  const planC = colByAny_(H, ['Total a Pagar (con mora)']);
   const estC = colByAny_(H, ['Estado']);
   const firmaC = colByAny_(H, ['Estado de Firma']);
   if (!idC) return 'falta ID Préstamo';
@@ -382,6 +409,8 @@ function reactivateBorrowers_(ss) {
   }
   // Saldo con Mora = Saldo Pendiente + Recargo por Mora = monto a pagar HOY.
   if (bmC) setColFormulas_(sh, bmC, b.first, b.count, r => MOR ? `=IF($${A}${r}="","",N($${K}${r})+N($${MOR}${r}))` : `=IF($${A}${r}="","",N($${K}${r}))`);
+  // Total a Pagar (con mora) = TOTAL del plan (Σ "Monto Cuota" de "Cuotas"); estable ante los pagos.
+  if (planC) setColFormulas_(sh, planC, b.first, b.count, r => borrowerPlanTotalFormula_(r, A, I));
   // V-16: Estado se DERIVA del monto a pagar (Saldo con Mora) y la fecha. PAGADO sólo si nada
   // se debe, incluida la mora. V-15: sin mora si saldo 0.
   if (estC) setColFormulas_(sh, estC, b.first, b.count, r => `=IF($${A}${r}="","",IF($${BM}${r}<=0,"${ST.PAID}",IF(OR(${cuotaVencidaExpr_('$' + A + r)},TODAY()>$${G}${r}),"${ST.OVERDUE}","${ST.ACTIVE}")))`);
@@ -408,6 +437,7 @@ function reactivateBorrowers_(ss) {
   if (morC) fmtCol_(sh, morC, b.first, b.count, CFG.CURRENCY_FMT);
   if (adjC) { fmtCol_(sh, adjC, b.first, b.count, CFG.CURRENCY_FMT); sh.getRange(1, adjC).setNote('AJUSTE MANUAL de la mora. Vacío = automático. 0 = condonar. Un importe = fijar ese recargo.'); }
   if (bmC) fmtCol_(sh, bmC, b.first, b.count, CFG.CURRENCY_FMT);
+  if (planC) { fmtCol_(sh, planC, b.first, b.count, CFG.CURRENCY_FMT); sh.getRange(1, planC).setNote('Total del PLAN a pagar, incluyendo la mora congelada (para préstamos reestructurados = total del plan de cuotas). Suma de "Monto Cuota" de "Cuotas"; NO cambia con los pagos. "Saldo con Mora" muestra lo que aún falta pagar.'); }
   fmtCol_(sh, tasC, b.first, b.count, '0%');
   fmtCol_(sh, fecC, b.first, b.count, 'yyyy-mm-dd');
   fmtCol_(sh, venC, b.first, b.count, 'yyyy-mm-dd');
@@ -426,7 +456,7 @@ function reactivateBorrowers_(ss) {
 
   // Protección (aviso) de columnas de fórmula.
   clearReactivarProtections_(sh);
-  protectFormulaCols_(sh, [tasC, venC, intC, totC, pagC, salC, estC], b.first, b.count);
+  protectFormulaCols_(sh, [tasC, venC, intC, totC, pagC, salC, estC, planC], b.first, b.count);
 
   return b.count + ' préstamos · fórmulas Tasa/Venc/Interés/Total/Pagado/Saldo/Estado + validaciones + formato';
 }
@@ -475,6 +505,8 @@ function writeBorrowerRowFormulas_(bs, r) {
     : `=IF($${A}${r}="","",${moraFrag})`);
   // Saldo con Mora = Saldo Pendiente + Recargo por Mora = monto a pagar HOY.
   setF(['Saldo con Mora'], MOR ? `=IF($${A}${r}="","",N($${K}${r})+N($${MOR}${r}))` : `=IF($${A}${r}="","",N($${K}${r}))`);
+  // Total a Pagar (con mora) = TOTAL del plan (Σ "Monto Cuota" de "Cuotas"); estable ante los pagos.
+  setF(['Total a Pagar (con mora)'], borrowerPlanTotalFormula_(r, A, I));
   // Estado: PAGADO sólo cuando el "Saldo con Mora" llega a 0 (incluye la mora pendiente).
   setF(['Estado'], `=IF($${A}${r}="","",IF($${BM}${r}<=0,"${ST.PAID}",IF(OR(${cuotaVencidaExpr_('$' + A + r)},TODAY()>$${G}${r}),"${ST.OVERDUE}","${ST.ACTIVE}")))`);
 }
@@ -565,7 +597,7 @@ function reactivateResumen_(ss) {
   const capC = colByAny_(H, ['Capital Total']);
   const intC = colByAny_(H, ['Interés Total', 'Interes Total']);
   const pagC = colByAny_(H, ['Total Pagado']);
-  const salC = colByAny_(H, ['Saldo Pendiente']);
+  const salC = colByAny_(H, ['Saldo Total Pendiente', 'Saldo Pendiente']); // la columna del Resumen es "Saldo Total Pendiente"
   const estC = colByAny_(H, ['Estado']);
   if (!idC) return 'falta ID Cliente';
   const b = dataBlock_(sh, idC); if (!b.count) return 'sin datos';
@@ -576,6 +608,7 @@ function reactivateResumen_(ss) {
   const bIntL = a1col_(colByAny_(BH, ['Interés', 'Interes']) || 8);
   const bPagL = a1col_(colByAny_(BH, ['Total Pagado']) || 10);
   const bSalL = a1col_(colByAny_(BH, ['Saldo Pendiente']) || 11);
+  const bEstL = a1col_(colByAny_(BH, ['Estado']) || 14);
   const A = a1col_(idC), G = a1col_(salC);
 
   if (nameC && cl) {
@@ -588,7 +621,9 @@ function reactivateResumen_(ss) {
   if (intC) setColFormulas_(sh, intC, b.first, b.count, r => `=SUMIF('${BSN}'!$${bCliL}:$${bCliL},$${A}${r},'${BSN}'!$${bIntL}:$${bIntL})`);
   if (pagC) setColFormulas_(sh, pagC, b.first, b.count, r => `=SUMIF('${BSN}'!$${bCliL}:$${bCliL},$${A}${r},'${BSN}'!$${bPagL}:$${bPagL})`);
   if (salC) setColFormulas_(sh, salC, b.first, b.count, r => `=SUMIF('${BSN}'!$${bCliL}:$${bCliL},$${A}${r},'${BSN}'!$${bSalL}:$${bSalL})`);
-  if (estC) setColFormulas_(sh, estC, b.first, b.count, r => `=IF($${G}${r}<=0,"${ST.CLEARED}","${ST.ACTIVE}")`);
+  // Estado del cliente: SALDADO si el saldo total ≤ 0 (con tolerancia de redondeo);
+  // VENCIDO si algún préstamo suyo está VENCIDO; si no, ACTIVO. Se protege la fila vacía.
+  if (estC) setColFormulas_(sh, estC, b.first, b.count, r => `=IF($${A}${r}="","",IF($${G}${r}<=0.009,"${ST.CLEARED}",IF(COUNTIFS('${BSN}'!$${bCliL}:$${bCliL},$${A}${r},'${BSN}'!$${bEstL}:$${bEstL},"${ST.OVERDUE}")>0,"${ST.OVERDUE}","${ST.ACTIVE}")))`);
 
   // Formatos: conteo entero (arregla el "$1,00") y monedas.
   fmtCol_(sh, nC, b.first, b.count, '0');
@@ -790,6 +825,13 @@ function insertBorrowerRow_(bs, idCol) {
   return lastLoan + 1;
 }
 
+/** ¿La casilla "Validada?" está marcada? Acepta checkbox (true) o texto (SÍ/SI/TRUE/VERDADERO/X/✓). */
+function isRefValidated_(v) {
+  if (v === true) return true;
+  const s = String(v == null ? '' : v).trim().toUpperCase();
+  return s === 'SÍ' || s === 'SI' || s === 'TRUE' || s === 'VERDADERO' || s === 'X' || s === '✓';
+}
+
 /** Aprueba una solicitud contra el esquema migrado. Devuelve {ok, loanId, name, msg}. */
 function approveApplicantV2_(ss, bs, nb, row, m, override) {
   // Lee la fila completa de una sola vez (antes: ~12 getRange().getValue()).
@@ -829,6 +871,10 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
   const r1Name = String(g('Ref 1 Nombre') || '').trim(), r2Name = String(g('Ref 2 Nombre') || '').trim();
   const r1Ph = vPhone_(g('Ref 1 Teléfono')), r2Ph = vPhone_(g('Ref 2 Teléfono'));
   if (!r1Name || !r1Ph.ok || !r2Name || !r2Ph.ok) return fail('Faltan dos referencias con teléfono válido (obligatorias; no se anulan con «Anular límites»)');
+  // V-34: al menos UNA referencia debe estar VALIDADA (casilla "Ref 1/2 Validada?").
+  // No se anula con "Anular límites" (igual que V-27/V-33).
+  if (!isRefValidated_(g('Ref 1 Validada?')) && !isRefValidated_(g('Ref 2 Validada?')))
+    return fail('V-34 — Ninguna referencia está validada. Marcá «Ref 1 Validada?» o «Ref 2 Validada?» antes de aprobar (no se anula con «Anular límites»).');
 
   // BCRA MANUAL: la verificación ya NO se corre automáticamente al aprobar. Si el
   // prestamista la corrió antes (casilla "Verificar BCRA?") y quedó "RECHAZAR",

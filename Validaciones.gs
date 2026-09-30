@@ -75,7 +75,7 @@ const VALIDATION_RULES = [
   ['V-03', 'Formulario', 'CUIL', '11 dígitos, prefijo 20/23/24/27, dígito verificador módulo 11 correcto, y los 8 centrales deben coincidir con el DNI.', 'El CUIL no es válido o no corresponde al DNI ingresado.', 'BLOQUEA', 'ALTA'],
   ['V-04', 'Formulario', 'Correo', 'Formato válido CON dominio de nivel superior. Rechazar "@gmail" sin ".com".', 'El correo no es válido. Verificá que termine en .com, .ar, etc.', 'BLOQUEA', 'ALTA'],
   ['V-05', 'Formulario', 'Correo', 'Si el correo normalizado ya existe con otro DNI → marcar como posible duplicado.', 'Este correo ya figura para otro solicitante.', 'ADVIERTE', 'ALTA'],
-  ['V-06', 'Formulario', 'Teléfono', 'Normalizar a E.164 (+54…). 10 dígitos tras el código de área.', 'Ingresá un teléfono válido de 10 dígitos.', 'BLOQUEA', 'MEDIA'],
+  ['V-06', 'Formulario', 'Teléfono', 'Teléfono argentino válido: normalizar a E.164 (+54…), 10 dígitos (código de área que empiece en 11/2/3 + número); rechazar números falsos (todos iguales). Aplica al solicitante y a ambas referencias.', 'Ingresá un teléfono argentino válido (10 dígitos: código de área + número, sin 0 ni 15).', 'BLOQUEA', 'MEDIA'],
   ['V-07', 'Formulario', 'Teléfono', 'Si el teléfono normalizado ya existe con otro DNI → marcar como posible duplicado.', 'Este teléfono ya figura para otro solicitante.', 'ADVIERTE', 'ALTA'],
   ['V-08', 'Formulario', 'Fotos DNI', 'Frente y dorso obligatorios.', 'Subí ambas fotos del DNI, nítidas y completas.', 'BLOQUEA', 'MEDIA'],
   ['V-09', 'Aprobación', 'Monto', 'Monto solicitado ≤ Efectivo disponible. Nunca permitir efectivo negativo.', 'No hay fondos suficientes para aprobar este préstamo.', 'BLOQUEA', 'ALTA'],
@@ -95,13 +95,15 @@ const VALIDATION_RULES = [
   ['V-23', 'Desembolso', 'Firma', 'Advertir si se desembolsa con Estado de Firma = PENDIENTE.', 'El contrato no está firmado. ¿Desembolsar igual?', 'ADVIERTE', 'ALTA'],
   ['V-24', 'Envío', 'Correo', 'Antes de enviar, verificar Correo válido = SÍ. Si no, registrar en Errores y avisar.', 'No se puede enviar: el correo del cliente es inválido.', 'BLOQUEA', 'ALTA'],
   ['V-26', 'Formulario', 'Compromiso de pago', 'Acuse explícito obligatorio: devolución total al vencimiento, recargo por mora, acciones legales ante el impago y comunicación/plan de pago ante atrasos (condición para préstamos futuros).', 'Debe aceptar los compromisos de pago para enviar la solicitud.', 'BLOQUEA', 'ALTA'],
-  ['V-27', 'Formulario', 'Referencias', 'Dos referencias obligatorias (1.ª familiar no conviviente, 2.ª no familiar) con nombre, vínculo y teléfono válido.', 'Completá las dos referencias con un teléfono válido.', 'BLOQUEA', 'MEDIA'],
-  ['V-28', 'Formulario', 'Referencias', 'Teléfono de referencia igual al del solicitante o repetido entre referencias → marcar para revisión.', 'Verificá las referencias: el teléfono está repetido o es el del solicitante.', 'ADVIERTE', 'MEDIA'],
+  ['V-27', 'Formulario', 'Referencias', 'Dos referencias obligatorias (1.ª familiar no conviviente, 2.ª no familiar) con nombre (mín. 10 caracteres), vínculo y teléfono argentino válido.', 'Completá las dos referencias con nombre (mín. 10 caracteres) y un teléfono argentino válido.', 'BLOQUEA', 'MEDIA'],
+  ['V-28', 'Formulario', 'Referencias', 'El teléfono de una referencia no puede ser igual al del solicitante ni repetirse entre las dos referencias.', 'El teléfono de una referencia no puede ser el del solicitante ni repetirse entre referencias.', 'BLOQUEA', 'MEDIA'],
   ['V-29', 'Formulario', 'Monto', 'El monto no puede superar el tope configurable (por defecto $500.000).', 'El monto máximo por préstamo es $500.000.', 'BLOQUEA', 'ALTA'],
   ['V-30', 'Formulario', 'Monto/Plazo', 'El plazo/tasa/cuotas se DERIVAN del monto: ≤$150.000→elige 15d/25% o 30d/50% (1 cuota); ≤$300.000→30d/50%/1; >$300.000→90d/100%/3 cuotas.', 'El plazo se calcula según el monto.', 'BLOQUEA', 'ALTA'],
   ['V-31', 'Alta', 'Cuotas', 'Préstamo grande (>$300.000): se genera un cronograma de 3 cuotas mensuales (día 30/60/90), cada una = Total÷3.', '—', 'AUTOMÁTICO', 'ALTA'],
   ['V-32', 'Aprobación', 'Monto', 'Escalera de graduación: el monto ≤ límite por historial de repago del prestatario. Un atraso REINICIA la escalera: solo cuentan los préstamos saldados a tiempo DESPUÉS del último atraso. Mora vigente → límite inicial.', 'Supera el límite por historial del prestatario. Se recupera saldando préstamos a tiempo (aun después de un atraso), o con «Anular límites».', 'BLOQUEA', 'ALTA'],
   ['V-33', 'Formulario y Aprobación', 'Cliente', 'Cliente BLOQUEADO (columna «Bloqueado» = SÍ en Clientes): se rechaza toda solicitud y aprobación que coincida por correo, DNI, CUIL o teléfono. ABSOLUTO: no se anula con «Anular límites». Desbloquear = vaciar la columna «Bloqueado».', 'No es posible procesar solicitudes para este cliente. Ante cualquier duda, comunicate con el prestamista.', 'BLOQUEA', 'ALTA'],
+  ['V-34', 'Aprobación', 'Referencias', 'Al menos UNA referencia debe estar VALIDADA (casilla «Ref 1 Validada?» o «Ref 2 Validada?» = SÍ) en «Nuevos Prestatarios» antes de aprobar/otorgar el préstamo. No se anula con «Anular límites».', 'Validá al menos una referencia antes de aprobar el préstamo.', 'BLOQUEA', 'ALTA'],
+  ['V-35', 'Formulario', 'Nombre', 'El nombre del solicitante y el de cada referencia deben tener al menos 10 caracteres.', 'El nombre debe tener al menos 10 caracteres.', 'BLOQUEA', 'MEDIA'],
 ];
 
 /* ==================== VALIDADORES DE CAMPO ==================== */
@@ -133,11 +135,13 @@ function normPhoneE164_(v) {
   if (d.length > 10 && d.indexOf('54') === 0) d = d.slice(2); // quita código de país
   if (d.length === 11 && d.charAt(0) === '9') d = d.slice(1);  // quita prefijo móvil "9"
   if (d.length !== 10) return '';                              // debe quedar área+número = 10
+  if (!/^[123]/.test(d)) return '';                            // cód. de área argentino: 11 / 2… / 3…
+  if (/^(\d)\1{9}$/.test(d)) return '';                        // rechaza números falsos (todos iguales)
   return '+54' + d;
 }
 function vPhone_(v) {
   const e164 = normPhoneE164_(v);
-  if (!e164) return { ok: false, norm: '', msg: 'Ingresá un teléfono válido de 10 dígitos.' };
+  if (!e164) return { ok: false, norm: '', msg: 'Ingresá un teléfono argentino válido (10 dígitos: código de área + número, sin 0 ni 15).' };
   return { ok: true, norm: e164, msg: '' };
 }
 
@@ -531,6 +535,7 @@ function submitIntakeSmart(form) {
       name = String(form.fullName || '').trim();
       phone = String(form.phone || '').trim();
       if (!name) throw new Error('El nombre completo es obligatorio.');
+      if (name.length < 10) throw new Error('El nombre completo debe tener al menos 10 caracteres.'); // V-35
       // V-02 — el DNI no puede pertenecer a otra persona.
       if (dniBelongsToOtherName_(dnV.norm, name)) throw new Error('Ese DNI ya está registrado a nombre de otra persona.');
       const phV = vPhone_(phone);
@@ -573,8 +578,8 @@ function submitIntakeSmart(form) {
       ref1Name = String(form.ref1Name || '').trim(); ref1Rel = String(form.ref1Rel || '').trim();
       ref2Name = String(form.ref2Name || '').trim(); ref2Rel = String(form.ref2Rel || '').trim();
       const ref1Ph = vPhone_(form.ref1Phone), ref2Ph = vPhone_(form.ref2Phone);
-      if (!ref1Name || !ref1Rel || !ref1Ph.ok) throw new Error('Completá la Referencia 1: nombre, vínculo y un teléfono válido de 10 dígitos.');
-      if (!ref2Name || !ref2Rel || !ref2Ph.ok) throw new Error('Completá la Referencia 2: nombre, vínculo y un teléfono válido de 10 dígitos.');
+      if (!ref1Name || ref1Name.length < 10 || !ref1Rel || !ref1Ph.ok) throw new Error('Completá la Referencia 1: nombre (mín. 10 caracteres), vínculo y un teléfono argentino válido.'); // V-27 / V-35
+      if (!ref2Name || ref2Name.length < 10 || !ref2Rel || !ref2Ph.ok) throw new Error('Completá la Referencia 2: nombre (mín. 10 caracteres), vínculo y un teléfono argentino válido.'); // V-27 / V-35
       ref1PhoneN = ref1Ph.norm; ref2PhoneN = ref2Ph.norm;
     }
 
@@ -593,9 +598,13 @@ function submitIntakeSmart(form) {
     if (emailDup.length) warnings.push('Este correo ya figura para otro solicitante (' + emailDup.map(x => x.id).join(', ') + ').');
     const phoneDup = phone ? phoneDupOtherDni_(phone, dnV.norm) : [];
     if (phoneDup.length) warnings.push('Este teléfono ya figura para otro solicitante (' + phoneDup.map(x => x.id).join(', ') + ').');
-    // V-28 (ADVIERTE) — teléfono de referencia igual al del solicitante o repetido entre referencias (posible referencia falsa).
-    if (!reuseRefs && ((phone && (ref1PhoneN === phone || ref2PhoneN === phone)) || (ref1PhoneN && ref1PhoneN === ref2PhoneN)))
-      warnings.push('⚠ Teléfono de referencia repetido o igual al del solicitante — verificar las referencias.');
+    // V-28 (BLOQUEA) — el teléfono de una referencia no puede ser el del solicitante ni repetirse entre referencias.
+    if (!reuseRefs) {
+      if (phone && (ref1PhoneN === phone || ref2PhoneN === phone))
+        throw new Error('El teléfono de una referencia no puede ser el mismo que el del solicitante.');
+      if (ref1PhoneN && ref1PhoneN === ref2PhoneN)
+        throw new Error('Las dos referencias no pueden tener el mismo teléfono.');
+    }
 
     const rate = termRateDays_(term), interest = round2_(amount * rate), total = round2_(amount * (1 + rate));
 
@@ -1209,7 +1218,7 @@ function intakeSmartHtml_() {
 
           <div id="identity">
             <div class="secTitle">Tus datos</div>
-            <label>Nombre completo <span class="req" id="rqName">*</span><input name="fullName" id="fullName" autocomplete="off"></label>
+            <label>Nombre completo <span class="req" id="rqName">*</span><input name="fullName" id="fullName" minlength="10" autocomplete="off"></label>
             <small class="fieldErr" id="e_fullName"></small>
             <div class="row2">
               <div><label>Teléfono <span class="req" id="rqPhone">*</span><input name="phone" id="phone" inputmode="tel" autocomplete="off" placeholder="11 XXXX XXXX"></label>
@@ -1231,7 +1240,7 @@ function intakeSmartHtml_() {
             <div class="secTitle">Referencias</div>
             <div class="hint" style="margin-bottom:6px">Dos personas que puedan confirmar tus datos. La 1.ª debe ser un familiar directo que <b>no viva con vos</b>; la 2.ª, alguien no familiar (laboral o de confianza).</div>
             <div class="warnbox">⚠️ La información de las referencias debe ser <b>válida y verificable</b> (nombre y teléfono reales). Si no podemos confirmarlas, <b>no se aprobará el préstamo</b>.</div>
-            <label>Referencia 1 — Nombre y apellido <span class="req">*</span><input name="ref1Name" id="ref1Name" autocomplete="off" placeholder="Nombre del familiar"></label>
+            <label>Referencia 1 — Nombre y apellido <span class="req">*</span><input name="ref1Name" id="ref1Name" minlength="10" autocomplete="off" placeholder="Nombre del familiar"></label>
             <small class="fieldErr" id="e_ref1Name"></small>
             <div class="row2">
               <div><label>Vínculo <span class="req">*</span><select name="ref1Rel" id="ref1Rel">
@@ -1244,7 +1253,7 @@ function intakeSmartHtml_() {
               <div><label>Teléfono <span class="req">*</span><input name="ref1Phone" id="ref1Phone" inputmode="tel" autocomplete="off" placeholder="11 XXXX XXXX"></label>
                 <small class="fieldErr" id="e_ref1Phone"></small></div>
             </div>
-            <label>Referencia 2 — Nombre y apellido <span class="req">*</span><input name="ref2Name" id="ref2Name" autocomplete="off" placeholder="Nombre de la referencia"></label>
+            <label>Referencia 2 — Nombre y apellido <span class="req">*</span><input name="ref2Name" id="ref2Name" minlength="10" autocomplete="off" placeholder="Nombre de la referencia"></label>
             <small class="fieldErr" id="e_ref2Name"></small>
             <div class="row2">
               <div><label>Vínculo <span class="req">*</span><select name="ref2Rel" id="ref2Rel">
@@ -1426,10 +1435,15 @@ function intakeSmartHtml_() {
       function normPhoneC(v){var d=digitsOnly(v);if(!d)return '';
         if(d.length>10&&d.indexOf('54')===0)d=d.slice(2);
         if(d.length===11&&d.charAt(0)==='9')d=d.slice(1);
-        if(d.length!==10)return '';return '+54'+d;}
+        if(d.length!==10)return '';
+        if('123'.indexOf(d.charAt(0))<0)return '';  // cód. de área argentino: 11 / 2… / 3…
+        var same=true;for(var i=1;i<d.length;i++){if(d.charAt(i)!==d.charAt(0)){same=false;break;}}
+        if(same)return '';                          // rechaza números falsos (todos iguales)
+        return '+54'+d;}
       function vPhoneC(v){if(!String(v==null?'':v).trim())return 'El teléfono es obligatorio.';
-        if(!normPhoneC(v))return 'Ingresá un teléfono válido de 10 dígitos.';return '';}
-      function vNameC(v){if(!String(v==null?'':v).trim())return 'El nombre completo es obligatorio.';return '';}
+        if(!normPhoneC(v))return 'Ingresá un teléfono argentino válido (10 dígitos: código de área + número, sin 0 ni 15).';return '';}
+      function vNameC(v){var s=String(v==null?'':v).trim();if(!s)return 'El nombre completo es obligatorio.';
+        if(s.length<10)return 'El nombre completo debe tener al menos 10 caracteres.';return '';}
       function cuilDvC(fb){var m=[5,4,3,2,7,6,5,4,3,2],s=0;for(var i=0;i<10;i++)s+=parseInt(fb.charAt(i),10)*m[i];var r=11-(s%11);if(r===11)r=0;if(r===10)r=9;return r;}
       function vCuilC(v,dni){var c=digitsOnly(v);if(!c)return 'El CUIL es obligatorio.';
         if(c.length!==11)return 'El CUIL debe tener 11 dígitos.';
@@ -1442,10 +1456,16 @@ function intakeSmartHtml_() {
       function vNotesC(v){if(!String(v==null?'':v).trim())return 'Las notas / motivo son obligatorias.';return '';}
       function vAddressC(v){if(!String(v==null?'':v).trim())return 'La dirección es obligatoria.';return '';}
       function vPhotoC(input,required){var fs=input&&input.files;if(!fs||!fs.length)return required?'Subí la foto del DNI (imagen o PDF).':'';return '';}
-      function vRefNameC(v){if(!String(v==null?'':v).trim())return 'El nombre de la referencia es obligatorio.';return '';}
+      function vRefNameC(v){var s=String(v==null?'':v).trim();if(!s)return 'El nombre de la referencia es obligatorio.';
+        if(s.length<10)return 'El nombre de la referencia debe tener al menos 10 caracteres.';return '';}
       function vRefRelC(v){if(!String(v==null?'':v).trim())return 'Elegí el vínculo de la referencia.';return '';}
       function vRefPhoneC(v){if(!String(v==null?'':v).trim())return 'El teléfono de la referencia es obligatorio.';
-        if(!normPhoneC(v))return 'Ingresá un teléfono válido de 10 dígitos.';return '';}
+        if(!normPhoneC(v))return 'Ingresá un teléfono argentino válido (10 dígitos: código de área + número, sin 0 ni 15).';return '';}
+      // V-28: además de ser válido, el teléfono de la referencia no puede ser el del solicitante ni el de la otra referencia.
+      function vRefPhoneDistinctC(v,other){var m=vRefPhoneC(v);if(m)return m;
+        var n=normPhoneC(v),ap=normPhoneC(el_('phone').value),ot=normPhoneC(other);
+        if(n&&ap&&n===ap)return 'El teléfono de una referencia no puede ser el del solicitante.';
+        if(n&&ot&&n===ot)return 'Las dos referencias no pueden tener el mismo teléfono.';return '';}
 
       /* ===== Muestra/oculta el error de un campo de inmediato ===== */
       function setErr(key,m,el){var e=document.getElementById('e_'+key);
@@ -1468,10 +1488,10 @@ function intakeSmartHtml_() {
           case 'cuilPhoto':return setErr('cuilPhoto',vPhotoC(el_('cuilPhoto'),true),el_('cuilPhoto'));
           case 'ref1Name':return setErr('ref1Name',vRefNameC(el_('ref1Name').value),el_('ref1Name'));
           case 'ref1Rel':return setErr('ref1Rel',vRefRelC(el_('ref1Rel').value),el_('ref1Rel'));
-          case 'ref1Phone':return setErr('ref1Phone',vRefPhoneC(el_('ref1Phone').value),el_('ref1Phone'));
+          case 'ref1Phone':return setErr('ref1Phone',vRefPhoneDistinctC(el_('ref1Phone').value,el_('ref2Phone').value),el_('ref1Phone'));
           case 'ref2Name':return setErr('ref2Name',vRefNameC(el_('ref2Name').value),el_('ref2Name'));
           case 'ref2Rel':return setErr('ref2Rel',vRefRelC(el_('ref2Rel').value),el_('ref2Rel'));
-          case 'ref2Phone':return setErr('ref2Phone',vRefPhoneC(el_('ref2Phone').value),el_('ref2Phone'));
+          case 'ref2Phone':return setErr('ref2Phone',vRefPhoneDistinctC(el_('ref2Phone').value,el_('ref1Phone').value),el_('ref2Phone'));
           case 'agreeRepay':{var okR=el_('agreeRepay').checked;setErr('agreeRepay',okR?'':'Debe aceptar el compromiso de devolución.');el_('agreeRepayLabel').classList.toggle('invalid',!okR);return okR;}
           case 'agreeMora':{var okM=el_('agreeMora').checked;setErr('agreeMora',okM?'':'Debe aceptar el recargo por mora.');el_('agreeMoraLabel').classList.toggle('invalid',!okM);return okM;}
           case 'agreeConseq':{var okC=el_('agreeConseq').checked;setErr('agreeConseq',okC?'':'Debe aceptar las consecuencias del impago.');el_('agreeConseqLabel').classList.toggle('invalid',!okC);return okC;}

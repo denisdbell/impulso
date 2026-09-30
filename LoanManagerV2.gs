@@ -56,6 +56,9 @@ const PB = {
   // Columnas de mora: recargo acumulado (derivado de "Pagos Atrasados"), ajuste manual
   // (condonar/cambiar por préstamo) y saldo con mora (= monto a pagar hoy).
   MORA_ACUM: 24, MORA_ADJ: 25, BALANCE_MORA: 26,
+  // Total del PLAN a pagar (incluye mora congelada en préstamos reestructurados). Suma de
+  // "Monto Cuota" de "Cuotas"; ESTABLE ante los pagos (a diferencia de "Saldo con Mora").
+  TOTAL_PLAN: 27,
 };
 // Nombre/DNI (col C/D) se muestran en "Prestatarios" (se resuelven de "Clientes"
 // por ID Cliente). La fuente de verdad de la identidad sigue siendo "Clientes".
@@ -103,6 +106,7 @@ function onOpen() {
     .addItem('④ Estadísticas y gráficos', 'showStats')
     .addItem('💵 Retiro disponible (sin frenar crecimiento)', 'showWithdrawable')
     .addItem('⑤ Actualizar saldos y resumen', 'refreshAll')
+    .addItem('🧮 Reparar totales y normalizar pagos', 'repairTotals')
     .addItem('➕ Crear hoja de Recordatorios de pago', 'createRemindersSheet_')
     .addItem('📄 Crear hoja de Estudio de Contratos', 'createAgreementSheet_')
     .addItem('✉ Reenviar enlace de firma (fila seleccionada)', 'resendSigningLink_')
@@ -576,7 +580,7 @@ function setupBorrowers_(ss) {
     'Fecha del Préstamo', 'Fecha de Vencimiento', 'Interés', 'Total a Pagar',
     'Total Pagado', 'Saldo Pendiente (hoy)', 'Estado', 'Contrato PDF', 'Contrato Enviado', 'Último Aviso',
     'Estado de Firma', 'Fecha de Firma', 'Contrato Firmado (PDF)', 'Eliminar', 'Enviar recibo desembolso', 'Préstamos (de ' + MAX_LOANS_PER_CLIENT + ')',
-    'Recargo por Mora (acum.)', 'Mora (ajuste)', 'Saldo con Mora'];
+    'Recargo por Mora (acum.)', 'Mora (ajuste)', 'Saldo con Mora', 'Total a Pagar (con mora)'];
   sh.getRange(1, 1, 1, H.length).setValues([H]).setFontWeight('bold').setBackground('#1c4587').setFontColor('#fff').setWrap(true);
   sh.getRange(1, PB.DELETE).setBackground('#990000').setNote('Tildá para ELIMINAR ese préstamo (borra la fila; recuperable con el historial de versiones).');
   sh.getRange(1, PB.SEND_DISB).setNote('Tildá para enviar el recibo de DESEMBOLSO (entrega de fondos) al prestatario. Sólo se envía si el contrato está FIRMADO. Se destilda solo.');
@@ -585,6 +589,7 @@ function setupBorrowers_(ss) {
   sh.getRange(1, PB.MORA_ACUM).setNote('Recargo por mora acumulado. Automático (derivado de "Pagos Atrasados") salvo que se cargue un valor en "Mora (ajuste)". 0 si el préstamo no está en mora.');
   sh.getRange(1, PB.MORA_ADJ).setNote('AJUSTE MANUAL de la mora de ESTE préstamo. Dejala VACÍA para el cálculo automático. Escribí 0 para CONDONAR (eximir) la mora, o un importe para FIJAR un recargo distinto. Afecta el "Recargo por Mora", el "Saldo con Mora", los avisos y el estado de cuenta.');
   sh.getRange(1, PB.BALANCE_MORA).setNote('Monto a pagar HOY = Saldo Pendiente + Recargo por Mora (ya con el ajuste manual, si lo hay).');
+  sh.getRange(1, PB.TOTAL_PLAN).setNote('Total del PLAN a pagar, incluyendo la mora congelada (para préstamos reestructurados = total del plan de cuotas). Es la suma de "Monto Cuota" de "Cuotas"; NO cambia con los pagos. "Saldo con Mora" muestra lo que aún falta pagar.');
   sh.setFrozenRows(1);
   writeBorrowerFormulas_(sh, CFG.MAX_ROWS);
   formatBorrowerColumns_(sh, CFG.MAX_ROWS);
@@ -599,7 +604,7 @@ function setupBorrowers_(ss) {
  */
 function writeBorrowerCapitalBanner_(sh) {
   try {
-    const ID = colL_(PB.LOAN_ID), CAP = colL_(PB.PRINCIPAL), PA = colL_(PB.PAID), col = PB.BALANCE_MORA + 1; // 1ª columna libre tras las columnas de datos
+    const ID = colL_(PB.LOAN_ID), CAP = colL_(PB.PRINCIPAL), PA = colL_(PB.PAID), col = PB.TOTAL_PLAN + 1; // 1ª columna libre tras las columnas de datos
     if (sh.getMaxColumns() < col + 4) sh.insertColumnsAfter(sh.getMaxColumns(), col + 4 - sh.getMaxColumns()); // asegura lugar para el banner
     sh.getRange(1, col, 1, 4).breakApart();
     const banner = sh.getRange(1, col, 1, 4).merge();
@@ -628,7 +633,7 @@ function writeBorrowerFormulas_(sh, N) {
   const A = colL_(PB.LOAN_ID), CLI = colL_(PB.CLIENT_ID), CAP = colL_(PB.PRINCIPAL), TE = colL_(PB.TERM),
     RA = colL_(PB.RATE), FE = colL_(PB.LOAN_DATE), INT = colL_(PB.INTEREST), EST = colL_(PB.STATE),
     PPLOAN = colL_(PP.LOAN_ID), PPAMT = colL_(PP.AMOUNT);
-  const fName = [], fRate = [], fDue = [], fITP = [], fState = [], fCount = [], fMora = [], fBalMora = [];
+  const fName = [], fRate = [], fDue = [], fITP = [], fState = [], fCount = [], fMora = [], fBalMora = [], fPlan = [];
   for (let r = 2; r <= N + 1; r++) {
     fName.push([  // C Nombre y D DNI: se resuelven de "Clientes" por ID Cliente.
       `=IF($${CLI}${r}="","",IFERROR(VLOOKUP($${CLI}${r},'${C}'!$A:$B,2,FALSE),""))`,
@@ -648,6 +653,7 @@ function writeBorrowerFormulas_(sh, N) {
     fCount.push([`=IF($${CLI}${r}="","",COUNTIFS($${CLI}$2:$${CLI}${N + 1},$${CLI}${r},$${EST}$2:$${EST}${N + 1},"<>${ST.PAID}",$${EST}$2:$${EST}${N + 1},"<>${ST.CLEARED}"))`]);
     fMora.push([borrowerMoraFormula_(r)]);              // Recargo por Mora (acum.) — de "Pagos Atrasados"
     fBalMora.push([borrowerBalanceWithMoraFormula_(r)]); // Saldo con Mora = Saldo + Recargo
+    fPlan.push([borrowerPlanTotalFormula_(r)]);          // Total a Pagar (con mora) = total del plan (Σ Monto Cuota)
   }
   sh.getRange(2, PB.NAME, N, 2).setFormulas(fName); // Nombre + DNI
   sh.getRange(2, PB.RATE, N, 1).setFormulas(fRate);
@@ -657,7 +663,8 @@ function writeBorrowerFormulas_(sh, N) {
   sh.getRange(2, PB.LOANCOUNT, N, 1).setFormulas(fCount); // Préstamos (de N)
   sh.getRange(2, PB.MORA_ACUM, N, 1).setFormulas(fMora);          // Recargo por Mora (acum.)
   sh.getRange(2, PB.BALANCE_MORA, N, 1).setFormulas(fBalMora);    // Saldo con Mora ("Mora (ajuste)" queda de entrada)
-  sh.getRange(2, PB.MORA_ACUM, N, 3).setNumberFormat(CFG.CURRENCY_FMT); // formato moneda a las 3 columnas de mora
+  sh.getRange(2, PB.TOTAL_PLAN, N, 1).setFormulas(fPlan);         // Total a Pagar (con mora) = total del plan
+  sh.getRange(2, PB.MORA_ACUM, N, 4).setNumberFormat(CFG.CURRENCY_FMT); // formato moneda: mora (3) + total del plan (1)
 }
 /**
  * Fórmula del RECARGO POR MORA acumulado de un préstamo, tomado de la hoja "Pagos Atrasados"
@@ -682,6 +689,15 @@ function borrowerBalanceFormula_(r) {
   return `=IF($${A}${r}="","",IF(OR($${TO}${r}="",$${PA}${r}=""),"",MAX(0,ROUND($${TO}${r}-$${PA}${r},2))))`;
 }
 /**
+ * Columna "Total Pagado" (col J) como fórmula VIVA: SUMIF de todos los pagos de este
+ * préstamo en la hoja "Pagos". Reafirmarla en cada recálculo sana las filas que quedaron
+ * con un valor ESTÁTICO (migración / pegado) y por eso no acreditaban pagos posteriores.
+ */
+function borrowerPaidFormula_(r) {
+  const A = colL_(PB.LOAN_ID), P = CFG.SHEETS.PAYMENTS, PL = colL_(PP.LOAN_ID), PA = colL_(PP.AMOUNT);
+  return `=IF($${A}${r}="","",SUMIF('${P}'!$${PL}:$${PL},$${A}${r},'${P}'!$${PA}:$${PA}))`;
+}
+/**
  * Columna "Recargo por Mora (acum.)": si la columna "Mora (ajuste)" tiene un NÚMERO, se usa
  * ese (0 = condonada; otro = recargo fijado a mano); si está vacía, se toma el recargo
  * automático de la hoja "Pagos Atrasados" (0 si el préstamo no está en mora).
@@ -697,6 +713,20 @@ function borrowerMoraFormula_(r) {
 function borrowerBalanceWithMoraFormula_(r) {
   const A = colL_(PB.LOAN_ID), BAL = colL_(PB.BALANCE), MOR = colL_(PB.MORA_ACUM);
   return `=IF($${A}${r}="","",N($${BAL}${r})+N($${MOR}${r}))`;
+}
+/**
+ * Columna "Total a Pagar (con mora)" = TOTAL del plan a pagar. Suma los "Monto Cuota" del
+ * préstamo en "Cuotas" (se fijan al armar el plan; los pagos sólo tocan "Monto Pagado"/"Saldo
+ * Cuota", nunca "Monto Cuota"), así que es ESTABLE ante los pagos. Para un préstamo
+ * reestructurado equivale a capital + interés + mora congelada. Respaldo en "Total a Pagar"
+ * si el préstamo aún no tiene cronograma (SUMIF = 0). `aCol`/`totCol` = letras A1 de
+ * "ID Préstamo" y "Total a Pagar" (por defecto, las del mapa PB).
+ */
+function borrowerPlanTotalFormula_(r, aCol, totCol) {
+  const A = aCol || colL_(PB.LOAN_ID), TOT = totCol || colL_(PB.TOTAL);
+  const C = CFG.SHEETS.INSTALLMENTS, L = colL_(CU.LOAN_ID), E = colL_(CU.AMOUNT);
+  const sumf = `SUMIF('${C}'!$${L}:$${L},$${A}${r},'${C}'!$${E}:$${E})`;
+  return `=IF($${A}${r}="","",IF(${sumf}>0,${sumf},N($${TOT}${r})))`;
 }
 /**
  * Estado (col L) como fórmula VIVA. PAGADO en cuanto Total Pagado (J) alcanza el
@@ -758,7 +788,7 @@ function formatBorrowerColumns_(sh, N) {
 function borrowerFormatRules_(sh) {
   const N = CFG.MAX_ROWS, HI = headerIndex_(sh);
   // Asegura columnas para el banner "Capital disponible" (5 celdas tras la última de datos).
-  const needCols = PB.BALANCE_MORA + 5;
+  const needCols = PB.TOTAL_PLAN + 5;
   if (sh.getMaxColumns() < needCols) sh.insertColumnsAfter(sh.getMaxColumns(), needCols - sh.getMaxColumns());
   const estC = colByAny_(HI, ['Estado']) || PB.STATE;
   const signC = colByAny_(HI, ['Estado de Firma']) || PB.SIGN_STATUS;
@@ -768,7 +798,7 @@ function borrowerFormatRules_(sh) {
   const signRange = sh.getRange(2, signC, N, 1);      // fuera de la franja de Estado (sin conflicto)
   const countRange = sh.getRange(2, countC, N, 1);
   // Banner "Capital disponible" (fila 1, a partir de la 1.ª columna libre tras los datos).
-  const bannerRange = sh.getRange(1, PB.BALANCE_MORA + 1, 1, 5);
+  const bannerRange = sh.getRange(1, PB.TOTAL_PLAN + 1, 1, 5);
   // Regla por fila: colorea toda la franja según el valor del Estado (col. absoluta, fila relativa).
   const byState = (state, bg, fg) => SpreadsheetApp.newConditionalFormatRule()
     .whenFormulaSatisfied('=$' + estL + '2="' + state + '"')
@@ -947,7 +977,7 @@ function protectFormulas_(sh, N) {
   try {
     // Columnas calculadas (derivadas del mapa PB): Nombre, DNI, Tasa, Vencimiento,
     // Interés, Total, Total Pagado, Saldo, Estado.
-    [PB.NAME, PB.DNI, PB.RATE, PB.DUE, PB.INTEREST, PB.TOTAL, PB.PAID, PB.BALANCE, PB.STATE, PB.LOANCOUNT]
+    [PB.NAME, PB.DNI, PB.RATE, PB.DUE, PB.INTEREST, PB.TOTAL, PB.PAID, PB.BALANCE, PB.STATE, PB.LOANCOUNT, PB.TOTAL_PLAN]
       .map(colL_).forEach(col => {
         const p = sh.getRange(col + '2:' + col + (N + 1)).protect()
           .setDescription('Columna calculada — no editar');
@@ -1436,11 +1466,47 @@ function repairTotals() {
   const nR = deleteTotalRows_(ss, CFG.SHEETS.SUMMARY);
   const b = ss.getSheetByName(CFG.SHEETS.BORROWERS);
   if (b) writeBorrowerCapitalBanner_(b);                 // re-aplica el banner (SUMIF "L-*")
+  const rep = repararPagos_();                           // pagos tipeados como texto → número; IDs sin espacios
   try { refreshAll(true); } catch (e) { logError_('repairTotals:refreshAll', e); } // recalcula tableros
   SpreadsheetApp.getUi().alert('Reparación de totales',
     'Filas TOTAL eliminadas — Prestatarios: ' + nB + ', Resumen: ' + nR + '.\n' +
+    'Pagos normalizados — montos texto→número: ' + rep.monto + ', IDs recortados: ' + rep.ids + '.\n' +
     'Banner y tableros recalculados. Los datos de préstamos, pagos y clientes no se modificaron.',
     SpreadsheetApp.getUi().ButtonSet.OK);
+}
+
+/**
+ * Normaliza la hoja "Pagos" para que ningún pago quede "perdido": convierte el
+ * "Monto Pagado" que quedó como TEXTO a número real (así el SUMIF de "Total Pagado"
+ * y el motor de mora lo cuentan) y recorta espacios del "ID Préstamo". También
+ * recorta el "ID Préstamo" de "Prestatarios". Idempotente; no borra ni reasigna pagos.
+ * Devuelve {monto, ids} con la cantidad de celdas corregidas.
+ */
+function repararPagos_() {
+  const ss = getSS_(); let fixMonto = 0, fixId = 0;
+  const pg = ss.getSheetByName(CFG.SHEETS.PAYMENTS);
+  if (pg && pg.getLastRow() > 1) {
+    const PH = (typeof headerIndex_ === 'function') ? headerIndex_(pg) : null;
+    const idC = (PH && typeof colByAny_ === 'function' && colByAny_(PH, ['ID Préstamo', 'ID Prestamo'])) || PP.LOAN_ID;
+    const amtC = (PH && typeof colByAny_ === 'function' && colByAny_(PH, ['Monto Pagado'])) || PP.AMOUNT;
+    const n = pg.getLastRow() - 1;
+    const ids = pg.getRange(2, idC, n, 1).getValues();
+    const amts = pg.getRange(2, amtC, n, 1).getValues();
+    for (let i = 0; i < n; i++) {
+      const rawId = ids[i][0], idT = String(rawId == null ? '' : rawId).trim();
+      if (idT && idT !== rawId) { pg.getRange(2 + i, idC).setValue(idT); fixId++; }
+      const rawAmt = amts[i][0];
+      if (rawAmt !== '' && rawAmt != null && typeof rawAmt !== 'number') {
+        pg.getRange(2 + i, amtC).setValue(parseMoney_(rawAmt)).setNumberFormat(CFG.CURRENCY_FMT); fixMonto++;
+      }
+    }
+  }
+  const bs = ss.getSheetByName(CFG.SHEETS.BORROWERS);
+  if (bs && bs.getLastRow() > 1) {
+    const n = bs.getLastRow() - 1, vals = bs.getRange(2, PB.LOAN_ID, n, 1).getValues();
+    for (let i = 0; i < n; i++) { const raw = vals[i][0], t = String(raw == null ? '' : raw).trim(); if (t && t !== raw) { bs.getRange(2 + i, PB.LOAN_ID).setValue(t); fixId++; } }
+  }
+  return { monto: fixMonto, ids: fixId };
 }
 
 /**
@@ -2180,8 +2246,10 @@ function writeOutstandingRow_(bs, row) {
   const kCell = bs.getRange(row, PB.BALANCE), lCell = bs.getRange(row, PB.STATE);
   const moraCell = bs.getRange(row, PB.MORA_ACUM), balMoraCell = bs.getRange(row, PB.BALANCE_MORA);
   if (!loanId) { kCell.clearContent(); lCell.clearContent(); moraCell.clearContent(); balMoraCell.clearContent(); return; }
-  // Saldo (fórmula), Recargo por Mora (de "Pagos Atrasados"), Saldo con Mora y Estado son
-  // fórmulas vivas; las reafirmamos por si la fila fue pegada, migrada o creada al alta.
+  // Total Pagado (SUMIF), Saldo, Recargo por Mora (de "Pagos Atrasados"), Saldo con Mora y
+  // Estado son fórmulas vivas; las reafirmamos por si la fila fue pegada, migrada o creada
+  // al alta (un "Total Pagado" estático dejaba pagos sin acreditar).
+  bs.getRange(row, PB.PAID).setFormula(borrowerPaidFormula_(row));
   kCell.setFormula(borrowerBalanceFormula_(row));
   moraCell.setFormula(borrowerMoraFormula_(row));
   balMoraCell.setFormula(borrowerBalanceWithMoraFormula_(row));
@@ -3510,17 +3578,20 @@ function submitIntake(form) {
     if (!acceptingApplications_()) throw new Error('En este momento no estamos aceptando nuevas solicitudes de préstamo.');
     const ss = getSS_(), nb = ss.getSheetByName(CFG.SHEETS.NEW) || setupNew_(ss) || ss.getSheetByName(CFG.SHEETS.NEW);
     const name = String(form.fullName || '').trim(), email = String(form.email || '').trim(),
-      dni = String(form.dni || '').trim(), phone = String(form.phone || '').trim(),
+      dni = String(form.dni || '').trim(),
       amount = Number(String(form.amount || '').replace(/\D/g, '')) || '',
       term = Number(form.term) || '', notes = String(form.notes || '').trim();
+    let phone = String(form.phone || '').trim();
     // Forma de pago elegida por el prestatario (predeterminada: Mercado Pago) + datos opcionales.
     const payMethodSel = String(form.payMethod || '').trim() || 'Mercado Pago';
     const payDetails = String(form.payDetails || '').trim();
     const payMethodFull = payDetails ? (payMethodSel + ' — ' + payDetails) : payMethodSel;
     if (!name) throw new Error('El nombre completo es obligatorio.');
+    if (name.length < 10) throw new Error('El nombre completo debe tener al menos 10 caracteres.'); // V-35
     if (!email) throw new Error('El correo electrónico es obligatorio.');
     if (!dni) throw new Error('El DNI es obligatorio.');
     if (!phone) throw new Error('El teléfono es obligatorio.');
+    { const phV = vPhone_(phone); if (!phV.ok) throw new Error(phV.msg); phone = phV.norm; } // V-06: teléfono argentino válido
     if (!amount) throw new Error('Ingrese un monto de préstamo válido.');
     if (term !== 1 && term !== 2 && term !== 15) throw new Error('Elija un plazo de 15 días, 1 mes o 2 meses.');
     if (!notes) throw new Error('Las notas / motivo son obligatorias.');
@@ -4927,7 +4998,8 @@ function loanPayments_(loanId) {
   // Pagos: B=ID Préstamo, C=Fecha, D=Monto.
   const sh = getSS_().getSheetByName(CFG.SHEETS.PAYMENTS); if (sh.getLastRow() < 2) return [];
   const data = sh.getRange(2, PP.LOAN_ID, sh.getLastRow() - 1, 3).getValues(), out = [];
-  data.forEach(r => { if (String(r[0]).trim() === loanId && typeof r[2] === 'number' && r[2] !== 0) out.push({ date: r[1] instanceof Date ? r[1] : new Date(), amount: r[2] }); });
+  const key = String(loanId).trim(); // compara ambos lados sin espacios (V-17)
+  data.forEach(r => { const amt = parseMoney_(r[2]); if (String(r[0]).trim() === key && amt !== 0) out.push({ date: r[1] instanceof Date ? r[1] : new Date(), amount: amt }); });
   return out;
 }
 function nextLoanId_() {
@@ -5091,6 +5163,26 @@ function sanitizeName_(s) { return String(s == null ? '' : s).replace(/[\/\\:*?"
 function firstName_(f) { return String(f == null ? '' : f).trim().split(/\s+/)[0] || ''; }
 function lastName_(f) { const p = String(f == null ? '' : f).trim().split(/\s+/); return p.length > 1 ? p.slice(1).join(' ') : ''; }
 function fmtMoney_(n) { try { return Number(n).toLocaleString(CFG.LOCALE, { style: 'currency', currency: CFG.CURRENCY_CODE }); } catch (e) { return '$ ' + round2_(Number(n)).toFixed(2); } }
+/**
+ * Convierte a número un importe que puede venir como número real o como TEXTO
+ * (ej. "$262.500,00", "262,500.00", "'262500"). Tolera separadores es-AR (miles ".",
+ * decimales ",") y en-US. Devuelve 0 si no hay número. Evita que un monto tipeado
+ * como texto quede fuera del SUMIF / del motor de mora (pago "perdido").
+ */
+function parseMoney_(v) {
+  if (typeof v === 'number') return isFinite(v) ? v : 0;
+  if (v == null || v instanceof Date) return 0;
+  let s = String(v).trim().replace(/[^\d.,\-]/g, ''); // deja dígitos, separadores y signo
+  if (!s || s === '-') return 0;
+  const decPos = Math.max(s.lastIndexOf('.'), s.lastIndexOf(','));
+  if (decPos > -1 && /^[.,]\d{1,2}$/.test(s.slice(decPos))) {   // el último separador son centavos
+    s = s.slice(0, decPos).replace(/[.,]/g, '') + '.' + s.slice(decPos + 1);
+  } else {
+    s = s.replace(/[.,]/g, '');                                 // todos son separadores de miles
+  }
+  const n = Number(s);
+  return isFinite(n) ? n : 0;
+}
 const MESES_ES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
 // Fechas para contrato y comunicaciones al cliente: año, mes (en palabra) y día. Ej.: "2026 Agosto 11".
 function fmtDate_(d) {
