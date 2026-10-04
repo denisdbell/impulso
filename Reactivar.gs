@@ -129,19 +129,72 @@ function ensureMoraColumns_(bs) {
   }
 }
 
-/** Inserta (una sola vez) la columna "Total a Pagar (con mora)" en "Prestatarios", justo
- *  DESPUÉS de "Saldo con Mora" — TOTAL del plan a pagar (suma de "Monto Cuota" de "Cuotas",
- *  estable ante los pagos). Desplaza a la derecha lo que hubiera (banner). Idempotente. */
+/** Inserta (una sola vez) la columna "Suma de cuotas" en "Prestatarios", justo DESPUÉS de
+ *  "Saldo con Mora" — SUMA de "Monto Cuota" de "Cuotas" para el préstamo (total del plan,
+ *  estable ante los pagos). Migra EN EL LUGAR el nombre anterior "Total a Pagar (con mora)"
+ *  (que describía mal lo que la columna calcula). Desplaza a la derecha lo que hubiera
+ *  (banner). Idempotente. */
 function ensurePlanColumn_(bs) {
-  if (colByAny_(headerIndex_(bs), ['Total a Pagar (con mora)'])) return;
-  const after = colByAny_(headerIndex_(bs), ['Saldo con Mora'])
-    || colByAny_(headerIndex_(bs), ['Recargo por Mora (acum.)'])
-    || colByAny_(headerIndex_(bs), ['Préstamos (de ' + MAX_LOANS_PER_CLIENT + ')', 'Préstamos'])
+  const H = headerIndex_(bs);
+  const existing = colByAny_(H, ['Suma de cuotas', 'Total a Pagar (con mora)']);
+  if (existing) {
+    // Renombrar en el lugar el encabezado viejo → nuevo (sin mover la columna ni los datos).
+    if (!colByAny_(H, ['Suma de cuotas'])) { bs.getRange(1, existing).setValue('Suma de cuotas'); invalidateHeaderIndexCache_(); }
+    return;
+  }
+  const after = colByAny_(H, ['Saldo con Mora'])
+    || colByAny_(H, ['Recargo por Mora (acum.)'])
+    || colByAny_(H, ['Préstamos (de ' + MAX_LOANS_PER_CLIENT + ')', 'Préstamos'])
     || PB.BALANCE_MORA;
   bs.insertColumnsAfter(after, 1);
-  bs.getRange(1, after + 1).setValue('Total a Pagar (con mora)').setFontWeight('bold')
+  bs.getRange(1, after + 1).setValue('Suma de cuotas').setFontWeight('bold')
     .setBackground('#1c4587').setFontColor('#fff').setWrap(true);
   invalidateHeaderIndexCache_();
+}
+
+/** Inserta una columna nueva al FINAL de la hoja SIN que la combinación del banner
+ *  ("Capital disponible…") la absorba ni haga fallar insertColumnsAfter. Rompe
+ *  temporalmente TODAS las combinaciones de la fila 1 (quedan a la izquierda del punto de
+ *  inserción, así que no se desplazan), inserta, escribe el encabezado y las vuelve a combinar
+ *  en sus mismas coordenadas. Devuelve el índice 1-based de la nueva columna. */
+function insertEndColumnSafe_(bs, header, width) {
+  const merges = bs.getRange(1, 1, 1, bs.getMaxColumns()).getMergedRanges()
+    .map(r => ({ c: r.getColumn(), n: r.getNumColumns() }));
+  // Inserta PASADAS todas las combinaciones (un banner ancho mal alineado puede extenderse más
+  // allá de la última columna con datos), así la nueva columna nunca cae dentro de una combinación.
+  let lastCol = bs.getLastColumn();
+  merges.forEach(m => { lastCol = Math.max(lastCol, m.c + m.n - 1); });
+  merges.forEach(m => { try { bs.getRange(1, m.c, 1, m.n).breakApart(); } catch (e) {} });
+  bs.insertColumnsAfter(lastCol, 1);
+  const col = lastCol + 1;
+  bs.getRange(1, col).setValue(header).setFontWeight('bold')
+    .setBackground('#1c4587').setFontColor('#fff').setWrap(true);
+  if (width) bs.setColumnWidth(col, width);
+  merges.forEach(m => { try { bs.getRange(1, m.c, 1, m.n).merge(); } catch (e) {} });
+  invalidateHeaderIndexCache_();
+  return col;
+}
+
+/** Inserta (una sola vez) la columna "Enlace de Firma" al FINAL de "Prestatarios": enlace
+ *  clicable a la página de firma del contrato (se arma por fórmula HYPERLINK, nunca estático).
+ *  Usa insertEndColumnSafe_ para no colisionar con la combinación del banner. Idempotente. */
+function ensureSigningLinkColumn_(bs) {
+  if (colByAny_(headerIndex_(bs), ['Enlace de Firma'])) return;
+  insertEndColumnSafe_(bs, 'Enlace de Firma', 160);
+}
+
+/** Inserta (una sola vez) la casilla "Generar enlace 🔗" en "Prestatarios" y le pone checkboxes
+ *  a las filas de datos. Al tildarla, el onEdit genera/escribe el enlace de firma de ESE préstamo
+ *  en la columna "Enlace de Firma" y lo muestra para copiar. Idempotente; resuelve por NOMBRE. */
+function ensureSigningLinkCheckboxColumn_(bs) {
+  let col = colByAny_(headerIndex_(bs), ['Generar enlace 🔗']);
+  if (!col) {
+    col = insertEndColumnSafe_(bs, 'Generar enlace 🔗', 120);
+    bs.getRange(1, col).setNote('Tildá para generar el enlace de firma de ese préstamo en la columna "Enlace de Firma" (y verlo para copiar). Requiere la URL de la app web en Configuración. Se destilda solo.');
+  }
+  const last = bs.getLastRow();
+  if (last >= 2) bs.getRange(2, col, last - 1, 1).insertCheckboxes();
+  return col;
 }
 
 /** Escribe las fórmulas de "Recargo por Mora (acum.)" y "Saldo con Mora" en todo el bloque de
@@ -156,7 +209,9 @@ function writeMoraFormulasBlock_(sh) {
   const morC = colByAny_(H, ['Recargo por Mora (acum.)']);
   const adjC = colByAny_(H, ['Mora (ajuste)']);
   const bmC = colByAny_(H, ['Saldo con Mora']);
-  const planC = colByAny_(H, ['Total a Pagar (con mora)']);
+  const planC = colByAny_(H, ['Suma de cuotas', 'Total a Pagar (con mora)']);
+  const linkC = colByAny_(H, ['Enlace de Firma']);
+  const firmaC = colByAny_(H, ['Estado de Firma']);
   const TOT = a1col_(colByAny_(H, ['Total a Pagar', 'Total a pagar']) || 11);
   const MOR = morC ? a1col_(morC) : '';
   const ADJ = adjC ? a1col_(adjC) : '';
@@ -166,10 +221,11 @@ function writeMoraFormulasBlock_(sh) {
   });
   if (bmC) setColFormulas_(sh, bmC, b.first, b.count, r => MOR ? `=IF($${A}${r}="","",N($${K}${r})+N($${MOR}${r}))` : `=IF($${A}${r}="","",N($${K}${r}))`);
   if (planC) setColFormulas_(sh, planC, b.first, b.count, r => borrowerPlanTotalFormula_(r, A, TOT));
+  if (linkC) { const base = webAppBaseUrl_(), firmaL = firmaC ? a1col_(firmaC) : ''; setColFormulas_(sh, linkC, b.first, b.count, r => signingLinkFormula_(r, A, firmaL, base)); }
   if (morC) fmtCol_(sh, morC, b.first, b.count, CFG.CURRENCY_FMT);
   if (adjC) { fmtCol_(sh, adjC, b.first, b.count, CFG.CURRENCY_FMT); sh.getRange(1, adjC).setNote('AJUSTE MANUAL de la mora. Vacío = automático. 0 = condonar. Un importe = fijar ese recargo.'); }
   if (bmC) fmtCol_(sh, bmC, b.first, b.count, CFG.CURRENCY_FMT);
-  if (planC) { fmtCol_(sh, planC, b.first, b.count, CFG.CURRENCY_FMT); sh.getRange(1, planC).setNote('Total del PLAN a pagar, incluyendo la mora congelada (para préstamos reestructurados = total del plan de cuotas). Suma de "Monto Cuota" de "Cuotas"; NO cambia con los pagos. "Saldo con Mora" muestra lo que aún falta pagar.'); }
+  if (planC) { fmtCol_(sh, planC, b.first, b.count, CFG.CURRENCY_FMT); sh.getRange(1, planC).setNote('SUMA de "Monto Cuota" de "Cuotas" para este préstamo (total del plan; en reestructurados incluye la mora congelada en las cuotas). Estable: NO cambia con los pagos. NO es "total + mora" — la mora vigente está en "Saldo con Mora", que muestra lo que aún falta pagar.'); }
 }
 
 /** Agrega/actualiza (idempotente) una regla de formato condicional "≥ n" sobre una
@@ -227,13 +283,24 @@ function installNewFeatureColumns_(ss) {
     }
     bs.getRange(1, cntCol).setNote('Préstamos vigentes del prestatario (máximo ' + MAX_LOANS_PER_CLIENT + ').');
     ensureMoraColumns_(bs); // columnas separadas Recargo / Mora (ajuste) / Saldo con Mora (tras "Préstamos (de N)")
-    ensurePlanColumn_(bs);  // "Total a Pagar (con mora)" = total del plan (tras "Saldo con Mora")
-    writeMoraFormulasBlock_(bs); // rellena las fórmulas (mora + total del plan) para que no queden vacías con 🆕 solo
+    ensurePlanColumn_(bs);  // "Suma de cuotas" = total del plan (tras "Saldo con Mora")
+    ensureSigningLinkColumn_(bs); // "Enlace de Firma" = enlace clicable al contrato (al final de la hoja)
+    ensureSigningLinkCheckboxColumn_(bs); // casilla "Generar enlace 🔗" (genera el enlace de ese préstamo al tildar)
+    writeMoraFormulasBlock_(bs); // rellena las fórmulas (mora + total del plan + enlace de firma) para que no queden vacías con 🆕 solo
 
     if (capC && pagC) {
       try {
-        const capL = a1col_(capC), pagL = a1col_(pagC), bannerCol = cntCol + 5; // deja lugar a las 3 columnas de mora + "Total a Pagar (con mora)"
-        bs.getRange(1, bannerCol, 1, 3).breakApart();
+        // Rompe TODAS las combinaciones de la fila 1 (sana un banner que haya quedado ancho/
+        // desalineado por corridas previas) y ubica el banner DINÁMICAMENTE justo a la derecha de
+        // la última columna con nombre (p. ej. "Generar enlace 🔗"), para que NUNCA se superponga
+        // con "Enlace de Firma"/"Generar enlace 🔗" (antes un offset fijo cntCol+5 las tapaba).
+        const HH = headerIndex_(bs);
+        const lastNamed = colByAny_(HH, ['Generar enlace 🔗'])
+          || colByAny_(HH, ['Enlace de Firma'])
+          || colByAny_(HH, ['Suma de cuotas', 'Total a Pagar (con mora)'])
+          || (cntCol + 4);
+        const capL = a1col_(capC), pagL = a1col_(pagC), bannerCol = lastNamed + 1;
+        bs.getRange(1, 1, 1, bs.getLastColumn()).getMergedRanges().forEach(r => { try { r.breakApart(); } catch (e) {} });
         const banner = bs.getRange(1, bannerCol, 1, 3).merge();
         banner.setFormula('="Capital disponible (máx. asignable): " & TEXT((' + fondoFormula_() +
           ')-SUM($' + capL + '$' + b.first + ':$' + capL + ')+SUM($' + pagL + '$' + b.first + ':$' + pagL + '),"$#,##0.00")');
@@ -357,7 +424,9 @@ function reactivateBorrowers_(ss) {
   const sh = ss.getSheetByName(CFG.SHEETS.BORROWERS); if (!sh) return 'hoja ausente';
   const pg = ss.getSheetByName(CFG.SHEETS.PAYMENTS);
   ensureMoraColumns_(sh); // columnas separadas de mora (Recargo por Mora / Saldo con Mora)
-  ensurePlanColumn_(sh);  // "Total a Pagar (con mora)" = total del plan (tras "Saldo con Mora")
+  ensurePlanColumn_(sh);  // "Suma de cuotas" = total del plan (tras "Saldo con Mora")
+  ensureSigningLinkColumn_(sh); // "Enlace de Firma" = enlace clicable al contrato (al final de la hoja)
+  ensureSigningLinkCheckboxColumn_(sh); // casilla "Generar enlace 🔗" (genera el enlace de ese préstamo al tildar)
   const H = headerIndex_(sh);
   const idC = colByAny_(H, ['ID Préstamo', 'ID Prestamo']);
   const cliC = colByAny_(H, ['ID Cliente']);
@@ -373,7 +442,8 @@ function reactivateBorrowers_(ss) {
   const morC = colByAny_(H, ['Recargo por Mora (acum.)']);
   const adjC = colByAny_(H, ['Mora (ajuste)']);
   const bmC = colByAny_(H, ['Saldo con Mora']);
-  const planC = colByAny_(H, ['Total a Pagar (con mora)']);
+  const planC = colByAny_(H, ['Suma de cuotas', 'Total a Pagar (con mora)']);
+  const linkC = colByAny_(H, ['Enlace de Firma']);
   const estC = colByAny_(H, ['Estado']);
   const firmaC = colByAny_(H, ['Estado de Firma']);
   if (!idC) return 'falta ID Préstamo';
@@ -409,8 +479,10 @@ function reactivateBorrowers_(ss) {
   }
   // Saldo con Mora = Saldo Pendiente + Recargo por Mora = monto a pagar HOY.
   if (bmC) setColFormulas_(sh, bmC, b.first, b.count, r => MOR ? `=IF($${A}${r}="","",N($${K}${r})+N($${MOR}${r}))` : `=IF($${A}${r}="","",N($${K}${r}))`);
-  // Total a Pagar (con mora) = TOTAL del plan (Σ "Monto Cuota" de "Cuotas"); estable ante los pagos.
+  // Suma de cuotas = total del plan (Σ "Monto Cuota" de "Cuotas"); estable ante los pagos.
   if (planC) setColFormulas_(sh, planC, b.first, b.count, r => borrowerPlanTotalFormula_(r, A, I));
+  // Enlace de Firma = enlace clicable a la página de firma del contrato (o "✔ Firmado").
+  if (linkC) { const base = webAppBaseUrl_(), firmaL = firmaC ? a1col_(firmaC) : ''; setColFormulas_(sh, linkC, b.first, b.count, r => signingLinkFormula_(r, A, firmaL, base)); }
   // V-16: Estado se DERIVA del monto a pagar (Saldo con Mora) y la fecha. PAGADO sólo si nada
   // se debe, incluida la mora. V-15: sin mora si saldo 0.
   if (estC) setColFormulas_(sh, estC, b.first, b.count, r => `=IF($${A}${r}="","",IF($${BM}${r}<=0,"${ST.PAID}",IF(OR(${cuotaVencidaExpr_('$' + A + r)},TODAY()>$${G}${r}),"${ST.OVERDUE}","${ST.ACTIVE}")))`);
@@ -437,7 +509,7 @@ function reactivateBorrowers_(ss) {
   if (morC) fmtCol_(sh, morC, b.first, b.count, CFG.CURRENCY_FMT);
   if (adjC) { fmtCol_(sh, adjC, b.first, b.count, CFG.CURRENCY_FMT); sh.getRange(1, adjC).setNote('AJUSTE MANUAL de la mora. Vacío = automático. 0 = condonar. Un importe = fijar ese recargo.'); }
   if (bmC) fmtCol_(sh, bmC, b.first, b.count, CFG.CURRENCY_FMT);
-  if (planC) { fmtCol_(sh, planC, b.first, b.count, CFG.CURRENCY_FMT); sh.getRange(1, planC).setNote('Total del PLAN a pagar, incluyendo la mora congelada (para préstamos reestructurados = total del plan de cuotas). Suma de "Monto Cuota" de "Cuotas"; NO cambia con los pagos. "Saldo con Mora" muestra lo que aún falta pagar.'); }
+  if (planC) { fmtCol_(sh, planC, b.first, b.count, CFG.CURRENCY_FMT); sh.getRange(1, planC).setNote('SUMA de "Monto Cuota" de "Cuotas" para este préstamo (total del plan; en reestructurados incluye la mora congelada en las cuotas). Estable: NO cambia con los pagos. NO es "total + mora" — la mora vigente está en "Saldo con Mora", que muestra lo que aún falta pagar.'); }
   fmtCol_(sh, tasC, b.first, b.count, '0%');
   fmtCol_(sh, fecC, b.first, b.count, 'yyyy-mm-dd');
   fmtCol_(sh, venC, b.first, b.count, 'yyyy-mm-dd');
@@ -456,7 +528,7 @@ function reactivateBorrowers_(ss) {
 
   // Protección (aviso) de columnas de fórmula.
   clearReactivarProtections_(sh);
-  protectFormulaCols_(sh, [tasC, venC, intC, totC, pagC, salC, estC, planC], b.first, b.count);
+  protectFormulaCols_(sh, [tasC, venC, intC, totC, pagC, salC, estC, planC, linkC], b.first, b.count);
 
   return b.count + ' préstamos · fórmulas Tasa/Venc/Interés/Total/Pagado/Saldo/Estado + validaciones + formato';
 }
@@ -505,10 +577,13 @@ function writeBorrowerRowFormulas_(bs, r) {
     : `=IF($${A}${r}="","",${moraFrag})`);
   // Saldo con Mora = Saldo Pendiente + Recargo por Mora = monto a pagar HOY.
   setF(['Saldo con Mora'], MOR ? `=IF($${A}${r}="","",N($${K}${r})+N($${MOR}${r}))` : `=IF($${A}${r}="","",N($${K}${r}))`);
-  // Total a Pagar (con mora) = TOTAL del plan (Σ "Monto Cuota" de "Cuotas"); estable ante los pagos.
-  setF(['Total a Pagar (con mora)'], borrowerPlanTotalFormula_(r, A, I));
+  // Suma de cuotas = total del plan (Σ "Monto Cuota" de "Cuotas"); estable ante los pagos.
+  setF(['Suma de cuotas', 'Total a Pagar (con mora)'], borrowerPlanTotalFormula_(r, A, I));
   // Estado: PAGADO sólo cuando el "Saldo con Mora" llega a 0 (incluye la mora pendiente).
   setF(['Estado'], `=IF($${A}${r}="","",IF($${BM}${r}<=0,"${ST.PAID}",IF(OR(${cuotaVencidaExpr_('$' + A + r)},TODAY()>$${G}${r}),"${ST.OVERDUE}","${ST.ACTIVE}")))`);
+  // Enlace de Firma = enlace clicable a la página de firma del contrato (o "✔ Firmado").
+  const firmaC = colByAny_(H, ['Estado de Firma']);
+  setF(['Enlace de Firma'], signingLinkFormula_(r, A, firmaC ? a1col_(firmaC) : '', webAppBaseUrl_()));
 }
 
 /* ============================ PAGOS ============================ */
@@ -1002,7 +1077,14 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
         row_('Interés', fmtMoney_(interest)) + row_('Total a devolver', '<b>' + fmtMoney_(total) + '</b>') +
         '</table>' + btn,
         contractFile ? { attachments: [contractFile.getAs('application/pdf')] } : {});
-    } catch (e) { logError_('approveApplicantV2_:email', e); }
+    } catch (e) {
+      // El correo NO debe hacer fallar la aprobación, pero el prestamista tiene que
+      // enterarse: dejamos un aviso visible en la fila del préstamo (antes quedaba
+      // oculto sólo en la hoja "Errores").
+      logError_('approveApplicantV2_:email', e);
+      try { bs.getRange(tRow, idCol).setNote('⚠ No se pudo enviar el correo de firma a ' + email + ': ' + (e && e.message ? e.message : e) + '. Reenvíelo con "✉ Reenviar enlace de firma".'); } catch (e2) { }
+      try { ss.toast('Préstamo ' + loanId + ' aprobado, pero NO se pudo enviar el correo de firma. Revisá la hoja "Errores" o reenvialo.', '⚠ Correo no enviado', 8); } catch (e2) { }
+    }
   }
 
   nb.deleteRow(row);

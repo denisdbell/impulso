@@ -100,7 +100,7 @@ const VALIDATION_RULES = [
   ['V-29', 'Formulario', 'Monto', 'El monto no puede superar el tope configurable (por defecto $500.000).', 'El monto máximo por préstamo es $500.000.', 'BLOQUEA', 'ALTA'],
   ['V-30', 'Formulario', 'Monto/Plazo', 'El plazo/tasa/cuotas se DERIVAN del monto: ≤$150.000→elige 15d/25% o 30d/50% (1 cuota); ≤$300.000→30d/50%/1; >$300.000→90d/100%/3 cuotas.', 'El plazo se calcula según el monto.', 'BLOQUEA', 'ALTA'],
   ['V-31', 'Alta', 'Cuotas', 'Préstamo grande (>$300.000): se genera un cronograma de 3 cuotas mensuales (día 30/60/90), cada una = Total÷3.', '—', 'AUTOMÁTICO', 'ALTA'],
-  ['V-32', 'Aprobación', 'Monto', 'Escalera de graduación: el monto ≤ límite por historial de repago del prestatario. Un atraso REINICIA la escalera: solo cuentan los préstamos saldados a tiempo DESPUÉS del último atraso. Mora vigente → límite inicial.', 'Supera el límite por historial del prestatario. Se recupera saldando préstamos a tiempo (aun después de un atraso), o con «Anular límites».', 'BLOQUEA', 'ALTA'],
+  ['V-32', 'Aprobación', 'Monto', 'Escalera de graduación: el monto ≤ límite por historial de repago del prestatario. Para subir de nivel hay que haber DEVUELTO A TIEMPO un préstamo cuyo Capital sea ≥ el límite del nivel anterior (muchos préstamos chicos NO promueven). Un atraso REINICIA la escalera: solo cuentan los saldados a tiempo DESPUÉS del último atraso. Mora vigente → límite inicial.', 'Supera el límite por historial del prestatario. Se amplía devolviendo a tiempo un préstamo de al menos el tope actual (no basta con montos chicos), o con «Anular límites».', 'BLOQUEA', 'ALTA'],
   ['V-33', 'Formulario y Aprobación', 'Cliente', 'Cliente BLOQUEADO (columna «Bloqueado» = SÍ en Clientes): se rechaza toda solicitud y aprobación que coincida por correo, DNI, CUIL o teléfono. ABSOLUTO: no se anula con «Anular límites». Desbloquear = vaciar la columna «Bloqueado».', 'No es posible procesar solicitudes para este cliente. Ante cualquier duda, comunicate con el prestamista.', 'BLOQUEA', 'ALTA'],
   ['V-34', 'Aprobación', 'Referencias', 'Al menos UNA referencia debe estar VALIDADA (casilla «Ref 1 Validada?» o «Ref 2 Validada?» = SÍ) en «Nuevos Prestatarios» antes de aprobar/otorgar el préstamo. No se anula con «Anular límites».', 'Validá al menos una referencia antes de aprobar el préstamo.', 'BLOQUEA', 'ALTA'],
   ['V-35', 'Formulario', 'Nombre', 'El nombre del solicitante y el de cada referencia deben tener al menos 10 caracteres.', 'El nombre debe tener al menos 10 caracteres.', 'BLOQUEA', 'MEDIA'],
@@ -467,10 +467,13 @@ function lookupClienteForIntake(email, dni) {
     // V-32 — límite por historial de repago (escalera de graduación), específico del
     // prestatario. Aplica también a clientes nuevos (aún sin historial → límite inicial).
     const h = repaymentHistory_(dnV.norm);
-    res.maxAmount = graduationMax_(dnV.norm);
+    const g = graduationLevelFor_(h);           // nivel + límite (misma fuente que V-32/Niveles)
+    res.maxAmount = g.max;
+    res.level = g.level;
     res.maxAmountFmt = fmtMoney_(res.maxAmount);
     res.settledCount = h.settledCount;
     res.onTimeCount = h.onTimeCount;
+    res.onTimeMaxPrincipal = h.onTimeMaxPrincipal;
     // Límite reducido HOY: mora vigente, o atrasos sin repagos a tiempo posteriores
     // (un atraso reinicia la escalera; se recupera saldando a tiempo).
     res.hasArrears = !!(h.everDefaulted || (h.lateCount > 0 && h.onTimeCount === 0));
@@ -799,7 +802,7 @@ function clientLoanCount_(clientId) {
  */
 function repaymentHistory_(dni) {
   const dniN = normDni_(dni);
-  const res = { settledCount: 0, onTimeCount: 0, lateCount: 0, everDefaulted: false, lastLateTime: 0 };
+  const res = { settledCount: 0, onTimeCount: 0, lateCount: 0, everDefaulted: false, lastLateTime: 0, onTimeMaxPrincipal: 0 };
   if (!dniN) return res;
   const ss = getSS_();
   const cli = clienteByDni_(dniN);
@@ -832,10 +835,10 @@ function repaymentHistory_(dni) {
   // Acumula los préstamos del cliente (deduplicados por ID: un préstamo puede figurar
   // en ambas hojas a mitad de un archivado) para evaluarlos en dos pasadas.
   const loans = [], seen = {};
-  const addLoan_ = (loanId, dueDate, settled, fallbackSettle) => {
+  const addLoan_ = (loanId, dueDate, settled, fallbackSettle, principal) => {
     const id = String(loanId || '').trim();
     if (!id || seen[id]) return; seen[id] = true;
-    loans.push({ id: id, due: dueDate, settled: !!settled, fallbackSettle: fallbackSettle || null });
+    loans.push({ id: id, due: dueDate, settled: !!settled, fallbackSettle: fallbackSettle || null, principal: Number(principal) || 0 });
   };
 
   // 1) "Prestatarios": TODOS los préstamos del cliente (por ID Cliente, cualquier estado).
@@ -846,13 +849,14 @@ function repaymentHistory_(dni) {
     const cliC = colByAny_(H, ['ID Cliente']) || PB.CLIENT_ID;
     const dueC = colByAny_(H, ['Fecha de Vencimiento', 'Vencimiento']) || PB.DUE;
     const stC = colByAny_(H, ['Estado']) || PB.STATE;
-    const data = bs.getRange(2, 1, bs.getLastRow() - 1, Math.max(idC, cliC, dueC, stC)).getValues();
+    const capC = colByAny_(H, ['Capital']) || PB.PRINCIPAL;
+    const data = bs.getRange(2, 1, bs.getLastRow() - 1, Math.max(idC, cliC, dueC, stC, capC)).getValues();
     data.forEach(r => {
       if (String(r[cliC - 1] || '').trim() !== clientId) return;
       const st = String(r[stC - 1] || '').trim().toUpperCase();
       if (st === ST.OVERDUE) res.everDefaulted = true;   // mora vigente
       // Detecta un pago tardío en cualquier estado (activo/vencido/pagado); cuenta on-time sólo si PAGADO.
-      addLoan_(r[idC - 1], r[dueC - 1], st === ST.PAID);
+      addLoan_(r[idC - 1], r[dueC - 1], st === ST.PAID, null, r[capC - 1]);
     });
   }
 
@@ -863,10 +867,11 @@ function repaymentHistory_(dni) {
     const H = headerIndex_(cs);
     const idC = colByAny_(H, ['ID Préstamo', 'ID Prestamo']) || 1;
     const dniC = colByAny_(H, ['DNI']) || 3;
+    const capC = colByAny_(H, ['Capital']) || 6;
     const dueC = colByAny_(H, ['Fecha de Vencimiento', 'Vencimiento']) || 12;
     const setC = colByAny_(H, ['Fecha de Saldado']) || 13;
-    const data = cs.getRange(2, 1, cs.getLastRow() - 1, Math.max(idC, dniC, dueC, setC)).getValues();
-    data.forEach(r => { if (normDni_(r[dniC - 1]) === dniN) addLoan_(r[idC - 1], r[dueC - 1], true, r[setC - 1]); });
+    const data = cs.getRange(2, 1, cs.getLastRow() - 1, Math.max(idC, dniC, capC, dueC, setC)).getValues();
+    data.forEach(r => { if (normDni_(r[dniC - 1]) === dniN) addLoan_(r[idC - 1], r[dueC - 1], true, r[setC - 1], r[capC - 1]); });
   }
 
   // Pasada 1 — atrasos y momento del ÚLTIMO atraso (el pago tardío más reciente).
@@ -882,35 +887,121 @@ function repaymentHistory_(dni) {
   // Pasada 2 — la escalera se RECONSTRUYE: solo suman on-time los préstamos saldados
   // (sin atraso) DESPUÉS del último atraso. Sin atrasos → cuentan todos, como antes.
   const toTime_ = v => { const t = (v instanceof Date) ? v.getTime() : Date.parse(v); return isFinite(t) ? t : null; };
+  // Cuenta un préstamo saldado a tiempo y recuerda el MAYOR capital devuelto a tiempo
+  // (V-32: la promoción exige haber devuelto un préstamo ≥ límite del nivel anterior).
+  const countOnTime_ = L => { res.onTimeCount++; res.onTimeMaxPrincipal = Math.max(res.onTimeMaxPrincipal, Number(L.principal) || 0); };
   loans.forEach(L => {
     if (!L.settled) return;
     res.settledCount++;
     if (L.late) return;                                   // saldado tarde: nunca suma
-    if (!res.lastLateTime) { res.onTimeCount++; return; } // nunca se atrasó
+    if (!res.lastLateTime) { countOnTime_(L); return; }   // nunca se atrasó
     const settleTime = (lastPayByLoan[L.id] != null) ? lastPayByLoan[L.id] : toTime_(L.fallbackSettle);
-    if (settleTime != null && settleTime > res.lastLateTime) res.onTimeCount++;
+    if (settleTime != null && settleTime > res.lastLateTime) countOnTime_(L);
   });
 
   return res;
 }
 
 /**
- * V-32 — Techo de monto por HISTORIAL de repago (escalera de graduación). Los tramos
- * se leen de "Configuración" (ajustables sin tocar el código):
- *   • sin historial / con mora vigente  → "Límite inicial (préstamo nuevo)"  (150k)
- *   • ≥1 préstamo saldado a tiempo      → "Límite tras 1 préstamo saldado"   (300k)
- *   • ≥2 préstamos saldados a tiempo    → "Límite tras 2 préstamos saldados" (500k)
- * Un atraso REINICIA la escalera: solo cuentan los préstamos saldados a tiempo
- * DESPUÉS del último atraso (onTimeCount ya viene depurado de repaymentHistory_),
- * así el prestatario puede volver a subir. Una mora VIGENTE fuerza el límite inicial.
+ * V-32 — Nivel y techo de monto por HISTORIAL de repago (escalera de graduación), a partir
+ * de un historial ya calculado (repaymentHistory_). Los tramos se leen de "Configuración":
+ *   • sin historial / con mora vigente → "Límite inicial (préstamo nuevo)"  (150k) · Inicial
+ *   • Nivel 1 → "Límite tras 1 préstamo saldado" (300k)
+ *   • Nivel 2 → "Límite tras 2 préstamos saldados" (500k)
+ * Promoción (regla por MONTO, no solo por cantidad): para subir a un nivel hay que haber
+ * DEVUELTO A TIEMPO un préstamo cuyo Capital sea ≥ el límite del nivel ANTERIOR (así se
+ * prueba que el prestatario maneja ese tamaño antes de habilitarle más):
+ *   • Nivel 1: ≥1 saldado a tiempo Y un préstamo devuelto ≥ "Límite inicial".
+ *   • Nivel 2: ≥2 saldados a tiempo Y un préstamo devuelto ≥ "Límite tras 1 préstamo saldado".
+ * Devolver muchos préstamos chicos NO promueve (p. ej. 3×$100.000 → sigue Inicial).
+ * Un atraso REINICIA la escalera (solo cuentan los saldados a tiempo posteriores al último
+ * atraso). Una mora VIGENTE fuerza el límite inicial.
  */
-function graduationMax_(dni) {
-  const h = repaymentHistory_(dni);
+function graduationLevelFor_(h) {
   const starter = settingMoney_('Límite inicial (préstamo nuevo)', 150000);
-  if (h.everDefaulted) return starter;
-  if (h.onTimeCount >= 2) return settingMoney_('Límite tras 2 préstamos saldados', 500000);
-  if (h.onTimeCount >= 1) return settingMoney_('Límite tras 1 préstamo saldado', 300000);
-  return starter;
+  const max1 = settingMoney_('Límite tras 1 préstamo saldado', 300000);
+  const max2 = settingMoney_('Límite tras 2 préstamos saldados', 500000);
+  const proven = Number(h.onTimeMaxPrincipal) || 0;
+  if (h.everDefaulted) return { level: 'Inicial', max: starter };
+  if (h.onTimeCount >= 2 && proven >= max1) return { level: 'Nivel 2', max: max2 };
+  if (h.onTimeCount >= 1 && proven >= starter) return { level: 'Nivel 1', max: max1 };
+  return { level: 'Inicial', max: starter };
+}
+function graduationMax_(dni) {
+  return graduationLevelFor_(repaymentHistory_(dni)).max;
+}
+
+/**
+ * Hoja "Niveles de Clientes" — panel de SOLO LECTURA con la escalera de graduación
+ * (V-32) de cada cliente: nivel actual, límite de monto por historial, y cuántos
+ * préstamos saldó a tiempo vs. atrasados. Reutiliza repaymentHistory_ (única fuente
+ * de verdad); NO escribe en otras hojas ni envía correos. Se reconstruye por completo
+ * en cada ejecución (idempotente). Se invoca desde el menú "Gestor de Préstamos".
+ * NOTA: repaymentHistory_ relee Pagos/Prestatarios/Saldados por cada cliente; con
+ * carteras grandes puede tardar — aceptable para los volúmenes esperados (≤ MAX_ROWS).
+ */
+function buildClientLevels(opts) {
+  const silent = !!(opts && opts.silent);
+  const ss = getSS_();
+  const sh = getOrCreate_(ss, CFG.SHEETS.LEVELS); sh.clear();
+  sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).clearDataValidations();
+  sh.clearConditionalFormatRules(); // sh.clear() no borra reglas de formato
+
+  const HEADERS = ['ID Cliente', 'Nombre', 'DNI', 'Nivel', 'Límite de monto',
+    'Préstamos a tiempo', 'Préstamos atrasados', 'Préstamos saldados', 'Estado',
+    'Mayor préstamo saldado a tiempo'];
+  sh.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS])
+    .setFontWeight('bold').setBackground('#674ea7').setFontColor('#fff');
+  sh.setFrozenRows(1);
+  sh.getRange(1, HEADERS.length).setNote('Mayor Capital que el cliente devolvió A TIEMPO. V-32: para subir de nivel hay que haber devuelto a tiempo un préstamo ≥ el límite del nivel anterior (no basta con muchos préstamos chicos).');
+
+  const widths = [110, 200, 110, 90, 130, 150, 160, 150, 120, 200];
+  widths.forEach((w, i) => sh.setColumnWidth(i + 1, w));
+
+  // Un cálculo de historial por cliente; nivel y límite se derivan con graduationLevelFor_
+  // (única fuente de verdad, idéntica a la que usa la aprobación V-32 y el formulario web).
+  // Orden: mayor nivel primero; la mora vigente baja al final.
+  const rows = clientesRows_().map(c => {
+    const h = repaymentHistory_(c.dniNorm);
+    const g = graduationLevelFor_(h);
+    return { c: c, h: h, level: g.level, max: g.max,
+      estado: h.everDefaulted ? 'Mora vigente' : 'Al día',
+      sortKey: h.everDefaulted ? -1 : h.onTimeCount };
+  }).sort((a, b) => b.sortKey - a.sortKey || normName_(a.c.name).localeCompare(normName_(b.c.name)));
+
+  if (!rows.length) {
+    sh.getRange(2, 1).setValue('No hay clientes cargados en "' + CFG.SHEETS.CLIENTS + '".').setFontColor('#666');
+    sh.getRange(1, HEADERS.length + 2).setValue('Última actualización: ' + fmtDateTime_(new Date())).setFontColor('#999');
+    return;
+  }
+
+  const n = rows.length;
+  sh.getRange(2, 1, n, HEADERS.length).setValues(rows.map(r => [
+    r.c.id, r.c.name, r.c.dni, r.level, r.max,
+    r.h.onTimeCount, r.h.lateCount, r.h.settledCount, r.estado,
+    r.h.onTimeMaxPrincipal || 0,
+  ]));
+  sh.getRange(2, 5, n, 1).setNumberFormat(CFG.CURRENCY_FMT);
+  sh.getRange(2, HEADERS.length, n, 1).setNumberFormat(CFG.CURRENCY_FMT);
+
+  // Color por nivel (col D) y por estado de mora (col I).
+  const lvl = sh.getRange(2, 4, n, 1), est = sh.getRange(2, 9, n, 1);
+  sh.setConditionalFormatRules([
+    cc_(lvl, 'Nivel 2', '#b6d7a8'),  // verde
+    cc_(lvl, 'Nivel 1', '#fff2cc'),  // amarillo
+    cc_(lvl, 'Inicial', '#efefef'),  // gris
+    cc_(est, 'Mora vigente', '#ea9999'), // rojo
+    cc_(est, 'Al día', '#d9ead3'),       // verde claro
+  ]);
+
+  sh.getRange(1, HEADERS.length + 2).setValue('Última actualización: ' + fmtDateTime_(new Date())).setFontColor('#999');
+
+  // Desde el menú: saltar a la hoja y avisar. Desde onOpen (silent): reconstruir
+  // sin molestar (sin cambiar la hoja activa ni mostrar toast).
+  if (!silent) {
+    ss.setActiveSheet(sh);
+    SpreadsheetApp.getActive().toast('Niveles actualizados para ' + n + ' cliente(s).', 'Gestor de Préstamos', 5);
+  }
 }
 
 /**
@@ -941,7 +1032,7 @@ function validateApprovalV2_(clientId, amount, override, dni, ident) {
     // la escalera (sube de nuevo saldando a tiempo). Clave por DNI (sobrevive a "Saldados").
     const gmax = graduationMax_(dni);
     if (gmax > 0 && amt > gmax)
-      return { ok: false, code: 'V-32', msg: 'El monto (' + fmtMoney_(amt) + ') supera el límite por historial del prestatario (' + fmtMoney_(gmax) + '). Se amplía saldando préstamos a tiempo (los atrasos reinician la escalera), o usá «Anular límites».' };
+      return { ok: false, code: 'V-32', msg: 'El monto (' + fmtMoney_(amt) + ') supera el límite por historial del prestatario (' + fmtMoney_(gmax) + '). Para subir el límite, primero debe DEVOLVER A TIEMPO un préstamo de al menos ' + fmtMoney_(gmax) + ' (no basta con muchos préstamos chicos); los atrasos reinician la escalera. O usá «Anular límites».' };
     // Tope de concentración por prestatario: % configurable del FONDO TOTAL
     // (Configuración ▸ "Tope de concentración…"). Base estable = fondo total (no el
     // efectivo disponible, que se agota al colocar y bloquearía todo préstamo). 0 = sin tope.
@@ -1628,10 +1719,12 @@ function intakeSmartHtml_() {
         if(banner){
           var reason='';
           if(r){
+            // El motivo se basa en el NIVEL real (que exige monto demostrado, no solo cantidad):
+            // así no dice "ampliado" cuando el cliente sigue en Inicial por haber devuelto montos chicos.
             if(r.hasArrears) reason=' — por atrasos previos, tu límite volvió al inicial. Se recupera saldando a tiempo';
-            else if(r.onTimeCount>=2) reason=' — ampliado por tu historial de pagos a tiempo';
-            else if(r.onTimeCount>=1) reason=' — ampliado por tu pago a tiempo';
-            else reason=' — límite inicial (aumenta al devolver a tiempo)';
+            else if(r.level==='Nivel 2') reason=' — ampliado por tu historial de pagos a tiempo';
+            else if(r.level==='Nivel 1') reason=' — ampliado por tu historial de pagos a tiempo';
+            else reason=' — límite inicial (sube devolviendo a tiempo un préstamo de este monto)';
           }
           banner.innerHTML='⚠️ <b>Tu límite actual: '+fmt(MAXAMT)+'</b><span style="font-weight:normal">'+esc(reason)+'</span>';
         }

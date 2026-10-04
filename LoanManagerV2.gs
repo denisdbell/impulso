@@ -33,7 +33,7 @@ const CFG = {
     BORROWERS: 'Prestatarios', PAYMENTS: 'Pagos', SUMMARY: 'Resumen', SETTINGS: 'Configuración',
     AGREEMENT: 'Estudio de Contratos', STATEMENTS: 'Estudio de Estados', REMINDER: 'Estudio de Recordatorios', NEW: 'Nuevos Prestatarios',
     PANEL: 'Panel', STATS: 'Estadísticas', LATE: 'Pagos Atrasados', CLEARED: 'Saldados', REJECTED: 'Rechazados', ERRORS: 'Errores', HELP: 'Instrucciones',
-    SIGN: 'Firmas', CLIENTS: 'Clientes', INSTALLMENTS: 'Cuotas',
+    SIGN: 'Firmas', CLIENTS: 'Clientes', INSTALLMENTS: 'Cuotas', LEVELS: 'Niveles de Clientes',
   },
 };
 const ST = { ACTIVE: 'ACTIVO', OVERDUE: 'VENCIDO', PAID: 'PAGADO', CLEARED: 'SALDADO' };
@@ -104,9 +104,11 @@ function onOpen() {
     .addItem('⑥ Formulario web — publicar / ver enlace', 'showWebFormLink')
     .addItem('Configurar marca (nombre + logo)', 'setBranding')
     .addItem('④ Estadísticas y gráficos', 'showStats')
+    .addItem('🎓 Niveles de clientes (escalera de graduación)', 'buildClientLevels')
     .addItem('💵 Retiro disponible (sin frenar crecimiento)', 'showWithdrawable')
     .addItem('⑤ Actualizar saldos y resumen', 'refreshAll')
     .addItem('🧮 Reparar totales y normalizar pagos', 'repairTotals')
+    .addItem('🧮 Reparar cuotas (duplicadas + fechas)', 'repararCuotas_')
     .addItem('➕ Crear hoja de Recordatorios de pago', 'createRemindersSheet_')
     .addItem('📄 Crear hoja de Estudio de Contratos', 'createAgreementSheet_')
     .addItem('✉ Reenviar enlace de firma (fila seleccionada)', 'resendSigningLink_')
@@ -131,6 +133,11 @@ function onOpen() {
       .addSeparator()
       .addItem('🧪 Ejecutar pruebas (suite)', 'runAllTests'))
     .addToUi();
+
+  // Regenerar "Niveles de Clientes" en cada apertura para que no quede estático.
+  // Silencioso: no cambia la hoja activa ni muestra toast. Un fallo aquí no debe
+  // impedir que se cargue el menú.
+  try { buildClientLevels({ silent: true }); } catch (e) {}
 }
 
 function openSidebar() {
@@ -580,7 +587,7 @@ function setupBorrowers_(ss) {
     'Fecha del Préstamo', 'Fecha de Vencimiento', 'Interés', 'Total a Pagar',
     'Total Pagado', 'Saldo Pendiente (hoy)', 'Estado', 'Contrato PDF', 'Contrato Enviado', 'Último Aviso',
     'Estado de Firma', 'Fecha de Firma', 'Contrato Firmado (PDF)', 'Eliminar', 'Enviar recibo desembolso', 'Préstamos (de ' + MAX_LOANS_PER_CLIENT + ')',
-    'Recargo por Mora (acum.)', 'Mora (ajuste)', 'Saldo con Mora', 'Total a Pagar (con mora)'];
+    'Recargo por Mora (acum.)', 'Mora (ajuste)', 'Saldo con Mora', 'Suma de cuotas'];
   sh.getRange(1, 1, 1, H.length).setValues([H]).setFontWeight('bold').setBackground('#1c4587').setFontColor('#fff').setWrap(true);
   sh.getRange(1, PB.DELETE).setBackground('#990000').setNote('Tildá para ELIMINAR ese préstamo (borra la fila; recuperable con el historial de versiones).');
   sh.getRange(1, PB.SEND_DISB).setNote('Tildá para enviar el recibo de DESEMBOLSO (entrega de fondos) al prestatario. Sólo se envía si el contrato está FIRMADO. Se destilda solo.');
@@ -653,7 +660,7 @@ function writeBorrowerFormulas_(sh, N) {
     fCount.push([`=IF($${CLI}${r}="","",COUNTIFS($${CLI}$2:$${CLI}${N + 1},$${CLI}${r},$${EST}$2:$${EST}${N + 1},"<>${ST.PAID}",$${EST}$2:$${EST}${N + 1},"<>${ST.CLEARED}"))`]);
     fMora.push([borrowerMoraFormula_(r)]);              // Recargo por Mora (acum.) — de "Pagos Atrasados"
     fBalMora.push([borrowerBalanceWithMoraFormula_(r)]); // Saldo con Mora = Saldo + Recargo
-    fPlan.push([borrowerPlanTotalFormula_(r)]);          // Total a Pagar (con mora) = total del plan (Σ Monto Cuota)
+    fPlan.push([borrowerPlanTotalFormula_(r)]);          // Suma de cuotas = total del plan (Σ Monto Cuota)
   }
   sh.getRange(2, PB.NAME, N, 2).setFormulas(fName); // Nombre + DNI
   sh.getRange(2, PB.RATE, N, 1).setFormulas(fRate);
@@ -663,7 +670,7 @@ function writeBorrowerFormulas_(sh, N) {
   sh.getRange(2, PB.LOANCOUNT, N, 1).setFormulas(fCount); // Préstamos (de N)
   sh.getRange(2, PB.MORA_ACUM, N, 1).setFormulas(fMora);          // Recargo por Mora (acum.)
   sh.getRange(2, PB.BALANCE_MORA, N, 1).setFormulas(fBalMora);    // Saldo con Mora ("Mora (ajuste)" queda de entrada)
-  sh.getRange(2, PB.TOTAL_PLAN, N, 1).setFormulas(fPlan);         // Total a Pagar (con mora) = total del plan
+  sh.getRange(2, PB.TOTAL_PLAN, N, 1).setFormulas(fPlan);         // Suma de cuotas = total del plan
   sh.getRange(2, PB.MORA_ACUM, N, 4).setNumberFormat(CFG.CURRENCY_FMT); // formato moneda: mora (3) + total del plan (1)
 }
 /**
@@ -715,7 +722,7 @@ function borrowerBalanceWithMoraFormula_(r) {
   return `=IF($${A}${r}="","",N($${BAL}${r})+N($${MOR}${r}))`;
 }
 /**
- * Columna "Total a Pagar (con mora)" = TOTAL del plan a pagar. Suma los "Monto Cuota" del
+ * Columna "Suma de cuotas" = total del plan a pagar. Suma los "Monto Cuota" del
  * préstamo en "Cuotas" (se fijan al armar el plan; los pagos sólo tocan "Monto Pagado"/"Saldo
  * Cuota", nunca "Monto Cuota"), así que es ESTABLE ante los pagos. Para un préstamo
  * reestructurado equivale a capital + interés + mora congelada. Respaldo en "Total a Pagar"
@@ -727,6 +734,24 @@ function borrowerPlanTotalFormula_(r, aCol, totCol) {
   const C = CFG.SHEETS.INSTALLMENTS, L = colL_(CU.LOAN_ID), E = colL_(CU.AMOUNT);
   const sumf = `SUMIF('${C}'!$${L}:$${L},$${A}${r},'${C}'!$${E}:$${E})`;
   return `=IF($${A}${r}="","",IF(${sumf}>0,${sumf},N($${TOT}${r})))`;
+}
+/**
+ * Fórmula de la columna "Enlace de Firma": muestra la URL COMPLETA de la página de firma
+ * del contrato de ese préstamo (clicable y copiable para compartir por WhatsApp/correo).
+ * Muestra "✔ Firmado" si ya se firmó; si no hay URL de app web publicada, deja un aviso en
+ * vez de un enlace roto. Nunca es estático: se recalcula con el ID del préstamo. `A`/`firmaL`
+ * = letras A1 de "ID Préstamo" y "Estado de Firma"; `base` = URL base de la app web
+ * (webAppBaseUrl_()), fijada al escribir la fórmula.
+ */
+function signingLinkFormula_(r, A, firmaL, base) {
+  const a = '$' + A + r;
+  if (!base) return `=IF(${a}="","","Publicá la app web (menú ⑥) para el enlace de firma")`;
+  // URL = texto visible Y destino del HYPERLINK: así la celda muestra el enlace real y, al
+  // copiarla, se copia la URL (no una etiqueta).
+  const url = `"${base}?page=firmar&loan="&${a}`;
+  const link = `HYPERLINK(${url},${url})`;
+  if (!firmaL) return `=IF(${a}="","",${link})`;
+  return `=IF(${a}="","",IF($${firmaL}${r}="${SIGN.SIGNED}","✔ Firmado",${link}))`;
 }
 /**
  * Estado (col L) como fórmula VIVA. PAGADO en cuanto Total Pagado (J) alcanza el
@@ -1071,6 +1096,10 @@ function cuotasForLoan_(cs, loanId, loanDate, total, n, dueDays, opts) {
     const due = (opts.dates && opts.dates[k - 1]) ? opts.dates[k - 1] : addDays_(loanDate, dueDays[k - 1]);
     rows.push([loanId + '-' + k, loanId, k, due, monto, '', '', '', '']);
   }
+  // Reemplaza, NO apila: borra las cuotas previas de este préstamo antes de escribir.
+  // Sin esto, una 2ª corrida (re-aprobación, reactivar, firma) dejaba filas con el MISMO
+  // "ID Cuota" (p. ej. dos L-0037-1): una fantasma vieja + la real → cuota duplicada.
+  deleteCuotasRowsForLoan_(cs, loanId);
   const start = cs.getLastRow() + 1;
   cs.getRange(start, 1, rows.length, CUOTAS_HEADERS.length).setValues(rows);
   // Fórmulas vivas por fila (reparto del Total Pagado del préstamo, cuota más antigua primero).
@@ -1130,6 +1159,67 @@ function backfillCuotas_(ss) {
     has[loanId] = true; n++;
   }
   return n;
+}
+
+/**
+ * REPARACIÓN (idempotente, desde el menú) de la hoja "Cuotas":
+ *  1) Elimina filas con "ID Cuota" DUPLICADO (residuo de cuando el generador apilaba en vez
+ *     de reemplazar): por cada ID repetido conserva la fila de MAYOR "Monto Cuota" (la cuota
+ *     real) y borra las fantasma (p. ej. $12,50 / $1,25).
+ *  2) Re-alinea fechas: para préstamos de UNA sola cuota cuyo vencimiento no coincide con el
+ *     "Vencimiento" del encabezado (desfase porque la firma movió la Fecha del Préstamo),
+ *     regenera esa cuota desde la Fecha del Préstamo + plazo actuales (cuotasForLoan_ borra-y-recrea).
+ * NO toca planes de varias cuotas (3 cuotas / reestructurados): tienen IDs distintos (-1/-2/-3).
+ */
+function repararCuotas_() {
+  return guard_('repararCuotas_', function () {
+    const ss = getSS_();
+    const cs = ss.getSheetByName(CFG.SHEETS.INSTALLMENTS);
+    if (!cs || cs.getLastRow() < 2) { ss.toast('No hay cuotas que reparar.', 'Reparar cuotas', 5); return { dups: 0, fixed: 0 }; }
+
+    // 1) Duplicados por "ID Cuota": conservar el de mayor monto, borrar el resto (de abajo hacia arriba).
+    let dups = 0;
+    const n0 = cs.getLastRow() - 1;
+    const vals = cs.getRange(2, 1, n0, CU.AMOUNT).getValues(); // A..E (ID Cuota … Monto Cuota)
+    const byId = {};
+    for (let i = 0; i < vals.length; i++) {
+      const id = String(vals[i][CU.CUOTA_ID - 1]).trim(); if (!id) continue;
+      (byId[id] = byId[id] || []).push({ row: i + 2, amount: Number(vals[i][CU.AMOUNT - 1]) || 0 });
+    }
+    const toDelete = [];
+    Object.keys(byId).forEach(id => {
+      const list = byId[id]; if (list.length < 2) return;
+      list.sort((a, b) => b.amount - a.amount);            // mayor monto primero = cuota real
+      for (let j = 1; j < list.length; j++) toDelete.push(list[j].row);
+    });
+    toDelete.sort((a, b) => b - a).forEach(r => { cs.deleteRow(r); dups++; });
+
+    // 2) Re-alinear fechas de préstamos con UNA sola cuota (tras el dedup).
+    const bs = ss.getSheetByName(CFG.SHEETS.BORROWERS);
+    let fixed = 0;
+    if (bs && bs.getLastRow() >= 2 && cs.getLastRow() >= 2) {
+      const cv = cs.getRange(2, 1, cs.getLastRow() - 1, CU.DUE).getValues(); // A..D
+      const byLoan = {};
+      for (let i = 0; i < cv.length; i++) {
+        const lid = String(cv[i][CU.LOAN_ID - 1]).trim(); if (!lid) continue;
+        (byLoan[lid] = byLoan[lid] || []).push(cv[i][CU.DUE - 1]);
+      }
+      for (let row = 2; row <= bs.getLastRow(); row++) {
+        const loan = readLoan_(bs, row);
+        if (!loan.loanId) continue;
+        const qs = byLoan[loan.loanId];
+        if (!qs || qs.length !== 1) continue;              // sólo préstamos de una cuota
+        if (!(loan.dueDate instanceof Date)) continue;
+        const cur = qs[0] instanceof Date ? startOfDay_(qs[0]).getTime() : null;
+        const want = startOfDay_(loan.dueDate).getTime();
+        if (cur === want) continue;                        // ya coincide con el encabezado
+        cuotasForLoan_(cs, loan.loanId, loan.loanDate, round2_(loan.totalDue), 1, [termDays_(loan.term)]);
+        fixed++;
+      }
+    }
+    ss.toast('Cuotas reparadas: ' + dups + ' duplicada(s) eliminada(s), ' + fixed + ' fecha(s) re-alineada(s).', 'Reparar cuotas', 8);
+    return { dups: dups, fixed: fixed };
+  });
 }
 
 function setupSummary_(ss) {
@@ -2243,17 +2333,30 @@ function updateAllOutstanding_() {
 }
 function writeOutstandingRow_(bs, row) {
   const loanId = String(bs.getRange(row, 1).getValue()).trim();
-  const kCell = bs.getRange(row, PB.BALANCE), lCell = bs.getRange(row, PB.STATE);
-  const moraCell = bs.getRange(row, PB.MORA_ACUM), balMoraCell = bs.getRange(row, PB.BALANCE_MORA);
-  if (!loanId) { kCell.clearContent(); lCell.clearContent(); moraCell.clearContent(); balMoraCell.clearContent(); return; }
+  // Columnas por NOMBRE de encabezado (robusto al layout migrado, donde el orden físico
+  // difiere del mapa PB), con respaldo a PB para el esquema nuevo.
+  const H = headerIndex_(bs);
+  const paidCol = colByAny_(H, ['Total Pagado']) || PB.PAID;
+  const balCol = colByAny_(H, ['Saldo Pendiente', 'Saldo Pendiente (hoy)']) || PB.BALANCE;
+  const stateCol = colByAny_(H, ['Estado']) || PB.STATE;
+  const moraCol = colByAny_(H, ['Recargo por Mora (acum.)']) || PB.MORA_ACUM;
+  const balMoraCol = colByAny_(H, ['Saldo con Mora']) || PB.BALANCE_MORA;
+  if (!loanId) {
+    [balCol, stateCol, moraCol, balMoraCol].forEach(c => bs.getRange(row, c).clearContent());
+    return;
+  }
   // Total Pagado (SUMIF), Saldo, Recargo por Mora (de "Pagos Atrasados"), Saldo con Mora y
   // Estado son fórmulas vivas; las reafirmamos por si la fila fue pegada, migrada o creada
-  // al alta (un "Total Pagado" estático dejaba pagos sin acreditar).
-  bs.getRange(row, PB.PAID).setFormula(borrowerPaidFormula_(row));
-  kCell.setFormula(borrowerBalanceFormula_(row));
-  moraCell.setFormula(borrowerMoraFormula_(row));
-  balMoraCell.setFormula(borrowerBalanceWithMoraFormula_(row));
-  lCell.setFormula(borrowerStateFormula_(row));
+  // al alta (un "Total Pagado" estático dejaba pagos sin acreditar). Se delega en
+  // writeBorrowerRowFormulas_, que resuelve TODAS las columnas (y las letras internas de las
+  // fórmulas) por NOMBRE — así las fórmulas no quedan apuntando a columnas equivocadas en el
+  // layout migrado (los builders borrower*Formula_ usan letras fijas del mapa PB).
+  if (typeof writeBorrowerRowFormulas_ === 'function') { writeBorrowerRowFormulas_(bs, row); return; }
+  bs.getRange(row, paidCol).setFormula(borrowerPaidFormula_(row));
+  bs.getRange(row, balCol).setFormula(borrowerBalanceFormula_(row));
+  bs.getRange(row, moraCol).setFormula(borrowerMoraFormula_(row));
+  bs.getRange(row, balMoraCol).setFormula(borrowerBalanceWithMoraFormula_(row));
+  bs.getRange(row, stateCol).setFormula(borrowerStateFormula_(row));
 }
 
 /**
@@ -3701,6 +3804,21 @@ function signStatusRow_(loanId) {
   return null;
 }
 
+/**
+ * Columnas de firma de "Prestatarios" resueltas por NOMBRE de encabezado (robusto al
+ * layout migrado, donde el orden físico difiere del mapa PB). Con respaldo a PB para el
+ * esquema nuevo. Úsese en el flujo de firma en lugar de los índices fijos COL_SIGN_*.
+ */
+function firmaCols_(sh) {
+  const H = headerIndex_(sh);
+  return {
+    status: colByAny_(H, ['Estado de Firma']) || PB.SIGN_STATUS,
+    date: colByAny_(H, ['Fecha de Firma']) || PB.SIGN_DATE,
+    pdf: colByAny_(H, ['Contrato Firmado (PDF)']) || PB.SIGN_PDF,
+    loanDate: colByAny_(H, ['Fecha del Préstamo', 'Fecha Préstamo', 'Fecha de Préstamo', 'Fecha Prestamo']) || PB.LOAN_DATE,
+  };
+}
+
 /** Resumen de términos del contrato (HTML seguro) para la página de firma. */
 /** Verifica identidad (ID + DNI) y devuelve el contrato completo a firmar, o el estado "ya firmado". */
 function getContractForSigning(loanId, dni) {
@@ -3710,7 +3828,7 @@ function getContractForSigning(loanId, dni) {
     if (!loan || String(loan.dni).replace(/\D/g, '') !== String(dni || '').replace(/\D/g, ''))
       return { ok: false, msg: 'Datos no encontrados. Verifique el ID del préstamo y su DNI.' };
     const loc = signStatusRow_(loanId);
-    const status = loc ? String(loc.sh.getRange(loc.row, COL_SIGN_STATUS).getValue() || '').toUpperCase() : '';
+    const status = loc ? String(loc.sh.getRange(loc.row, firmaCols_(loc.sh).status).getValue() || '').toUpperCase() : '';
     if (status === SIGN.SIGNED)
       return { ok: true, signed: true, msg: 'Este contrato ya fue firmado. Le enviamos una copia por correo.' };
     return { ok: true, signed: false, name: loan.name, contractHtml: agreementHtml_(loan) };
@@ -3735,7 +3853,8 @@ function submitSignature(loanId, dni, signatureDataUrl, agree, meta) {
     if (!m) throw new Error('Falta la firma. Dibuje su firma o cargue una imagen.');
     const loc = signStatusRow_(loanId);
     if (!loc) throw new Error('No se encontró el préstamo.');
-    if (String(loc.sh.getRange(loc.row, COL_SIGN_STATUS).getValue() || '').toUpperCase() === SIGN.SIGNED)
+    const fc = firmaCols_(loc.sh);
+    if (String(loc.sh.getRange(loc.row, fc.status).getValue() || '').toUpperCase() === SIGN.SIGNED)
       return { ok: true, message: 'Este contrato ya estaba firmado. Le enviamos una copia por correo.' };
 
     const now = new Date();
@@ -3747,9 +3866,19 @@ function submitSignature(loanId, dni, signatureDataUrl, agree, meta) {
     folder.createFile(Utilities.newBlob(bytes, mime, 'Firma ' + loanId + '.' + ext));
 
     // El reloj de interés arranca al firmar (Fecha del Préstamo = hoy).
-    loc.sh.getRange(loc.row, PB.LOAN_DATE).setValue(now).setNumberFormat('yyyy-mm-dd');
+    loc.sh.getRange(loc.row, fc.loanDate).setValue(now).setNumberFormat('yyyy-mm-dd');
     writeOutstandingRow_(loc.sh, loc.row);
     const freshLoan = readLoan_(loc.sh, loc.row);
+    // Regenera el cronograma con la fecha DEFINITIVA (la firma mueve "Fecha del Préstamo"
+    // a hoy). Las cuotas se habían creado al aprobar con la fecha de aprobación; sin esto
+    // quedaban desfasadas respecto del "Vencimiento" del encabezado. cuotasForLoan_ borra-y-recrea.
+    try {
+      const cs = getSS_().getSheetByName(CFG.SHEETS.INSTALLMENTS) || setupCuotas_(getSS_());
+      const ti = resolveTerm_(freshLoan.principal, freshLoan.term);
+      const totalPlan = round2_(freshLoan.principal * (1 + ti.rate));
+      const dueDays = ti.cuotas === 3 ? [30, 60, 90] : [ti.days];
+      cuotasForLoan_(cs, loanId, freshLoan.loanDate, totalPlan, ti.cuotas, dueDays);
+    } catch (e) { logError_('submitSignature:cuotas', e); }
 
     const sig = {
       dataUrl: signatureDataUrl, signedAt: now, method: method,
@@ -3760,9 +3889,9 @@ function submitSignature(loanId, dni, signatureDataUrl, agree, meta) {
     let hashHex = '';
     try { hashHex = hexDigest_(signedFile.getAs('application/pdf').getBytes()); } catch (e) { logError_('submitSignature:hash', e); }
 
-    loc.sh.getRange(loc.row, COL_SIGN_STATUS).setValue(SIGN.SIGNED);
-    loc.sh.getRange(loc.row, COL_SIGN_DATE).setValue(now).setNumberFormat('yyyy-mm-dd hh:mm');
-    loc.sh.getRange(loc.row, COL_SIGN_PDF).setFormula('=HYPERLINK("' + signedFile.getUrl() + '","Ver contrato firmado")');
+    loc.sh.getRange(loc.row, fc.status).setValue(SIGN.SIGNED);
+    loc.sh.getRange(loc.row, fc.date).setValue(now).setNumberFormat('yyyy-mm-dd hh:mm');
+    loc.sh.getRange(loc.row, fc.pdf).setFormula('=HYPERLINK("' + signedFile.getUrl() + '","Ver contrato firmado")');
 
     try {
       setupFirmas_(getSS_()).appendRow([now, loanId, loan.name, loan.dni, loan.email,
@@ -3770,9 +3899,12 @@ function submitSignature(loanId, dni, signatureDataUrl, agree, meta) {
         String((meta && meta.userAgent) || '').slice(0, 250), signedFile.getUrl(),
         ip || 'N/D', hashHex, freshLoan.cuil || '', freshLoan.direccion || '']);
     } catch (e) { logError_('submitSignature:firmas', e); }
-    try { emailSignedContract_(freshLoan, signedFile); } catch (e) { logError_('submitSignature:email', e); }
-    try { getSS_().toast('Contrato firmado: ' + loan.name + ' → ' + loanId, 'Firma recibida ✍', 6); } catch (e) {}
-    return { ok: true, message: '¡Contrato firmado! Gracias, ' + loan.name + '. Le enviamos una copia por correo.' };
+    let emailOk = true;
+    try { emailSignedContract_(freshLoan, signedFile); } catch (e) { emailOk = false; logError_('submitSignature:email', e); }
+    try { getSS_().toast('Contrato firmado: ' + loan.name + ' → ' + loanId + (emailOk ? '' : ' (⚠ no se pudo enviar el correo)'), 'Firma recibida ✍', 6); } catch (e) {}
+    return { ok: true, message: emailOk
+      ? '¡Contrato firmado! Gracias, ' + loan.name + '. Le enviamos una copia por correo.'
+      : '¡Contrato firmado! Gracias, ' + loan.name + '. (No pudimos enviar la copia por correo; el prestamista ya tiene su contrato firmado.)' };
   });
 }
 
@@ -3857,10 +3989,11 @@ function resendSigningLink_() {
   if (!loanId) { ui.alert('La fila seleccionada no tiene un préstamo.'); return; }
   const loan = readLoan_(sh, row);
   if (!loan.email) { ui.alert('El préstamo no tiene un correo cargado.'); return; }
-  const st = String(sh.getRange(row, COL_SIGN_STATUS).getValue() || '').toUpperCase();
+  const statusCol = firmaCols_(sh).status;
+  const st = String(sh.getRange(row, statusCol).getValue() || '').toUpperCase();
   if (st === SIGN.SIGNED && ui.alert('Este contrato ya figura FIRMADO. ¿Reenviar el enlace igualmente?', ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
   try {
-    if (st !== SIGN.SIGNED) sh.getRange(row, COL_SIGN_STATUS).setValue(SIGN.PENDING);
+    if (st !== SIGN.SIGNED) sh.getRange(row, statusCol).setValue(SIGN.PENDING);
     let file = null; try { file = makeAgreementFile_(loan); } catch (e) { logError_('resendSigningLink_:pdf', e); }
     emailSigningRequest_(loan, file);
     ss.toast('Enlace de firma reenviado a ' + loan.email, 'Listo', 5);
@@ -4096,6 +4229,26 @@ function onEditInstallable(e) {
             sh.getRange(row, disbCol).setNote('Recibo de desembolso enviado el ' + fmtDate_(new Date()) + '.');
             getSS_().toast(msg, 'Recibo de desembolso', 5);
           } catch (err) { logError_('onEdit:BORROWERS:desembolso', err); getSS_().toast(err.message || String(err), '⚠ No se pudo enviar', 8); }
+        }
+      }
+      // Casilla "Generar enlace 🔗": genera el enlace de firma de ESE préstamo, lo escribe en
+      // "Enlace de Firma" (clicable) y lo muestra para copiar. Se destilda solo.
+      const genLinkCol = bhm['Generar enlace 🔗'];
+      const linkCol = bhm['Enlace de Firma'];
+      if (genLinkCol && genLinkCol >= c0 && genLinkCol <= cN) {
+        const base = (typeof webAppBaseUrl_ === 'function') ? webAppBaseUrl_() : '';
+        for (let row = rN; row >= r0; row--) {
+          if (sh.getRange(row, genLinkCol).getValue() !== true) continue;
+          sh.getRange(row, genLinkCol).setValue(false);
+          const loanId = String(sh.getRange(row, bLoanCol).getValue()).trim();
+          if (!loanId) continue;
+          if (!base) { getSS_().toast('Configurá la "URL de la app web (enlaces a clientes)" en Configuración (o publicá la app web) para generar enlaces.', '⚠ Falta la URL de la app', 8); continue; }
+          try {
+            const link = signingLink_(loanId);
+            if (linkCol) sh.getRange(row, linkCol).setFormula('=HYPERLINK("' + link + '","' + link + '")');
+            sh.getRange(row, genLinkCol).setNote('Enlace de firma generado el ' + fmtDate_(new Date()) + ':\n' + link);
+            getSS_().toast('Enlace de firma de ' + loanId + ': ' + link, '🔗 Enlace generado', 10);
+          } catch (err) { logError_('onEdit:BORROWERS:genEnlace', err); getSS_().toast(err.message || String(err), '⚠ No se pudo generar', 8); }
         }
       }
       if ([PB.LOAN_ID, PB.PRINCIPAL, PB.TERM, PB.LOAN_DATE].some(c => c >= c0 && c <= cN)) for (let row = r0; row <= rN; row++) writeOutstandingRow_(sh, row);
