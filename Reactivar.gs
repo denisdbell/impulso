@@ -731,9 +731,9 @@ function reactivatePanel_(ss) {
   const set = [];
   const put = (label, formula) => { const c = findLabelCell_(sh, label); if (c) { sh.getRange(c.row, c.valCol).setFormula('=' + formula); set.push(label); return c; } return null; };
 
-  put('Préstamos activos', `COUNTIF('${BSN}'!$${bEstL}:$${bEstL},"${ST.ACTIVE}")`);
-  put('Préstamos vencidos', `COUNTIF('${BSN}'!$${bEstL}:$${bEstL},"${ST.OVERDUE}")`);
-  put('Préstamos pagados', `COUNTIF('${BSN}'!$${bEstL}:$${bEstL},"${ST.PAID}")`);
+  put('Préstamos activos', `COUNTIFS('${BSN}'!$${bEstL}:$${bEstL},"${ST.ACTIVE}",'${BSN}'!$${bIdL}:$${bIdL},"<>")`);
+  put('Préstamos vencidos', `COUNTIFS('${BSN}'!$${bEstL}:$${bEstL},"${ST.OVERDUE}",'${BSN}'!$${bIdL}:$${bIdL},"<>")`);
+  put('Préstamos pagados', `COUNTIFS('${BSN}'!$${bEstL}:$${bEstL},"${ST.PAID}",'${BSN}'!$${bIdL}:$${bIdL},"<>")`);
   put('Contratos sin firmar', `COUNTIF('${BSN}'!$${bFirmaL}:$${bFirmaL},"${SIGN.PENDING}")`);
   const capCell = put('Capital prestado', capitalPrestado);
   const cobCell = put('Total cobrado', totalCobrado);

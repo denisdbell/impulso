@@ -1690,13 +1690,25 @@ function setupPanel_(ss) {
   const venL = colL_(colByAny_(BH, ['Vencimiento', 'Fecha de Vencimiento']) || PB.DUE);
   const payIdL = colL_(colByAny_(PH, ['ID Préstamo', 'ID Prestamo']) || PP.LOAN_ID);
   const payAmtL = colL_(colByAny_(PH, ['Monto Pagado']) || PP.AMOUNT);
+  const paidL = colL_(colByAny_(BH, ['Total Pagado']) || PB.PAID);   // Prestatarios "Total Pagado"
   const capitalPrestado = `SUMIF('${B}'!$${idL}:$${idL},"L-*",'${B}'!$${capL}:$${capL})`;
   const totalCobrado = pgP ? `SUMIF('${P}'!$${payIdL}:$${payIdL},"L-*",'${P}'!$${payAmtL}:$${payAmtL})` : '0';
+  // GANANCIA REAL (base caja, sólo préstamos cuya historia terminó): plata que entró − plata que
+  // salió en los PAGADOS y VENCIDOS. Los VENCIDOS NO se pisan en 0: su pérdida (capital que no
+  // volvió) baja el neto. Los ACTIVOS (aún corriendo) no entran. El guardia ID≠"" descarta la
+  // fila-nota del pie de "Prestatarios" (Estado PAGADO con ID en blanco).
+  const paidPagado  = `SUMIFS('${B}'!$${paidL}:$${paidL},'${B}'!$${estL}:$${estL},"${ST.PAID}",'${B}'!$${idL}:$${idL},"<>")`;
+  const paidVencido = `SUMIFS('${B}'!$${paidL}:$${paidL},'${B}'!$${estL}:$${estL},"${ST.OVERDUE}",'${B}'!$${idL}:$${idL},"<>")`;
+  const capPagado   = `SUMIFS('${B}'!$${capL}:$${capL},'${B}'!$${estL}:$${estL},"${ST.PAID}",'${B}'!$${idL}:$${idL},"<>")`;
+  const capVencido  = `SUMIFS('${B}'!$${capL}:$${capL},'${B}'!$${estL}:$${estL},"${ST.OVERDUE}",'${B}'!$${idL}:$${idL},"<>")`;
+  const ganPagados   = `(${paidPagado})-(${capPagado})`;    // ganancia limpia de los préstamos ganados
+  const perdVencidos = `(${paidVencido})-(${capVencido})`;  // negativo = capital prestado que no volvió
+  const gananciaReal  = `(${ganPagados})+(${perdVencidos})`; // neto de los préstamos cerrados
   sh.getRange('A1').setValue('PANEL DEL PRESTAMISTA').setFontSize(18).setFontWeight('bold').setFontColor('#1c4587');
   const kpis = [
-    ['Préstamos activos', `=COUNTIF('${B}'!$${estL}:$${estL},"${ST.ACTIVE}")`],           // 3  int
-    ['Préstamos vencidos', `=COUNTIF('${B}'!$${estL}:$${estL},"${ST.OVERDUE}")`],         // 4  int
-    ['Préstamos pagados', `=COUNTIF('${B}'!$${estL}:$${estL},"${ST.PAID}")`],             // 5  int
+    ['Préstamos activos', `=COUNTIFS('${B}'!$${estL}:$${estL},"${ST.ACTIVE}",'${B}'!$${idL}:$${idL},"<>")`],   // 3  int
+    ['Préstamos vencidos', `=COUNTIFS('${B}'!$${estL}:$${estL},"${ST.OVERDUE}",'${B}'!$${idL}:$${idL},"<>")`], // 4  int
+    ['Préstamos pagados', `=COUNTIFS('${B}'!$${estL}:$${estL},"${ST.PAID}",'${B}'!$${idL}:$${idL},"<>")`],     // 5  int
     ['Solicitudes pendientes', `=COUNTA('${CFG.SHEETS.NEW}'!$B$2:$B)`],                    // 6  int
     ['Contratos sin firmar', `=COUNTIF('${B}'!$${firmaL}:$${firmaL},"${SIGN.PENDING}")`], // 7  int
     ['Fondo total para prestar', `=${fondo}`],                                            // 8  money
@@ -1705,33 +1717,50 @@ function setupPanel_(ss) {
     ['Efectivo disponible para prestar', `=${fondo}-${capitalPrestado}+${totalCobrado}`], // 11 money (negativo = sobregiro)
     ['Interés contratado', `=SUMIF('${B}'!$${idL}:$${idL},"L-*",'${B}'!$${intL}:$${intL})`],      // 12 money
     ['Saldo pendiente total', `=SUMIF('${B}'!$${idL}:$${idL},"L-*",'${B}'!$${salL}:$${salL})`],   // 13 money
+    ['Ganancia en préstamos pagados', `=${ganPagados}`],                                 // 14 money (verde)
+    ['Pérdida en préstamos vencidos (capital no recuperado)', `=${perdVencidos}`],       // 15 money (rojo)
+    ['Ganancia real (neto de préstamos cerrados)', `=${gananciaReal}`],                  // 16 money (rojo si <0)
+    ['Ganancia real sobre el fondo (%)', `=IF(${fondo}>0,(${gananciaReal})/(${fondo}),0)`], // 17 %
   ];
   sh.getRange(3, 1, kpis.length, 1).setValues(kpis.map(k => [k[0]])).setFontWeight('bold');
   sh.getRange(3, 2, kpis.length, 1).setFormulas(kpis.map(k => [k[1]]));
   sh.getRange(3, 2, 5, 1).setNumberFormat('0');                 // filas 3–7 enteros
   sh.getRange(8, 2, 6, 1).setNumberFormat(CFG.CURRENCY_FMT);    // filas 8–13 moneda
+  sh.getRange(14, 2).setNumberFormat(CFG.CURRENCY_FMT);         // 14 ganancia en pagados $
+  sh.getRange(15, 2).setNumberFormat(CFG.CURRENCY_FMT);         // 15 pérdida en vencidos $
+  sh.getRange(16, 2).setNumberFormat(CFG.CURRENCY_FMT);         // 16 ganancia real (neto) $
+  sh.getRange(17, 2).setNumberFormat('0.00%');                  // 17 ganancia real sobre fondo %
   sh.getRange('A7').setFontColor('#990000'); sh.getRange('B7').setFontColor('#990000').setFontWeight('bold');
   sh.getRange('A7').setNote('Préstamos aprobados cuyo contrato aún no fue firmado por el prestatario. No desembolsar hasta la firma.');
   sh.getRange('A11').setFontColor('#38761d'); sh.getRange('B11').setFontColor('#38761d').setFontWeight('bold');
   sh.getRange('A11').setNote('Efectivo disponible = Fondo total − Capital prestado + Total cobrado. Baja al prestar y sube al cobrar. Un valor NEGATIVO (en rojo) indica sobregiro: se prestó más capital del disponible.');
-  // Sobregiro: si el efectivo disponible es negativo, se muestra en rojo (el verde queda para ≥ 0).
-  sh.setConditionalFormatRules([redIfNegativeRule_(sh.getRange('B11'))]);
-  // Fila 14: Retiro disponible (instantánea; el cálculo usa ventanas de fechas que una fórmula de celda no expresa bien).
-  sh.getRange('A14').setValue('Retiro disponible (sin frenar el crecimiento)').setFontWeight('bold').setFontColor('#38761d');
+  // Ganancia real (base caja, préstamos cerrados): ganados en verde, pérdida en rojo, neto y % en
+  // verde salvo que sean negativos (regla condicional los pone en rojo).
+  sh.getRange('A14:B14').setFontColor('#38761d'); sh.getRange('B14').setFontWeight('bold');
+  sh.getRange('A15:B15').setFontColor('#cc0000'); sh.getRange('B15').setFontWeight('bold');
+  sh.getRange('A16:B17').setFontColor('#38761d'); sh.getRange('B16:B17').setFontWeight('bold');
+  sh.getRange('A14').setNote('De los préstamos que YA terminaron y se pagaron: lo que te devolvieron − lo que prestaste. La ganancia limpia de los préstamos ganados.');
+  sh.getRange('A15').setNote('De los préstamos que terminaron mal (vencidos): lo que te devolvieron − lo que prestaste. Da negativo: es la plata que prestaste y no volvió. Esta es la PÉRDIDA.');
+  sh.getRange('A16').setNote('La verdad del negocio hasta hoy: ganancia de los pagados menos pérdida de los vencidos. Sólo cuenta préstamos cuya historia terminó; los que siguen vivos no entran todavía. Es plata que entró − plata que salió en préstamos PAGADOS y VENCIDOS.');
+  sh.getRange('A17').setNote('Ese neto dividido por tu fondo total. De cada $100 que pusiste, cuánto ganaste o perdiste de verdad hasta hoy.');
+  // Rojo automático para valores negativos: sobregiro (B11) y ganancia real neta/% (B16/B17).
+  sh.setConditionalFormatRules([redIfNegativeRule_(sh.getRange('B11')), redIfNegativeRule_(sh.getRange('B16')), redIfNegativeRule_(sh.getRange('B17'))]);
+  // Fila 18: Retiro disponible (instantánea; el cálculo usa ventanas de fechas que una fórmula de celda no expresa bien).
+  sh.getRange('A18').setValue('Retiro disponible (sin frenar el crecimiento)').setFontWeight('bold').setFontColor('#38761d');
   try {
     const wd = withdrawableStats_();
-    sh.getRange('B14').setValue(wd.withdrawable).setNumberFormat(CFG.CURRENCY_FMT).setFontColor('#38761d').setFontWeight('bold');
-    sh.getRange('A14').setNote('Máximo retirable ahora sin frenar el ritmo de colocación. Solo libera ganancia realizada (interés cobrado) y ' +
+    sh.getRange('B18').setValue(wd.withdrawable).setNumberFormat(CFG.CURRENCY_FMT).setFontColor('#38761d').setFontWeight('bold');
+    sh.getRange('A18').setNote('Máximo retirable ahora sin frenar el ritmo de colocación. Solo libera ganancia realizada (interés cobrado) y ' +
       'retiene una reserva = colocación proyectada en ' + wd.horizonDays + ' días − cobros esperados + colchón por morosidad. ' +
       'Instantánea: se recalcula con "⑤ Actualizar" y con "💵 Retiro disponible".');
   } catch (e) { logError_('setupPanel_:withdrawable', e); }
-  sh.getRange('A16').setValue('Próximos vencimientos (7 días):').setFontWeight('bold');
+  sh.getRange('A20').setValue('Próximos vencimientos (7 días):').setFontWeight('bold');
   // Nombre resuelto desde "Clientes" vía ID Cliente (col B). Vencimiento=G, Saldo=K, Estado=L.
   const nameArr = `ARRAYFORMULA(IFERROR(VLOOKUP('${B}'!$${cliL}2:$${cliL},'${C}'!$A:$B,2,FALSE),""))`;
-  sh.getRange('A17').setFormula(
+  sh.getRange('A21').setFormula(
     `=IFERROR(SORT(FILTER({'${B}'!$${idL}2:$${idL},${nameArr},'${B}'!$${venL}2:$${venL},'${B}'!$${salL}2:$${salL}},` +
     `('${B}'!$${estL}2:$${estL}<>"${ST.PAID}")*('${B}'!$${venL}2:$${venL}>=TODAY())*('${B}'!$${venL}2:$${venL}<=TODAY()+7)),3,TRUE),"— sin vencimientos próximos —")`);
-  sh.getRange('A16').setNote('Muestra préstamos no pagados que vencen dentro de 7 días.');
+  sh.getRange('A20').setNote('Muestra préstamos no pagados que vencen dentro de 7 días.');
   sh.setColumnWidth(1, 240); sh.setColumnWidth(2, 200); sh.setColumnWidth(3, 130); sh.setColumnWidth(4, 130);
 }
 
@@ -1943,10 +1972,10 @@ function setupStats_(ss) {
     ['Saldo pendiente por cobrar', `=${saldoTotal}`, 'm'],
     ['Cartera en mora (saldo vencido)', `=SUMIF('${B}'!$${estL}:$${estL},"${ST.OVERDUE}",'${B}'!$${salL}:$${salL})`, 'm'],
     ['Ticket promedio', `=IFERROR(${capitalPrestado}/${nLoans},0)`, 'm'],
-    ['Préstamos activos', `=COUNTIF('${B}'!$${estL}:$${estL},"${ST.ACTIVE}")`, 'i'],
-    ['Préstamos vencidos', `=COUNTIF('${B}'!$${estL}:$${estL},"${ST.OVERDUE}")`, 'i'],
-    ['Préstamos pagados', `=COUNTIF('${B}'!$${estL}:$${estL},"${ST.PAID}")`, 'i'],
-    ['Tasa de morosidad (préstamos vencidos)', `=IFERROR(COUNTIF('${B}'!$${estL}:$${estL},"${ST.OVERDUE}")/(COUNTIF('${B}'!$${estL}:$${estL},"${ST.ACTIVE}")+COUNTIF('${B}'!$${estL}:$${estL},"${ST.OVERDUE}")),0)`, 'p'],
+    ['Préstamos activos', `=COUNTIFS('${B}'!$${estL}:$${estL},"${ST.ACTIVE}",'${B}'!$${idL}:$${idL},"<>")`, 'i'],
+    ['Préstamos vencidos', `=COUNTIFS('${B}'!$${estL}:$${estL},"${ST.OVERDUE}",'${B}'!$${idL}:$${idL},"<>")`, 'i'],
+    ['Préstamos pagados', `=COUNTIFS('${B}'!$${estL}:$${estL},"${ST.PAID}",'${B}'!$${idL}:$${idL},"<>")`, 'i'],
+    ['Tasa de morosidad (préstamos vencidos)', `=IFERROR(COUNTIFS('${B}'!$${estL}:$${estL},"${ST.OVERDUE}",'${B}'!$${idL}:$${idL},"<>")/(COUNTIFS('${B}'!$${estL}:$${estL},"${ST.ACTIVE}",'${B}'!$${idL}:$${idL},"<>")+COUNTIFS('${B}'!$${estL}:$${estL},"${ST.OVERDUE}",'${B}'!$${idL}:$${idL},"<>")),0)`, 'p'],
     ['Tasa de recuperación (cobrado / a pagar)', `=IFERROR(${totalCobrado}/${totalAPagar},0)`, 'p'],
     ['Rendimiento sobre capital (ROI)', `=IFERROR(${interesTotal}/${capitalPrestado},0)`, 'p'],
     ['Utilización del fondo', `=IFERROR((${capitalPrestado}-${totalCobrado})/${fondo},0)`, 'p'],
@@ -1970,9 +1999,9 @@ function setupStats_(ss) {
     ['Estado', 'Cantidad'],
     ['Activos', 0], ['Vencidos', 0], ['Pagados', 0],
   ]);
-  sh.getRange('E5').setFormula(`=COUNTIF('${B}'!$${estL}:$${estL},"${ST.ACTIVE}")`);
-  sh.getRange('E6').setFormula(`=COUNTIF('${B}'!$${estL}:$${estL},"${ST.OVERDUE}")`);
-  sh.getRange('E7').setFormula(`=COUNTIF('${B}'!$${estL}:$${estL},"${ST.PAID}")`);
+  sh.getRange('E5').setFormula(`=COUNTIFS('${B}'!$${estL}:$${estL},"${ST.ACTIVE}",'${B}'!$${idL}:$${idL},"<>")`);
+  sh.getRange('E6').setFormula(`=COUNTIFS('${B}'!$${estL}:$${estL},"${ST.OVERDUE}",'${B}'!$${idL}:$${idL},"<>")`);
+  sh.getRange('E7').setFormula(`=COUNTIFS('${B}'!$${estL}:$${estL},"${ST.PAID}",'${B}'!$${idL}:$${idL},"<>")`);
 
   // 2) Flujo de dinero (barras)
   sh.getRange('D10').setValue('Flujo de dinero').setFontWeight('bold').setFontColor('#1c4587');
