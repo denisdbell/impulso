@@ -904,28 +904,32 @@ function repaymentHistory_(dni) {
 
 /**
  * V-32 — Nivel y techo de monto por HISTORIAL de repago (escalera de graduación), a partir
- * de un historial ya calculado (repaymentHistory_). Los tramos se leen de "Configuración":
- *   • sin historial / con mora vigente → "Límite inicial (préstamo nuevo)"  (150k) · Inicial
- *   • Nivel 1 → "Límite tras 1 préstamo saldado" (300k)
- *   • Nivel 2 → "Límite tras 2 préstamos saldados" (500k)
- * Promoción (regla por MONTO, no solo por cantidad): para subir a un nivel hay que haber
- * DEVUELTO A TIEMPO un préstamo cuyo Capital sea ≥ el límite del nivel ANTERIOR (así se
- * prueba que el prestatario maneja ese tamaño antes de habilitarle más):
- *   • Nivel 1: ≥1 saldado a tiempo Y un préstamo devuelto ≥ "Límite inicial".
- *   • Nivel 2: ≥2 saldados a tiempo Y un préstamo devuelto ≥ "Límite tras 1 préstamo saldado".
- * Devolver muchos préstamos chicos NO promueve (p. ej. 3×$100.000 → sigue Inicial).
- * Un atraso REINICIA la escalera (solo cuentan los saldados a tiempo posteriores al último
- * atraso). Una mora VIGENTE fuerza el límite inicial.
+ * de un historial ya calculado (repaymentHistory_). La escalera sube del "Límite inicial"
+ * al "Límite máximo por historial" en pasos de "Incremento de graduación" (todo configurable
+ * en "Configuración"; por defecto 150k → 500k de a 50k ⇒ niveles 0..7). El límite del nivel
+ * n es: Límite inicial + Incremento·n.
+ * Promoción (regla HÍBRIDA — cantidad Y monto): para alcanzar el nivel n hace falta
+ *   • CANTIDAD: ≥ n préstamos saldados a tiempo (un repago a tiempo por escalón), Y
+ *   • MONTO: haber DEVUELTO A TIEMPO un préstamo cuyo Capital sea ≥ el límite del nivel
+ *     ANTERIOR (= Límite inicial + Incremento·(n-1)), probando ese tamaño antes de habilitar más.
+ * El nivel final es el MENOR de ambos topes (y del tope máximo). Devolver muchos préstamos
+ * chicos NO promueve (p. ej. 5×$100.000 → sigue Inicial); un único préstamo grande tampoco
+ * saltea escalones (la cantidad lo frena). Un atraso REINICIA la escalera (solo cuentan los
+ * saldados a tiempo posteriores al último atraso). Una mora VIGENTE fuerza el límite inicial.
  */
 function graduationLevelFor_(h) {
-  const starter = settingMoney_('Límite inicial (préstamo nuevo)', 150000);
-  const max1 = settingMoney_('Límite tras 1 préstamo saldado', 300000);
-  const max2 = settingMoney_('Límite tras 2 préstamos saldados', 500000);
+  let floor = settingMoney_('Límite inicial (préstamo nuevo)', 150000);
+  let step  = settingMoney_('Incremento de graduación', 50000);
+  let cap   = settingMoney_('Límite máximo por historial (graduación)', 500000);
+  if (!(step > 0)) step = 50000;                         // config inválida → paso por defecto
+  if (cap < floor) cap = floor;                          // tope nunca por debajo del inicial
+  const maxN = Math.max(0, Math.floor((cap - floor) / step));
+  if (h.everDefaulted) return { level: 'Inicial', max: floor };
   const proven = Number(h.onTimeMaxPrincipal) || 0;
-  if (h.everDefaulted) return { level: 'Inicial', max: starter };
-  if (h.onTimeCount >= 2 && proven >= max1) return { level: 'Nivel 2', max: max2 };
-  if (h.onTimeCount >= 1 && proven >= starter) return { level: 'Nivel 1', max: max1 };
-  return { level: 'Inicial', max: starter };
+  const byCount = Math.max(0, Number(h.onTimeCount) || 0);   // un repago a tiempo por escalón
+  const bySize  = proven >= floor ? Math.floor((proven - floor) / step) + 1 : 0; // tamaño probado
+  const n = Math.min(maxN, byCount, bySize);
+  return { level: n === 0 ? 'Inicial' : 'Nivel ' + n, max: floor + step * n };
 }
 function graduationMax_(dni) {
   return graduationLevelFor_(repaymentHistory_(dni)).max;
@@ -987,8 +991,7 @@ function buildClientLevels(opts) {
   // Color por nivel (col D) y por estado de mora (col I).
   const lvl = sh.getRange(2, 4, n, 1), est = sh.getRange(2, 9, n, 1);
   sh.setConditionalFormatRules([
-    cc_(lvl, 'Nivel 2', '#b6d7a8'),  // verde
-    cc_(lvl, 'Nivel 1', '#fff2cc'),  // amarillo
+    ccContains_(lvl, 'Nivel', '#b6d7a8'),  // verde — cualquier nivel graduado (Nivel 1..7)
     cc_(lvl, 'Inicial', '#efefef'),  // gris
     cc_(est, 'Mora vigente', '#ea9999'), // rojo
     cc_(est, 'Al día', '#d9ead3'),       // verde claro
@@ -1031,8 +1034,10 @@ function validateApprovalV2_(clientId, amount, override, dni, ident) {
     // prestatario. Sin historial o con mora vigente → límite inicial; un atraso reinicia
     // la escalera (sube de nuevo saldando a tiempo). Clave por DNI (sobrevive a "Saldados").
     const gmax = graduationMax_(dni);
-    if (gmax > 0 && amt > gmax)
-      return { ok: false, code: 'V-32', msg: 'El monto (' + fmtMoney_(amt) + ') supera el límite por historial del prestatario (' + fmtMoney_(gmax) + '). Para subir el límite, primero debe DEVOLVER A TIEMPO un préstamo de al menos ' + fmtMoney_(gmax) + ' (no basta con muchos préstamos chicos); los atrasos reinician la escalera. O usá «Anular límites».' };
+    if (gmax > 0 && amt > gmax) {
+      const gstep = settingMoney_('Incremento de graduación', 50000);
+      return { ok: false, code: 'V-32', msg: 'El monto (' + fmtMoney_(amt) + ') supera el límite por historial del prestatario (' + fmtMoney_(gmax) + '). Para subir al próximo tramo (+' + fmtMoney_(gstep) + ') debe DEVOLVER A TIEMPO un préstamo de al menos ' + fmtMoney_(gmax) + ' Y sumar un repago a tiempo más (no basta con muchos préstamos chicos ni con uno solo grande); los atrasos reinician la escalera. O usá «Anular límites».' };
+    }
     // Tope de concentración por prestatario: % configurable del FONDO TOTAL
     // (Configuración ▸ "Tope de concentración…"). Base estable = fondo total (no el
     // efectivo disponible, que se agota al colocar y bloquearía todo préstamo). 0 = sin tope.
@@ -1722,8 +1727,7 @@ function intakeSmartHtml_() {
             // El motivo se basa en el NIVEL real (que exige monto demostrado, no solo cantidad):
             // así no dice "ampliado" cuando el cliente sigue en Inicial por haber devuelto montos chicos.
             if(r.hasArrears) reason=' — por atrasos previos, tu límite volvió al inicial. Se recupera saldando a tiempo';
-            else if(r.level==='Nivel 2') reason=' — ampliado por tu historial de pagos a tiempo';
-            else if(r.level==='Nivel 1') reason=' — ampliado por tu historial de pagos a tiempo';
+            else if(r.level!=='Inicial') reason=' — ampliado por tu historial de pagos a tiempo';
             else reason=' — límite inicial (sube devolviendo a tiempo un préstamo de este monto)';
           }
           banner.innerHTML='⚠️ <b>Tu límite actual: '+fmt(MAXAMT)+'</b><span style="font-weight:normal">'+esc(reason)+'</span>';

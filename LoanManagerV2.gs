@@ -377,7 +377,7 @@ function applyFeatureUpdates() {
       'Ventana para estimar el ritmo de colocación (días)',
       'Monto máximo por préstamo', 'Tope tramo 25% (15 días)', 'Tope tramo 50% (30 días)',
       // V-32 escalera de graduación + recuperación (mora): claves nuevas.
-      'Límite inicial (préstamo nuevo)', 'Límite tras 1 préstamo saldado', 'Límite tras 2 préstamos saldados',
+      'Límite inicial (préstamo nuevo)', 'Incremento de graduación', 'Límite máximo por historial (graduación)',
       'Días de gracia antes de mora', 'Tope de mora (% del total a devolver)',
     ]);
     done.push(nAdded ? (nAdded + ' ajuste(s) nuevo(s) en «Configuración»') : '«Configuración» ya estaba al día');
@@ -398,13 +398,13 @@ function applyFeatureUpdates() {
         setSettingValue_(stsh, 'Tope tramo 25% (15 días)', '150000');
       if (stsh && String(getSetting_('Tope tramo 50% (30 días)') || '').trim() === '')
         setSettingValue_(stsh, 'Tope tramo 50% (30 días)', '300000');
-      // Escalera de graduación (V-32): límite inicial / tras 1 / tras 2 préstamos saldados.
+      // Escalera de graduación (V-32): inicial 150k, sube de a 50k hasta 500k (tope).
       if (stsh && String(getSetting_('Límite inicial (préstamo nuevo)') || '').trim() === '')
         setSettingValue_(stsh, 'Límite inicial (préstamo nuevo)', '150000');
-      if (stsh && String(getSetting_('Límite tras 1 préstamo saldado') || '').trim() === '')
-        setSettingValue_(stsh, 'Límite tras 1 préstamo saldado', '300000');
-      if (stsh && String(getSetting_('Límite tras 2 préstamos saldados') || '').trim() === '')
-        setSettingValue_(stsh, 'Límite tras 2 préstamos saldados', '500000');
+      if (stsh && String(getSetting_('Incremento de graduación') || '').trim() === '')
+        setSettingValue_(stsh, 'Incremento de graduación', '50000');
+      if (stsh && String(getSetting_('Límite máximo por historial (graduación)') || '').trim() === '')
+        setSettingValue_(stsh, 'Límite máximo por historial (graduación)', '500000');
       // Mora: sin días de gracia y tope al 100% del TOTAL A DEVOLVER. Migra los valores
       // sembrados por versiones anteriores (3 / 50 y la clave "% del capital"); respeta
       // cualquier otro valor manual.
@@ -562,8 +562,8 @@ function setupSettings_(ss) {
     ['Días de gracia antes de mora', '0'],
     ['Tope de mora (% del total a devolver)', '100'],
     ['Límite inicial (préstamo nuevo)', '150000'],
-    ['Límite tras 1 préstamo saldado', '300000'],
-    ['Límite tras 2 préstamos saldados', '500000'],
+    ['Incremento de graduación', '50000'],
+    ['Límite máximo por historial (graduación)', '500000'],
     ['Pie del Contrato', 'Este acuerdo es legalmente vinculante desde la firma de ambas partes.'],
     ['Días de aviso antes del vencimiento', '3'],
     ['Días de aviso de recordatorio', '7'],
@@ -5241,6 +5241,7 @@ function getOrCreate_(ss, name) { return ss.getSheetByName(name) || ss.insertShe
 // del script ni migraciones masivas (evita "viola las reglas de validación").
 function datePicker_() { return SpreadsheetApp.newDataValidation().requireDate().setAllowInvalid(true).setHelpText('Elija una fecha.').build(); }
 function cc_(range, text, color) { return SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo(text).setBackground(color).setRanges([range]).build(); }
+function ccContains_(range, text, color) { return SpreadsheetApp.newConditionalFormatRule().whenTextContains(text).setBackground(color).setRanges([range]).build(); }
 /** Regla: texto rojo y negrita cuando el valor de la celda es negativo (sobregiro del fondo). */
 function redIfNegativeRule_(range) { return SpreadsheetApp.newConditionalFormatRule().whenNumberLessThan(0).setFontColor('#cc0000').setBold(true).setRanges([range]).build(); }
 function addMonths_(date, n) { const d = new Date(date.getFullYear(), date.getMonth(), date.getDate()), day = d.getDate(); d.setMonth(d.getMonth() + n); if (d.getDate() < day) d.setDate(0); return d; }
