@@ -32,11 +32,11 @@ const CFG = {
   SHEETS: {
     BORROWERS: 'Prestatarios', PAYMENTS: 'Pagos', SUMMARY: 'Resumen', SETTINGS: 'Configuración',
     AGREEMENT: 'Estudio de Contratos', STATEMENTS: 'Estudio de Estados', REMINDER: 'Estudio de Recordatorios', NEW: 'Nuevos Prestatarios',
-    PANEL: 'Panel', STATS: 'Estadísticas', LATE: 'Pagos Atrasados', CLEARED: 'Saldados', REJECTED: 'Rechazados', ERRORS: 'Errores', HELP: 'Instrucciones',
+    PANEL: 'Panel', STATS: 'Estadísticas', LATE: 'Pagos Atrasados', PLAN: 'En Plan', CLEARED: 'Saldados', REJECTED: 'Rechazados', ERRORS: 'Errores', HELP: 'Instrucciones',
     SIGN: 'Firmas', CLIENTS: 'Clientes', INSTALLMENTS: 'Cuotas', LEVELS: 'Niveles de Clientes',
   },
 };
-const ST = { ACTIVE: 'ACTIVO', OVERDUE: 'VENCIDO', PAID: 'PAGADO', CLEARED: 'SALDADO' };
+const ST = { ACTIVE: 'ACTIVO', OVERDUE: 'VENCIDO', PAID: 'PAGADO', CLEARED: 'SALDADO', PLAN: 'EN PLAN' };
 // Estados de cuota (hoja "Cuotas"): PAGADA / VENCIDA / PENDIENTE.
 const CST = { PAID: 'PAGADA', OVERDUE: 'VENCIDA', PENDING: 'PENDIENTE' };
 // Estado de firma del contrato (columna P de "Prestatarios", modelo normalizado).
@@ -107,15 +107,22 @@ function onOpen() {
     .addItem('🎓 Niveles de clientes (escalera de graduación)', 'buildClientLevels')
     .addItem('💵 Retiro disponible (sin frenar crecimiento)', 'showWithdrawable')
     .addItem('⑤ Actualizar saldos y resumen', 'refreshAll')
+    .addItem('⑤· Actualizar SOLO Pagos Atrasados (mora)', 'refreshLateOnly')
+    .addItem('💳 Actualizar Saldo Posterior en «Pagos» (con mora)', 'actualizarSaldoPosteriorPagos')
     .addItem('🧮 Reparar totales y normalizar pagos', 'repairTotals')
     .addItem('🧮 Reparar cuotas (duplicadas + fechas)', 'repararCuotas_')
     .addItem('➕ Crear hoja de Recordatorios de pago', 'createRemindersSheet_')
     .addItem('📄 Crear hoja de Estudio de Contratos', 'createAgreementSheet_')
+    .addItem('📄 Crear/actualizar hoja de Estudio de Estados', 'createStatementsSheet_')
+    .addItem('📊 Crear/actualizar Panel (incluye «Préstamos en plan»)', 'createPanelSheet_')
+    .addItem('📅 Actualizar «Vencimientos por período» (semana/mes/mes próximo)', 'actualizarVencimientosPanel')
+    .addItem('📋 Crear/actualizar hoja «En Plan» (préstamos reestructurados)', 'createEnPlanSheet_')
     .addItem('✉ Reenviar enlace de firma (fila seleccionada)', 'resendSigningLink_')
     .addSeparator()
     .addItem('Registrar un pago', 'openSidebar')
     .addItem('✔ Mover préstamos saldados → hoja Saldados', 'moveClearedBorrowersConfirm')
     .addItem('🔄 Reestructurar préstamo vencido (congelar mora + plan de cuotas)', 'restructurarPrestamoUI')
+    .addItem('🔁 Regenerar cuotas (1.ª cuota vence la semana próxima)', 'regenerarCuotasPrestamoUI')
     .addSubMenu(SpreadsheetApp.getUi().createMenu('💸 Mora (fila activa)')
       .addItem('Condonar mora (poner en 0)', 'condonarMoraFilaActiva')
       .addItem('Fijar un importe de mora…', 'fijarMoraFilaActiva')
@@ -760,11 +767,13 @@ function signingLinkFormula_(r, A, firmaL, base) {
  * ingresar el pago (en la hoja "Pagos" o desde el panel).
  */
 function borrowerStateFormula_(r) {
-  const A = colL_(PB.LOAN_ID), TO = colL_(PB.TOTAL), PA = colL_(PB.PAID), VE = colL_(PB.DUE), BM = colL_(PB.BALANCE_MORA);
+  const A = colL_(PB.LOAN_ID), TO = colL_(PB.TOTAL), PA = colL_(PB.PAID), VE = colL_(PB.DUE), BM = colL_(PB.BALANCE_MORA), PL = colL_(PB.TOTAL_PLAN);
   // PAGADO sólo cuando el monto a pagar CON MORA ("Saldo con Mora") llega a 0: un préstamo
   // pagado tarde con recargo pendiente NO figura como PAGADO hasta saldar también la mora.
+  // EN PLAN: préstamo con plan de pago (reestructurado) al día — la "Suma de cuotas" supera el
+  // "Total a Pagar" porque incorpora la mora congelada. Se distingue del ACTIVO normal.
   return `=IF($${A}${r}="","",IF(AND(ISNUMBER($${TO}${r}),ISNUMBER($${PA}${r}),$${PA}${r}>=$${TO}${r}-0.009,N($${BM}${r})<=0.009),"${ST.PAID}",` +
-    `IF(OR(${cuotaVencidaExpr_('$' + A + r)},AND($${VE}${r}<>"",TODAY()>$${VE}${r})),"${ST.OVERDUE}",IF(OR($${TO}${r}="",$${PA}${r}=""),"…","${ST.ACTIVE}"))))`;
+    `IF(OR(${cuotaVencidaExpr_('$' + A + r)},AND($${VE}${r}<>"",TODAY()>$${VE}${r})),"${ST.OVERDUE}",IF(OR($${TO}${r}="",$${PA}${r}=""),"…",IF(N($${PL}${r})>N($${TO}${r})+0.009,"${ST.PLAN}","${ST.ACTIVE}")))))`;
 }
 /** Sub-expresión de fórmula: ¿el préstamo (celda con su ID) tiene alguna cuota VENCIDA en "Cuotas"? */
 function cuotaVencidaExpr_(loanIdCellA1) {
@@ -832,6 +841,7 @@ function borrowerFormatRules_(sh) {
     byState(ST.PAID, '#d9ead3', '#274e13'),
     byState(ST.CLEARED, '#d9ead3', '#274e13'),
     byState(ST.OVERDUE, '#f4cccc', '#990000'),
+    byState(ST.PLAN, '#d9d2e9', '#351c75'),   // EN PLAN (reestructurado al día): violeta
     byState(ST.ACTIVE, '#e8f0fe', '#1c4587'),
     cc_(signRange, SIGN.PENDING, '#f4cccc'),
     cc_(signRange, SIGN.SIGNED, '#b6d7a8'),
@@ -1013,12 +1023,30 @@ function protectFormulas_(sh, N) {
 
 /**
  * Fórmula del "Saldo Posterior" de una fila de Pagos: lo que falta pagar del préstamo
- * después de este pago = Total a Pagar − Σ pagos de ese préstamo hasta esta fila (inclusive).
- * Para un préstamo en cuotas equivale a la suma de las cuotas todavía impagas.
+ * después de este pago = (Total a Pagar + Recargo por Mora acum.) − Σ pagos de ese préstamo
+ * hasta esta fila (inclusive). Incluye la MORA para que el saldo refleje el monto real
+ * adeudado (igual a "Saldo con Mora" de "Prestatarios" en el último pago): un préstamo con
+ * capital+interés saldado pero mora pendiente ya NO muestra $0.
+ *
+ * Columnas resueltas por NOMBRE de encabezado (robusto al layout migrado, donde el orden
+ * físico de "Prestatarios" difiere del mapa PB), con respaldo a PP/PB. Si aún no existe la
+ * columna de mora, la fórmula equivale al comportamiento anterior (capital+interés).
  */
 function paymentBalanceFormula_(r) {
-  const B = colL_(PP.LOAN_ID), D = colL_(PP.AMOUNT), BS = CFG.SHEETS.BORROWERS, bId = colL_(PB.LOAN_ID);
-  return `=IF($${B}${r}="","",MAX(0,IFERROR(VLOOKUP($${B}${r},'${BS}'!$${bId}:$${colL_(PB.TOTAL)},${PB.TOTAL},FALSE),0)-SUMIFS($${D}$2:$${D}${r},$${B}$2:$${B}${r},$${B}${r})))`;
+  const ss = getSS_();
+  const ps = ss.getSheetByName(CFG.SHEETS.PAYMENTS), bs = ss.getSheetByName(CFG.SHEETS.BORROWERS);
+  const PH = ps ? headerIndex_(ps) : {}, BH = bs ? headerIndex_(bs) : {};
+  const B = colL_(colByAny_(PH, ['ID Préstamo', 'ID Prestamo']) || PP.LOAN_ID);
+  const D = colL_(colByAny_(PH, ['Monto Pagado']) || PP.AMOUNT);
+  const BS = CFG.SHEETS.BORROWERS;
+  const bId = colL_(colByAny_(BH, ['ID Préstamo', 'ID Prestamo']) || PB.LOAN_ID);
+  const bTot = colL_(colByAny_(BH, ['Total a Pagar', 'Total a pagar']) || PB.TOTAL);
+  const moraC = colByAny_(BH, ['Recargo por Mora (acum.)']);
+  const match = `MATCH($${B}${r},'${BS}'!$${bId}:$${bId},0)`;
+  const totRef = `IFERROR(INDEX('${BS}'!$${bTot}:$${bTot},${match}),0)`;
+  const moraRef = moraC ? `+IFERROR(INDEX('${BS}'!$${colL_(moraC)}:$${colL_(moraC)},${match}),0)` : '';
+  const paid = `SUMIFS($${D}$2:$${D}${r},$${B}$2:$${B}${r},$${B}${r})`;
+  return `=IF($${B}${r}="","",MAX(0,${totRef}${moraRef}-${paid}))`;
 }
 function setupPayments_(ss) {
   const sh = getOrCreate_(ss, CFG.SHEETS.PAYMENTS); sh.clear();
@@ -1034,13 +1062,13 @@ function setupPayments_(ss) {
   sh.getRange(2, PP.AMOUNT, CFG.MAX_ROWS, 2).setNumberFormat(CFG.CURRENCY_FMT);
   sh.getRange(2, PP.SEND_RECEIPT, CFG.MAX_ROWS, 1).insertCheckboxes(); // casilla "Enviar recibo"
   sh.getRange(2, PP.GEN_RECEIPT, CFG.MAX_ROWS, 1).insertCheckboxes(); // casilla "Generar recibo" (sin correo)
-  // "Saldo Posterior" VIVO: lo que falta pagar del préstamo tras cada pago (= suma de cuotas impagas).
+  // "Saldo Posterior" VIVO: lo que falta pagar del préstamo tras cada pago, INCLUIDA la mora.
   const balF = []; for (let r = 2; r <= CFG.MAX_ROWS + 1; r++) balF.push([paymentBalanceFormula_(r)]);
   sh.getRange(2, PP.BALANCE, balF.length, 1).setFormulas(balF);
   [140, 90, 110, 120, 130, 150, 200, 110, 110, 110].forEach((w, i) => sh.setColumnWidth(i + 1, w));
   sh.getRange(1, PP.SEND_RECEIPT).setNote('Tildá para ENVIAR por correo el recibo de pago de esa fila. Se destilda solo y deja el enlace en "Recibo Enviado". (Si el prestatario no tiene correo, usá "Generar recibo".)');
   sh.getRange(1, PP.GEN_RECEIPT).setNote('Tildá para GENERAR el PDF del recibo (con monto pagado y saldo pendiente) sin enviar correo. Se destilda solo y deja el enlace en "Recibo Enviado".');
-  sh.getRange(1, PP.BALANCE).setNote('Lo que falta pagar del préstamo después de este pago (suma de las cuotas impagas). Se calcula solo.');
+  sh.getRange(1, PP.BALANCE).setNote('Lo que falta pagar del préstamo después de este pago, INCLUIDA la mora (= "Saldo con Mora" del prestatario en el último pago). Se calcula solo.');
   // Ayuda para el ingreso manual: menú desplegable con los IDs de préstamo válidos.
   // allowInvalid(true) para no bloquear escrituras del script ni importaciones.
   const bs = ss.getSheetByName(CFG.SHEETS.BORROWERS);
@@ -1097,25 +1125,35 @@ function cuotasForLoan_(cs, loanId, loanDate, total, n, dueDays, opts) {
     rows.push([loanId + '-' + k, loanId, k, due, monto, '', '', '', '']);
   }
   // Reemplaza, NO apila: borra las cuotas previas de este préstamo antes de escribir.
-  // Sin esto, una 2ª corrida (re-aprobación, reactivar, firma) dejaba filas con el MISMO
-  // "ID Cuota" (p. ej. dos L-0037-1): una fantasma vieja + la real → cuota duplicada.
-  deleteCuotasRowsForLoan_(cs, loanId);
-  const start = cs.getLastRow() + 1;
-  cs.getRange(start, 1, rows.length, CUOTAS_HEADERS.length).setValues(rows);
-  // Fórmulas vivas por fila (reparto del Total Pagado del préstamo, cuota más antigua primero).
+  // ATÓMICO: un lock de documento serializa las corridas CONCURRENTES (p. ej. tildar
+  // "Plan de pago"/regenerar en varias filas, o clics rápidos → varios onEdit a la vez), y
+  // flush() tras el borrado hace que getLastRow() refleje el borrado. Sin esto, los borrados y
+  // altas se intercalaban → cuotas DUPLICADAS (mismo "ID Cuota") o filas viejas sin borrar.
   const paidOffset = round2_(Number(opts.paidOffset) || 0);
-  for (let i = 0; i < rows.length; i++) {
-    const r = start + i;
-    const pagadoAntes = `SUMIFS($${AMT}$2:$${AMT},$${LID}$2:$${LID},$${LID}${r},$${NUM}$2:$${NUM},"<"&$${NUM}${r})`;
-    let loanPaid = `IFERROR(VLOOKUP($${LID}${r},'${B}'!$${bIdL}:$${bPaidL},${PB.PAID},FALSE),0)`;
-    if (paidOffset > 0) loanPaid = `MAX(0,${loanPaid}-${paidOffset})`;
-    cs.getRange(r, CU.PAID).setFormula(`=MIN($${AMT}${r},MAX(0,${loanPaid}-(${pagadoAntes})))`);
-    cs.getRange(r, CU.BALANCE).setFormula(`=$${AMT}${r}-$${colL_(CU.PAID)}${r}`);
-    cs.getRange(r, CU.STATE).setFormula(
-      `=IF($${colL_(CU.BALANCE)}${r}<=0.009,"${CST.PAID}",IF(TODAY()>$${DUE}${r},"${CST.OVERDUE}","${CST.PENDING}"))`);
+  const lock = LockService.getDocumentLock();
+  try { lock.waitLock(30000); } catch (e) { logError_('cuotasForLoan_:lock', e); }
+  try {
+    deleteCuotasRowsForLoan_(cs, loanId);
+    SpreadsheetApp.flush();
+    const start = cs.getLastRow() + 1;
+    cs.getRange(start, 1, rows.length, CUOTAS_HEADERS.length).setValues(rows);
+    // Fórmulas vivas por fila (reparto del Total Pagado del préstamo, cuota más antigua primero).
+    for (let i = 0; i < rows.length; i++) {
+      const r = start + i;
+      const pagadoAntes = `SUMIFS($${AMT}$2:$${AMT},$${LID}$2:$${LID},$${LID}${r},$${NUM}$2:$${NUM},"<"&$${NUM}${r})`;
+      let loanPaid = `IFERROR(VLOOKUP($${LID}${r},'${B}'!$${bIdL}:$${bPaidL},${PB.PAID},FALSE),0)`;
+      if (paidOffset > 0) loanPaid = `MAX(0,${loanPaid}-${paidOffset})`;
+      cs.getRange(r, CU.PAID).setFormula(`=MIN($${AMT}${r},MAX(0,${loanPaid}-(${pagadoAntes})))`);
+      cs.getRange(r, CU.BALANCE).setFormula(`=$${AMT}${r}-$${colL_(CU.PAID)}${r}`);
+      cs.getRange(r, CU.STATE).setFormula(
+        `=IF($${colL_(CU.BALANCE)}${r}<=0.009,"${CST.PAID}",IF(TODAY()>$${DUE}${r},"${CST.OVERDUE}","${CST.PENDING}"))`);
+    }
+    cs.getRange(start, CU.DUE, rows.length, 1).setNumberFormat('yyyy-mm-dd');
+    cs.getRange(start, CU.AMOUNT, rows.length, 3).setNumberFormat(CFG.CURRENCY_FMT);
+    SpreadsheetApp.flush();
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
   }
-  cs.getRange(start, CU.DUE, rows.length, 1).setNumberFormat('yyyy-mm-dd');
-  cs.getRange(start, CU.AMOUNT, rows.length, 3).setNumberFormat(CFG.CURRENCY_FMT);
   return rows.length;
 }
 /**
@@ -1315,10 +1353,11 @@ function setupStatements_(ss) {
     ['Capital', `=IFERROR(VLOOKUP($B$4,'${B}'!$A:$E,5,FALSE),"")`],           // 9
     ['Total a Pagar', `=IFERROR(VLOOKUP($B$4,'${B}'!$A:$K,11,FALSE),"")`],     // 10
     ['Total Pagado', `=IFERROR(VLOOKUP($B$4,'${B}'!$A:$L,12,FALSE),"")`],     // 11
-    // Días de Atraso: 0 si el préstamo está saldado (Saldo Pendiente B14 ≤ 0);
-    // si no, días vencidos = HOY − Vencimiento. Al ser 0 cuando está pago, el
-    // Recargo por Mora (B13) queda automáticamente en 0.
-    ['Días de Atraso', `=IFERROR(IF($B$14="","",IF($B$14<=0.009,0,IF(VLOOKUP($B$4,'${B}'!$A:$I,9,FALSE)="","",MAX(0,TODAY()-VLOOKUP($B$4,'${B}'!$A:$I,9,FALSE))))),"")`], // 12
+    // Días de Atraso: respeta la FECHA DE PAGO. Si está saldado (Saldo Pendiente B14 ≤ 0),
+    // son los días entre el Vencimiento y el ÚLTIMO pago (recargo COBRADO, congelado — queda
+    // constancia aunque esté pago); si sigue impago, HOY − Vencimiento. Así el Recargo por
+    // Mora (B13) muestra lo que se aplicó por el atraso en vez de 0.
+    ['Días de Atraso', `=IFERROR(IF(VLOOKUP($B$4,'${B}'!$A:$I,9,FALSE)="","",MAX(0,IF($B$14<=0.009,INT(IFERROR(MAXIFS('${P}'!$C:$C,'${P}'!$B:$B,$B$4),0)),INT(TODAY()))-INT(VLOOKUP($B$4,'${B}'!$A:$I,9,FALSE)))),"")`], // 12
     // Recargo por mora = días de atraso MENOS la gracia, × recargo diario × Total, con
     // TOPE = (Tope de mora %) × Total a Pagar ($B$10). Espeja computeOutstanding_ (gracia + tope).
     ['Recargo por Mora (acum.)', `=IFERROR(IF(OR($B$12="",$B$12<=0),0,MIN(MAX(0,$B$12-IFERROR(VLOOKUP("Días de gracia antes de mora",'${CFG.SHEETS.SETTINGS}'!$A:$B,2,FALSE),0))*$B$10*IFERROR(VLOOKUP("Recargo por Mora diario (%)",'${CFG.SHEETS.SETTINGS}'!$A:$B,2,FALSE)/100,0.05),$B$10*IFERROR(VLOOKUP("Tope de mora (% del total a devolver)",'${CFG.SHEETS.SETTINGS}'!$A:$B,2,FALSE)/100,1))),"")`], // 13
@@ -1544,6 +1583,63 @@ function createAgreementSheet_() {
 }
 
 /**
+ * Instala/recrea SOLO la hoja "Estudio de Estados" (título, selector de ID Préstamo, datos por
+ * VLOOKUP y casillas ① PDF / ② Enviar) SIN borrar datos de Prestatarios ni Pagos. Acción LIGERA:
+ * reaplica las fórmulas del estado de cuenta (p. ej. el "Recargo por Mora cobrado" que respeta la
+ * Fecha de Pago) sin correr el ⑤ completo que puede exceder el tiempo.
+ */
+function createStatementsSheet_() {
+  const ss = getSS_();
+  setupStatements_(ss);
+  ss.setActiveSheet(ss.getSheetByName(CFG.SHEETS.STATEMENTS));
+  ss.toast('Hoja "Estudio de Estados" actualizada. Sus datos de Prestatarios y Pagos no fueron modificados.', 'Listo', 6);
+}
+
+/**
+ * Instala/recrea SOLO la hoja "Panel" (indicadores del prestamista) SIN borrar datos de
+ * Prestatarios ni Pagos. Acción LIGERA: reaplica el layout e indicadores (incluida la nueva
+ * categoría "Préstamos en plan") sin correr el ⑤ completo que puede exceder el tiempo.
+ */
+function createPanelSheet_() {
+  const ss = getSS_();
+  setupPanel_(ss);
+  SpreadsheetApp.flush();
+  ss.setActiveSheet(ss.getSheetByName(CFG.SHEETS.PANEL));
+  ss.toast('Panel actualizado (incluye "Préstamos en plan"). Sus datos no fueron modificados.', 'Listo', 6);
+}
+
+/**
+ * Reconstruye el Panel para instalar/actualizar el bloque "Vencimientos por período"
+ * (cuotas y monto que vencen esta semana [lun–dom], este mes y el mes próximo). Reutiliza
+ * setupPanel_ (que dibuja todo el Panel), activa la hoja y posiciona la vista en el bloque.
+ * NO modifica datos de Prestatarios, Pagos ni Cuotas. Sin guion bajo final para que aparezca
+ * en la lista "Ejecutar" del editor de Apps Script.
+ */
+function actualizarVencimientosPanel() {
+  const ss = getSS_();
+  setupPanel_(ss);
+  SpreadsheetApp.flush();
+  const sh = ss.getSheetByName(CFG.SHEETS.PANEL);
+  ss.setActiveSheet(sh);
+  try { sh.setActiveRange(sh.getRange('A21')); } catch (e) {}
+  ss.toast('«Vencimientos por período» actualizado (semana/mes/mes próximo). Sus datos no fueron modificados.', 'Listo', 6);
+}
+
+/**
+ * Instala/actualiza la hoja "En Plan": lista los préstamos EN PLAN (reestructurados) con las
+ * casillas "Plan de pago 📅 (3 cuotas)" (= regenerar cuotas, sin correo) y "PDF de cuotas 🧾"
+ * (deja el enlace del PDF). Acción LIGERA, SIN borrar datos de Prestatarios ni Pagos.
+ */
+function createEnPlanSheet_() {
+  const ss = getSS_();
+  setupEnPlan_(ss);
+  rebuildEnPlanSheet_(ss);
+  SpreadsheetApp.flush();
+  ss.setActiveSheet(ss.getSheetByName(CFG.SHEETS.PLAN));
+  ss.toast('Hoja "En Plan" actualizada (préstamos reestructurados).', 'Listo', 6);
+}
+
+/**
  * Repara los TOTALES heredados de la migración: elimina la fila "TOTAL" incrustada
  * dentro de los datos de "Prestatarios" y "Resumen" (esta app NO usa filas TOTAL en la
  * grilla; los totales viven en Panel/Estadísticas y en el banner superior). Luego re-aplica
@@ -1688,6 +1784,12 @@ function setupPanel_(ss) {
   const estL = colL_(colByAny_(BH, ['Estado']) || PB.STATE);
   const firmaL = colL_(colByAny_(BH, ['Estado de Firma']) || PB.SIGN_STATUS);
   const venL = colL_(colByAny_(BH, ['Vencimiento', 'Fecha de Vencimiento']) || PB.DUE);
+  // Cuotas: para los vencimientos por período (semana/mes/mes próximo) contamos cuota por cuota.
+  const Q = CFG.SHEETS.INSTALLMENTS;          // hoja "Cuotas"
+  const qsP = ss.getSheetByName(Q);
+  const QH = qsP ? headerIndex_(qsP) : {};
+  const qDueL = colL_(colByAny_(QH, ['Fecha de Vencimiento']) || CU.DUE);     // col D
+  const qBalL = colL_(colByAny_(QH, ['Saldo Cuota']) || CU.BALANCE);          // col G
   const payIdL = colL_(colByAny_(PH, ['ID Préstamo', 'ID Prestamo']) || PP.LOAN_ID);
   const payAmtL = colL_(colByAny_(PH, ['Monto Pagado']) || PP.AMOUNT);
   const paidL = colL_(colByAny_(BH, ['Total Pagado']) || PB.PAID);   // Prestatarios "Total Pagado"
@@ -1698,69 +1800,153 @@ function setupPanel_(ss) {
   // volvió) baja el neto. Los ACTIVOS (aún corriendo) no entran. El guardia ID≠"" descarta la
   // fila-nota del pie de "Prestatarios" (Estado PAGADO con ID en blanco).
   const paidPagado  = `SUMIFS('${B}'!$${paidL}:$${paidL},'${B}'!$${estL}:$${estL},"${ST.PAID}",'${B}'!$${idL}:$${idL},"<>")`;
-  const paidVencido = `SUMIFS('${B}'!$${paidL}:$${paidL},'${B}'!$${estL}:$${estL},"${ST.OVERDUE}",'${B}'!$${idL}:$${idL},"<>")`;
   const capPagado   = `SUMIFS('${B}'!$${capL}:$${capL},'${B}'!$${estL}:$${estL},"${ST.PAID}",'${B}'!$${idL}:$${idL},"<>")`;
-  const capVencido  = `SUMIFS('${B}'!$${capL}:$${capL},'${B}'!$${estL}:$${estL},"${ST.OVERDUE}",'${B}'!$${idL}:$${idL},"<>")`;
   const ganPagados   = `(${paidPagado})-(${capPagado})`;    // ganancia limpia de los préstamos ganados
-  const perdVencidos = `(${paidVencido})-(${capVencido})`;  // negativo = capital prestado que no volvió
+  // "Capital no recuperado": por cada préstamo VENCIDO o EN PLAN, el capital ORIGINAL que aún no
+  // volvió = MAX(0, Capital − Total Pagado) por fila, SUMADO. Incluye los préstamos en plan con su
+  // capital original a cobrar (sin la mora congelada). Negativo = pérdida (alimenta "Ganancia real").
+  const estR = `'${B}'!$${estL}2:$${estL}`, idR = `'${B}'!$${idL}2:$${idL}`;
+  const unrecR = `('${B}'!$${capL}2:$${capL}-'${B}'!$${paidL}2:$${paidL})`;
+  const perdVencidos = `-SUMPRODUCT(((${estR}="${ST.OVERDUE}")+(${estR}="${ST.PLAN}"))*(${idR}<>"")*(${unrecR}>0)*${unrecR})`;
   const gananciaReal  = `(${ganPagados})+(${perdVencidos})`; // neto de los préstamos cerrados
   sh.getRange('A1').setValue('PANEL DEL PRESTAMISTA').setFontSize(18).setFontWeight('bold').setFontColor('#1c4587');
   const kpis = [
     ['Préstamos activos', `=COUNTIFS('${B}'!$${estL}:$${estL},"${ST.ACTIVE}",'${B}'!$${idL}:$${idL},"<>")`],   // 3  int
     ['Préstamos vencidos', `=COUNTIFS('${B}'!$${estL}:$${estL},"${ST.OVERDUE}",'${B}'!$${idL}:$${idL},"<>")`], // 4  int
     ['Préstamos pagados', `=COUNTIFS('${B}'!$${estL}:$${estL},"${ST.PAID}",'${B}'!$${idL}:$${idL},"<>")`],     // 5  int
-    ['Solicitudes pendientes', `=COUNTA('${CFG.SHEETS.NEW}'!$B$2:$B)`],                    // 6  int
-    ['Contratos sin firmar', `=COUNTIF('${B}'!$${firmaL}:$${firmaL},"${SIGN.PENDING}")`], // 7  int
-    ['Fondo total para prestar', `=${fondo}`],                                            // 8  money
-    ['Capital prestado', `=${capitalPrestado}`],                                          // 9  money
-    ['Total cobrado', `=${totalCobrado}`],                                                // 10 money
-    ['Efectivo disponible para prestar', `=${fondo}-${capitalPrestado}+${totalCobrado}`], // 11 money (negativo = sobregiro)
-    ['Interés contratado', `=SUMIF('${B}'!$${idL}:$${idL},"L-*",'${B}'!$${intL}:$${intL})`],      // 12 money
-    ['Saldo pendiente total', `=SUMIF('${B}'!$${idL}:$${idL},"L-*",'${B}'!$${salL}:$${salL})`],   // 13 money
-    ['Ganancia en préstamos pagados', `=${ganPagados}`],                                 // 14 money (verde)
-    ['Pérdida en préstamos vencidos (capital no recuperado)', `=${perdVencidos}`],       // 15 money (rojo)
-    ['Ganancia real (neto de préstamos cerrados)', `=${gananciaReal}`],                  // 16 money (rojo si <0)
-    ['Ganancia real sobre el fondo (%)', `=IF(${fondo}>0,(${gananciaReal})/(${fondo}),0)`], // 17 %
+    ['Préstamos en plan', `=COUNTIFS('${B}'!$${estL}:$${estL},"${ST.PLAN}",'${B}'!$${idL}:$${idL},"<>")`],     // 6  int (reestructurados al día)
+    ['Solicitudes pendientes', `=COUNTA('${CFG.SHEETS.NEW}'!$B$2:$B)`],                    // 7  int
+    ['Contratos sin firmar', `=COUNTIF('${B}'!$${firmaL}:$${firmaL},"${SIGN.PENDING}")`], // 8  int
+    ['Fondo total para prestar', `=${fondo}`],                                            // 9  money
+    ['Capital prestado', `=${capitalPrestado}`],                                          // 10 money
+    ['Total cobrado', `=${totalCobrado}`],                                                // 11 money
+    ['Efectivo disponible para prestar', `=${fondo}-${capitalPrestado}+${totalCobrado}`], // 12 money (negativo = sobregiro)
+    ['Interés contratado', `=SUMIF('${B}'!$${idL}:$${idL},"L-*",'${B}'!$${intL}:$${intL})`],      // 13 money
+    ['Saldo pendiente total', `=SUMIF('${B}'!$${idL}:$${idL},"L-*",'${B}'!$${salL}:$${salL})`],   // 14 money
+    ['Ganancia en préstamos pagados', `=${ganPagados}`],                                 // 15 money (verde)
+    ['Pérdida: capital no recuperado (vencidos + en plan)', `=${perdVencidos}`],          // 16 money (rojo)
+    ['Ganancia real (neto de préstamos cerrados)', `=${gananciaReal}`],                  // 17 money (rojo si <0)
+    ['Ganancia real sobre el fondo (%)', `=IF(${fondo}>0,(${gananciaReal})/(${fondo}),0)`], // 18 %
   ];
   sh.getRange(3, 1, kpis.length, 1).setValues(kpis.map(k => [k[0]])).setFontWeight('bold');
   sh.getRange(3, 2, kpis.length, 1).setFormulas(kpis.map(k => [k[1]]));
-  sh.getRange(3, 2, 5, 1).setNumberFormat('0');                 // filas 3–7 enteros
-  sh.getRange(8, 2, 6, 1).setNumberFormat(CFG.CURRENCY_FMT);    // filas 8–13 moneda
-  sh.getRange(14, 2).setNumberFormat(CFG.CURRENCY_FMT);         // 14 ganancia en pagados $
-  sh.getRange(15, 2).setNumberFormat(CFG.CURRENCY_FMT);         // 15 pérdida en vencidos $
-  sh.getRange(16, 2).setNumberFormat(CFG.CURRENCY_FMT);         // 16 ganancia real (neto) $
-  sh.getRange(17, 2).setNumberFormat('0.00%');                  // 17 ganancia real sobre fondo %
-  sh.getRange('A7').setFontColor('#990000'); sh.getRange('B7').setFontColor('#990000').setFontWeight('bold');
-  sh.getRange('A7').setNote('Préstamos aprobados cuyo contrato aún no fue firmado por el prestatario. No desembolsar hasta la firma.');
-  sh.getRange('A11').setFontColor('#38761d'); sh.getRange('B11').setFontColor('#38761d').setFontWeight('bold');
-  sh.getRange('A11').setNote('Efectivo disponible = Fondo total − Capital prestado + Total cobrado. Baja al prestar y sube al cobrar. Un valor NEGATIVO (en rojo) indica sobregiro: se prestó más capital del disponible.');
+  sh.getRange(3, 2, 6, 1).setNumberFormat('0');                 // filas 3–8 enteros
+  sh.getRange(9, 2, 6, 1).setNumberFormat(CFG.CURRENCY_FMT);    // filas 9–14 moneda
+  sh.getRange(15, 2).setNumberFormat(CFG.CURRENCY_FMT);         // 15 ganancia en pagados $
+  sh.getRange(16, 2).setNumberFormat(CFG.CURRENCY_FMT);         // 16 pérdida en vencidos $
+  sh.getRange(17, 2).setNumberFormat(CFG.CURRENCY_FMT);         // 17 ganancia real (neto) $
+  sh.getRange(18, 2).setNumberFormat('0.00%');                  // 18 ganancia real sobre fondo %
+  // Fila 6: "Préstamos en plan" (reestructurados al día) — categoría aparte, en violeta.
+  sh.getRange('A6:B6').setFontColor('#351c75'); sh.getRange('B6').setFontWeight('bold');
+  sh.getRange('A6').setNote('Préstamos con plan de pago (reestructurados) al día. Categoría aparte: NO se cuentan en "activos" ni "vencidos".');
+  sh.getRange('A8').setFontColor('#990000'); sh.getRange('B8').setFontColor('#990000').setFontWeight('bold');
+  sh.getRange('A8').setNote('Préstamos aprobados cuyo contrato aún no fue firmado por el prestatario. No desembolsar hasta la firma.');
+  sh.getRange('A12').setFontColor('#38761d'); sh.getRange('B12').setFontColor('#38761d').setFontWeight('bold');
+  sh.getRange('A12').setNote('Efectivo disponible = Fondo total − Capital prestado + Total cobrado. Baja al prestar y sube al cobrar. Un valor NEGATIVO (en rojo) indica sobregiro: se prestó más capital del disponible.');
   // Ganancia real (base caja, préstamos cerrados): ganados en verde, pérdida en rojo, neto y % en
   // verde salvo que sean negativos (regla condicional los pone en rojo).
-  sh.getRange('A14:B14').setFontColor('#38761d'); sh.getRange('B14').setFontWeight('bold');
-  sh.getRange('A15:B15').setFontColor('#cc0000'); sh.getRange('B15').setFontWeight('bold');
-  sh.getRange('A16:B17').setFontColor('#38761d'); sh.getRange('B16:B17').setFontWeight('bold');
-  sh.getRange('A14').setNote('De los préstamos que YA terminaron y se pagaron: lo que te devolvieron − lo que prestaste. La ganancia limpia de los préstamos ganados.');
-  sh.getRange('A15').setNote('De los préstamos que terminaron mal (vencidos): lo que te devolvieron − lo que prestaste. Da negativo: es la plata que prestaste y no volvió. Esta es la PÉRDIDA.');
-  sh.getRange('A16').setNote('La verdad del negocio hasta hoy: ganancia de los pagados menos pérdida de los vencidos. Sólo cuenta préstamos cuya historia terminó; los que siguen vivos no entran todavía. Es plata que entró − plata que salió en préstamos PAGADOS y VENCIDOS.');
-  sh.getRange('A17').setNote('Ese neto dividido por tu fondo total. De cada $100 que pusiste, cuánto ganaste o perdiste de verdad hasta hoy.');
-  // Rojo automático para valores negativos: sobregiro (B11) y ganancia real neta/% (B16/B17).
-  sh.setConditionalFormatRules([redIfNegativeRule_(sh.getRange('B11')), redIfNegativeRule_(sh.getRange('B16')), redIfNegativeRule_(sh.getRange('B17'))]);
-  // Fila 18: Retiro disponible (instantánea; el cálculo usa ventanas de fechas que una fórmula de celda no expresa bien).
-  sh.getRange('A18').setValue('Retiro disponible (sin frenar el crecimiento)').setFontWeight('bold').setFontColor('#38761d');
+  sh.getRange('A15:B15').setFontColor('#38761d'); sh.getRange('B15').setFontWeight('bold');
+  sh.getRange('A16:B16').setFontColor('#cc0000'); sh.getRange('B16').setFontWeight('bold');
+  sh.getRange('A17:B18').setFontColor('#38761d'); sh.getRange('B17:B18').setFontWeight('bold');
+  sh.getRange('A15').setNote('De los préstamos que YA terminaron y se pagaron: lo que te devolvieron − lo que prestaste. La ganancia limpia de los préstamos ganados.');
+  sh.getRange('A16').setNote('Capital ORIGINAL que aún no volvió, sumando los préstamos VENCIDOS y EN PLAN: por cada préstamo, MAX(0, Capital − Total Pagado). Incluye a los que están en plan de pago con su capital original a cobrar (sin la mora congelada). Da negativo: es la PÉRDIDA / capital a recuperar.');
+  sh.getRange('A17').setNote('La verdad del negocio hasta hoy: ganancia de los pagados menos pérdida de los vencidos. Sólo cuenta préstamos cuya historia terminó; los que siguen vivos no entran todavía. Es plata que entró − plata que salió en préstamos PAGADOS y VENCIDOS.');
+  sh.getRange('A18').setNote('Ese neto dividido por tu fondo total. De cada $100 que pusiste, cuánto ganaste o perdiste de verdad hasta hoy.');
+  // Rojo automático para valores negativos: sobregiro (B12) y ganancia real neta/% (B17/B18).
+  sh.setConditionalFormatRules([redIfNegativeRule_(sh.getRange('B12')), redIfNegativeRule_(sh.getRange('B17')), redIfNegativeRule_(sh.getRange('B18'))]);
+  // Fila 19: Retiro disponible (instantánea; el cálculo usa ventanas de fechas que una fórmula de celda no expresa bien).
+  sh.getRange('A19').setValue('Retiro disponible (sin frenar el crecimiento)').setFontWeight('bold').setFontColor('#38761d');
   try {
     const wd = withdrawableStats_();
-    sh.getRange('B18').setValue(wd.withdrawable).setNumberFormat(CFG.CURRENCY_FMT).setFontColor('#38761d').setFontWeight('bold');
-    sh.getRange('A18').setNote('Máximo retirable ahora sin frenar el ritmo de colocación. Solo libera ganancia realizada (interés cobrado) y ' +
+    sh.getRange('B19').setValue(wd.withdrawable).setNumberFormat(CFG.CURRENCY_FMT).setFontColor('#38761d').setFontWeight('bold');
+    sh.getRange('A19').setNote('Máximo retirable ahora sin frenar el ritmo de colocación. Solo libera ganancia realizada (interés cobrado) y ' +
       'retiene una reserva = colocación proyectada en ' + wd.horizonDays + ' días − cobros esperados + colchón por morosidad. ' +
       'Instantánea: se recalcula con "⑤ Actualizar" y con "💵 Retiro disponible".');
   } catch (e) { logError_('setupPanel_:withdrawable', e); }
-  sh.getRange('A20').setValue('Próximos vencimientos (7 días):').setFontWeight('bold');
+  // Ventanas de fechas (fórmulas). Semana = lunes→domingo (WEEKDAY tipo 2: lun=1…dom=7);
+  // mes y mes próximo con EOMONTH. "Semana pasada" = la semana lun–dom anterior a la actual.
+  const wkStart = 'TODAY()-WEEKDAY(TODAY(),2)+1';
+  const wkEnd   = 'TODAY()-WEEKDAY(TODAY(),2)+7';
+  const moStart = 'EOMONTH(TODAY(),-1)+1';
+  const moEnd   = 'EOMONTH(TODAY(),0)';
+  const nxStart = 'EOMONTH(TODAY(),0)+1';
+  const nxEnd   = 'EOMONTH(TODAY(),1)';
+  const todStart = 'TODAY()', todNext = 'TODAY()+1';                      // hoy: [hoy, mañana)
+  const pwStart = 'TODAY()-WEEKDAY(TODAY(),2)-6';                         // lunes de la semana pasada
+  const pwNext  = 'TODAY()-WEEKDAY(TODAY(),2)+1';                         // = lunes de esta semana (exclusivo)
+
+  // ----- 1) Vencimientos por período (TODAS las cuotas no pagadas, por fecha de vencimiento) -----
+  const cntDue = (s, e) => qsP ? `=COUNTIFS('${Q}'!$${qDueL}$2:$${qDueL},">="&(${s}),'${Q}'!$${qDueL}$2:$${qDueL},"<="&(${e}),'${Q}'!$${qBalL}$2:$${qBalL},">0.009")` : '=0';
+  const amtDue = (s, e) => qsP ? `=SUMIFS('${Q}'!$${qBalL}$2:$${qBalL},'${Q}'!$${qDueL}$2:$${qDueL},">="&(${s}),'${Q}'!$${qDueL}$2:$${qDueL},"<="&(${e}),'${Q}'!$${qBalL}$2:$${qBalL},">0.009")` : '=0';
+  sh.getRange('A21').setValue('Vencimientos por período (todas las cuotas)').setFontWeight('bold').setFontColor('#1c4587');
+  sh.getRange('A21').setNote('Cuenta las CUOTAS no pagadas (saldo > 0) según su fecha de vencimiento. La semana va de lunes a domingo. El monto es el saldo que queda por cobrar.');
+  sh.getRange(22, 1, 1, 3).setValues([['Período', 'Cuotas a cobrar', 'Monto a cobrar']]).setFontWeight('bold');
+  const periodRows = [
+    ['Esta semana (lun–dom)', cntDue(wkStart, wkEnd), amtDue(wkStart, wkEnd)],
+    ['Este mes', cntDue(moStart, moEnd), amtDue(moStart, moEnd)],
+    ['Mes próximo', cntDue(nxStart, nxEnd), amtDue(nxStart, nxEnd)],
+  ];
+  sh.getRange(23, 1, periodRows.length, 1).setValues(periodRows.map(r => [r[0]])).setFontWeight('bold');
+  sh.getRange(23, 2, periodRows.length, 1).setFormulas(periodRows.map(r => [r[1]]));
+  sh.getRange(23, 3, periodRows.length, 1).setFormulas(periodRows.map(r => [r[2]]));
+  sh.getRange(23, 2, periodRows.length, 1).setNumberFormat('0');               // conteo de cuotas
+  sh.getRange(23, 3, periodRows.length, 1).setNumberFormat(CFG.CURRENCY_FMT);  // monto por cobrar
+
+  // ----- 2) Vencimientos por período — préstamos SIN plan de pago (Estado ≠ "EN PLAN") -----
+  // Igual que arriba pero excluyendo las cuotas cuyo préstamo está reestructurado ("EN PLAN").
+  // Como "Cuotas" no guarda el Estado, se resuelve con VLOOKUP a "Prestatarios" (ID→Estado).
+  const bIdCol = colByAny_(BH, ['ID Préstamo', 'ID Prestamo']) || PB.LOAN_ID;
+  const bEstCol = colByAny_(BH, ['Estado']) || PB.STATE;
+  const vlIdx = bEstCol - bIdCol + 1;                 // índice del Estado dentro del rango ID→Estado
+  const qLoanL = colL_(colByAny_(QH, ['ID Préstamo', 'ID Prestamo']) || CU.LOAN_ID);
+  const qLast = qsP ? qsP.getLastRow() : 1;
+  const noPlanOk = qsP && qLast >= 2 && vlIdx >= 1;
+  const dueArr = `'${Q}'!$${qDueL}$2:$${qDueL}${qLast}`;
+  const balArr = `'${Q}'!$${qBalL}$2:$${qBalL}${qLast}`;
+  const estArr = `ARRAYFORMULA(IFERROR(VLOOKUP('${Q}'!$${qLoanL}$2:$${qLoanL}${qLast},'${B}'!$${idL}:$${estL},${vlIdx},FALSE),""))`;
+  const inWin = (s, e) => `(${dueArr}>=(${s}))*(${dueArr}<=(${e}))*(${balArr}>0.009)*(${estArr}<>"${ST.PLAN}")`;
+  const cntNoPlan = (s, e) => noPlanOk ? `=SUMPRODUCT(${inWin(s, e)})` : '=0';
+  const amtNoPlan = (s, e) => noPlanOk ? `=SUMPRODUCT((${inWin(s, e)})*(${balArr}))` : '=0';
+  sh.getRange('A27').setValue('Vencimientos por período — préstamos SIN plan de pago').setFontWeight('bold').setFontColor('#1c4587');
+  sh.getRange('A27').setNote('Igual que el bloque anterior pero SOLO préstamos que NO están "EN PLAN" (sin reestructurar). Excluye las cuotas de préstamos reestructurados.');
+  sh.getRange(28, 1, 1, 3).setValues([['Período', 'Cuotas a cobrar', 'Monto a cobrar']]).setFontWeight('bold');
+  const noPlanRows = [
+    ['Esta semana (lun–dom)', cntNoPlan(wkStart, wkEnd), amtNoPlan(wkStart, wkEnd)],
+    ['Este mes', cntNoPlan(moStart, moEnd), amtNoPlan(moStart, moEnd)],
+    ['Mes próximo', cntNoPlan(nxStart, nxEnd), amtNoPlan(nxStart, nxEnd)],
+  ];
+  sh.getRange(29, 1, noPlanRows.length, 1).setValues(noPlanRows.map(r => [r[0]])).setFontWeight('bold');
+  sh.getRange(29, 2, noPlanRows.length, 1).setFormulas(noPlanRows.map(r => [r[1]]));
+  sh.getRange(29, 3, noPlanRows.length, 1).setFormulas(noPlanRows.map(r => [r[2]]));
+  sh.getRange(29, 2, noPlanRows.length, 1).setNumberFormat('0');
+  sh.getRange(29, 3, noPlanRows.length, 1).setNumberFormat(CFG.CURRENCY_FMT);
+
+  // ----- 3) Cobros recientes (pagos registrados en "Pagos" por Fecha de Pago) -----
+  const payDateL = colL_(colByAny_(PH, ['Fecha de Pago']) || PP.DATE);
+  const payDateR = `'${P}'!$${payDateL}$2:$${payDateL}`;
+  const payAmtR = `'${P}'!$${payAmtL}$2:$${payAmtL}`;
+  const cntPay = (s, nx) => pgP ? `=COUNTIFS(${payDateR},">="&(${s}),${payDateR},"<"&(${nx}))` : '=0';
+  const amtPay = (s, nx) => pgP ? `=SUMIFS(${payAmtR},${payDateR},">="&(${s}),${payDateR},"<"&(${nx}))` : '=0';
+  sh.getRange('A33').setValue('Cobros recientes').setFontWeight('bold').setFontColor('#38761d');
+  sh.getRange('A33').setNote('Pagos registrados en la hoja "Pagos" según su Fecha de Pago. "Pagos cobrados" = cantidad de pagos; "Monto cobrado" = suma de "Monto Pagado". La semana pasada va de lunes a domingo.');
+  sh.getRange(34, 1, 1, 3).setValues([['Período', 'Pagos cobrados', 'Monto cobrado']]).setFontWeight('bold');
+  const payRows = [
+    ['Hoy', cntPay(todStart, todNext), amtPay(todStart, todNext)],
+    ['Semana pasada (lun–dom)', cntPay(pwStart, pwNext), amtPay(pwStart, pwNext)],
+  ];
+  sh.getRange(35, 1, payRows.length, 1).setValues(payRows.map(r => [r[0]])).setFontWeight('bold');
+  sh.getRange(35, 2, payRows.length, 1).setFormulas(payRows.map(r => [r[1]]));
+  sh.getRange(35, 3, payRows.length, 1).setFormulas(payRows.map(r => [r[2]]));
+  sh.getRange(35, 2, payRows.length, 1).setNumberFormat('0');
+  sh.getRange(35, 3, payRows.length, 1).setNumberFormat(CFG.CURRENCY_FMT);
+
+  sh.getRange('A38').setValue('Próximos vencimientos (7 días):').setFontWeight('bold');
   // Nombre resuelto desde "Clientes" vía ID Cliente (col B). Vencimiento=G, Saldo=K, Estado=L.
   const nameArr = `ARRAYFORMULA(IFERROR(VLOOKUP('${B}'!$${cliL}2:$${cliL},'${C}'!$A:$B,2,FALSE),""))`;
-  sh.getRange('A21').setFormula(
+  sh.getRange('A39').setFormula(
     `=IFERROR(SORT(FILTER({'${B}'!$${idL}2:$${idL},${nameArr},'${B}'!$${venL}2:$${venL},'${B}'!$${salL}2:$${salL}},` +
     `('${B}'!$${estL}2:$${estL}<>"${ST.PAID}")*('${B}'!$${venL}2:$${venL}>=TODAY())*('${B}'!$${venL}2:$${venL}<=TODAY()+7)),3,TRUE),"— sin vencimientos próximos —")`);
-  sh.getRange('A20').setNote('Muestra préstamos no pagados que vencen dentro de 7 días.');
+  sh.getRange('A38').setNote('Muestra préstamos no pagados que vencen dentro de 7 días.');
   sh.setColumnWidth(1, 240); sh.setColumnWidth(2, 200); sh.setColumnWidth(3, 130); sh.setColumnWidth(4, 130);
 }
 
@@ -2083,6 +2269,77 @@ function setupLate_(ss) {
   return sh;
 }
 
+/* ===================== HOJA "EN PLAN" (préstamos reestructurados) ===================== */
+const PLAN_HEADERS = ['ID Préstamo', 'Prestatario', 'DNI', 'Correo', 'Teléfono', 'Vencimiento del plan',
+  'Cuotas', 'Total del plan', 'Total Pagado', 'Saldo del plan',
+  'Plan de pago 📅 (3 cuotas)', 'Plan enviado', 'PDF de cuotas 🧾', 'PDF generado', 'Enlace PDF'];
+// Columnas (1-based) de control en "En Plan".
+const PLAN_PLAN_COL = 11, PLAN_PLAN_DONE_COL = 12, PLAN_DOC_COL = 13, PLAN_DOC_DONE_COL = 14, PLAN_LINK_COL = 15;
+
+/** Instala/recrea la hoja "En Plan" (lista de préstamos reestructurados, EN PLAN). */
+function setupEnPlan_(ss) {
+  const sh = getOrCreate_(ss, CFG.SHEETS.PLAN); sh.clear();
+  sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).clearDataValidations();
+  sh.getRange(1, 1, 1, PLAN_HEADERS.length).setValues([PLAN_HEADERS])
+    .setFontWeight('bold').setBackground('#351c75').setFontColor('#fff').setWrap(true);
+  sh.setFrozenRows(1);
+  [110, 170, 120, 200, 120, 140, 70, 140, 130, 140, 150, 110, 120, 110, 120].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  sh.getRange('A1').setNote('Préstamos EN PLAN (con plan de pago / reestructurados). Se actualiza con "⑤ Actualizar" y con el menú 📋. Tildá "Plan de pago 📅" para regenerar el plan en 3 cuotas (desde la semana próxima, SIN correo) o "PDF de cuotas 🧾" para generar el PDF (su enlace queda en "Enlace PDF").');
+  sh.getRange(1, PLAN_PLAN_COL).setNote('Tilde para REGENERAR el plan en 3 cuotas (deuda congelada a hoy; 1.ª cuota la semana próxima). NO envía correo. La casilla se destilda sola.');
+  sh.getRange(1, PLAN_DOC_COL).setNote('Tilde para generar el PDF del cronograma de cuotas; el enlace clicable queda en "Enlace PDF". La casilla se destilda sola.');
+  return sh;
+}
+
+/** Reconstruye "En Plan": un renglón por préstamo con Estado = EN PLAN. Conserva las fechas de
+ *  "Plan enviado"/"PDF generado" y el "Enlace PDF" ya generados (por ID de préstamo). */
+function rebuildEnPlanSheet_(ss) {
+  ss = ss || getSS_();
+  const sh = ss.getSheetByName(CFG.SHEETS.PLAN) || setupEnPlan_(ss);
+  const bs = ss.getSheetByName(CFG.SHEETS.BORROWERS); if (!bs) return;
+  sh.getRange(1, 1, 1, PLAN_HEADERS.length).setValues([PLAN_HEADERS])
+    .setFontWeight('bold').setBackground('#351c75').setFontColor('#fff').setWrap(true);
+  // Conservar datos generados previamente, por ID de préstamo.
+  const prev = {}, last0 = sh.getLastRow();
+  if (last0 >= 2) {
+    const vals = sh.getRange(2, 1, last0 - 1, PLAN_HEADERS.length).getValues();
+    const linkF = sh.getRange(2, PLAN_LINK_COL, last0 - 1, 1).getFormulas();
+    vals.forEach((r, i) => { const id = String(r[0]).trim(); if (id) prev[id] = { planSent: r[PLAN_PLAN_DONE_COL - 1], docDone: r[PLAN_DOC_DONE_COL - 1], link: linkF[i][0] || r[PLAN_LINK_COL - 1] }; });
+  }
+  const clearH = Math.max(sh.getMaxRows() - 1, 1);
+  sh.getRange(2, 1, clearH, PLAN_HEADERS.length).clearContent().setBackground(null).setFontWeight(null);
+  sh.getRange(2, PLAN_PLAN_COL, clearH, 1).clearDataValidations();
+  sh.getRange(2, PLAN_DOC_COL, clearH, 1).clearDataValidations();
+  const H = headerIndex_(bs), col = n => colByAny_(H, n);
+  const idC = col(['ID Préstamo', 'ID Prestamo']), estC = col(['Estado']), venC = col(['Vencimiento', 'Fecha de Vencimiento']),
+    pagC = col(['Total Pagado']), bmC = col(['Saldo con Mora']), planTotC = col(['Suma de cuotas', 'Total a Pagar (con mora)']);
+  const last = bs.getLastRow(); if (last < 2 || !idC || !estC) return;
+  const estVals = bs.getRange(2, estC, last - 1, 1).getValues();
+  const rows = [], links = [];
+  for (let i = 0; i < estVals.length; i++) {
+    if (String(estVals[i][0]).trim() !== ST.PLAN) continue;
+    const row = i + 2, loan = readLoan_(bs, row), id = loan.loanId;
+    const venc = venC ? bs.getRange(row, venC).getValue() : '';
+    const pagado = pagC ? Number(bs.getRange(row, pagC).getValue()) || 0 : 0;
+    const totalPlan = planTotC ? Number(bs.getRange(row, planTotC).getValue()) || 0 : 0;
+    const saldoPlan = bmC ? Number(bs.getRange(row, bmC).getValue()) || 0 : 0;
+    const nCuotas = cuotasDeLoan_(id).length;
+    const p = prev[id] || {};
+    rows.push([id, loan.name, loan.dni, loan.email, loan.phone, (venc instanceof Date) ? venc : '', nCuotas,
+      totalPlan, pagado, saldoPlan, false, (p.planSent instanceof Date) ? p.planSent : '', false, (p.docDone instanceof Date) ? p.docDone : '', '']);
+    links.push(p.link || '');
+  }
+  if (!rows.length) return;
+  sh.getRange(2, 1, rows.length, PLAN_HEADERS.length).setValues(rows);
+  sh.getRange(2, 6, rows.length, 1).setNumberFormat('yyyy-mm-dd');     // Vencimiento del plan
+  sh.getRange(2, 7, rows.length, 1).setNumberFormat('0');              // Cuotas
+  sh.getRange(2, 8, rows.length, 3).setNumberFormat(CFG.CURRENCY_FMT); // Total/Pagado/Saldo del plan
+  sh.getRange(2, PLAN_PLAN_COL, rows.length, 1).insertCheckboxes();
+  sh.getRange(2, PLAN_PLAN_DONE_COL, rows.length, 1).setNumberFormat('yyyy-mm-dd');
+  sh.getRange(2, PLAN_DOC_COL, rows.length, 1).insertCheckboxes();
+  sh.getRange(2, PLAN_DOC_DONE_COL, rows.length, 1).setNumberFormat('yyyy-mm-dd');
+  links.forEach((lnk, i) => { if (lnk) { const cell = sh.getRange(i + 2, PLAN_LINK_COL); if (/^=/.test(String(lnk))) cell.setFormula(lnk); else cell.setValue(lnk); } });
+}
+
 /** Reconstruye "Pagos Atrasados": un renglón por préstamo vencido con saldo, con recargo acumulado. */
 function rebuildLateSheet_(ss) {
   ss = ss || getSS_();
@@ -2232,21 +2489,25 @@ function computeOutstanding_(principal, rate, loanDate, payments, asOf, paymentC
     amount: round2_(Number(c.amount) || 0),
     cap: round2_((Number(c.amount) || 0) * capFrac),
     balance: round2_(Number(c.amount) || 0),   // capital+interés pendiente de la cuota
-    mora: 0,
+    mora: 0,            // mora VIGENTE (pendiente) de la cuota
+    moraCharged: 0,     // mora TOTAL cobrada en la vida de la cuota (para respetar el tope ACUMULADO)
     cursor: 0,
   })).sort((a, b) => a.dueMs - b.dueMs);
   cuotas.forEach(c => { c.cursor = c.dueMs; });
 
   // Acumula la mora de cada cuota impaga hasta el instante t (tras su gracia, con su tope).
+  // El tope se aplica sobre la mora TOTAL cobrada (moraCharged), no sobre la vigente: así, si un
+  // pago redujo la mora y ésta vuelve a correr, la mora total NUNCA supera el tope (p. ej. 100%).
   const accrueTo = t => {
     for (const c of cuotas) {
       const startMs = c.dueMs + grace * DAY;
-      if (c.balance <= 0 || feePct <= 0 || c.mora >= c.cap || t <= startMs) { c.cursor = Math.max(c.cursor, t); continue; }
+      if (c.balance <= 0 || feePct <= 0 || c.moraCharged >= c.cap || t <= startMs) { c.cursor = Math.max(c.cursor, t); continue; }
       const from = Math.max(c.cursor, startMs);
       const days = Math.floor((t - from) / DAY);
       if (days > 0) {
-        const add = Math.min(round2_(round2_(c.amount * feePct) * days), round2_(c.cap - c.mora));
+        const add = Math.min(round2_(round2_(c.amount * feePct) * days), round2_(c.cap - c.moraCharged));
         c.mora = round2_(c.mora + add);
+        c.moraCharged = round2_(c.moraCharged + add);
       }
       c.cursor = t;
     }
@@ -2305,10 +2566,40 @@ function accruedMora_(loan, asOf) {
   asOf = (asOf instanceof Date) ? asOf : new Date();
   const rate = loanRateForTerm_(loan.term);
   const pays = loanPayments_(loan.loanId);
-  const withMora = computeOutstanding_(loan.principal, rate, loan.loanDate, pays, asOf, new Date(9999, 0, 1), undefined, undefined, undefined, loanSchedule_(loan));
-  const totalPaid = pays.reduce((s, p) => s + p.amount, 0);
-  const principalDue = Math.max(0, round2_(loan.totalDue - totalPaid));
+  const sched = loanSchedule_(loan), far = new Date(9999, 0, 1);
+  const withMora = computeOutstanding_(loan.principal, rate, loan.loanDate, pays, asOf, far, undefined, undefined, undefined, sched);
+  // Capital+interés pendiente SIN mora: el MISMO motor con recargo diario 0. Robusto aunque
+  // "Total a Pagar" venga vacío/erróneo en la fila (antes se restaba loan.totalDue y, si
+  // faltaba, principalDue=0 y la mora absorbía el capital → duplicaba el "monto a pagar hoy").
+  const principalDue = computeOutstanding_(loan.principal, rate, loan.loanDate, pays, asOf, far, 0, undefined, undefined, sched);
   return Math.max(0, round2_(withMora - principalDue));
+}
+/**
+ * Mora COBRADA (histórica) de un préstamo: el recargo por mora que se APLICÓ por los días de
+ * atraso, congelado a la fecha en que se saldó (o a hoy si sigue impago). A diferencia de
+ * accruedMora_ —que devuelve lo que AÚN se adeuda y por eso da 0 cuando ya se pagó—, esta deja
+ * constancia del recargo que corresponde/correspondió, para mostrarlo en el estado de cuenta
+ * aunque el préstamo esté saldado. Respeta la FECHA DE PAGO (no se calcula contra hoy si ya se
+ * saldó). Espeja la fórmula de la hoja "Estudio de Estados": días × total × recargo diario,
+ * menos la gracia, con tope. Un AJUSTE manual ("Mora (ajuste)") manda por encima del cálculo.
+ */
+function chargedMora_(loan, asOf) {
+  const ov = moraOverrideValue_(loan.loanId);
+  if (ov != null) return ov;
+  asOf = (asOf instanceof Date) ? asOf : new Date();
+  const pays = loanPayments_(loan.loanId);
+  const totalPaid = pays.reduce((s, p) => s + p.amount, 0);
+  const settled = totalPaid >= round2_(loan.totalDue) - 0.009;
+  // Fecha hasta la que corrió la mora: si está saldado, el último pago; si no, hoy.
+  let endDate = asOf;
+  if (settled && pays.length) {
+    const lastMs = Math.max.apply(null, pays.map(p => new Date(p.date).getTime()));
+    endDate = new Date(lastMs);
+  }
+  const effDays = Math.max(0, daysLate_(loan.dueDate, endDate) - moraGraceDays_());
+  if (effDays <= 0) return 0;
+  const base = round2_(loan.totalDue);
+  return Math.max(0, Math.min(round2_(base * lateFeeRate_() * effDays), round2_(base * moraCapFrac_())));
 }
 /**
  * Núcleo PURO del cálculo de "Retiro disponible sin frenar el crecimiento".
@@ -3017,6 +3308,59 @@ function restructurarPrestamoUI() {
 }
 
 /**
+ * Núcleo: REGENERA el cronograma de cuotas de un préstamo con la deuda ACTUAL (capital +
+ * interés + mora a hoy) CONGELADA y la 1.ª cuota venciendo la SEMANA PRÓXIMA (hoy + 7 días);
+ * las siguientes, mensuales. Reutiliza restructurarPrestamo_ (congela mora, mueve el
+ * vencimiento, fija "Mora (ajuste)" y anota el plan) pasándole hoy+7 como 1.ª fecha, y reescribe
+ * las filas de "Cuotas" con el nuevo cronograma. Devuelve el resumen del plan.
+ */
+function regenerarCuotasPrestamo_(loanId, nCuotas) {
+  return guard_('regenerarCuotasPrestamo_', function () {
+    const ss = getSS_();
+    const loan = findLoanById_(String(loanId || '').trim());
+    if (!loan) throw new Error('No se encontró el préstamo ' + loanId + '.');
+    const today = startOfDay_(new Date());
+    const firstDue = addDays_(today, 7); // la 1.ª cuota vence la SEMANA SIGUIENTE, no el mismo día
+    const n = Math.max(1, Math.floor(Number(nCuotas) || 3));
+    // Congela la deuda a hoy y arma el plan con la 1.ª cuota venciendo la semana próxima.
+    const out = restructurarPrestamo_(loan.loanId, n, firstDue, { silent: true });
+    // Reescribe el cronograma en "Cuotas" con las fechas del plan (cuotasForLoan_ borra las viejas).
+    const cs = ss.getSheetByName(CFG.SHEETS.INSTALLMENTS) || (typeof setupCuotas_ === 'function' ? setupCuotas_(ss) : null);
+    if (cs) cuotasForLoan_(cs, loan.loanId, loan.loanDate, out.owed, out.plan.length, null,
+      { dates: out.plan.map(p => p.due), paidOffset: out.paid0 });
+    try { ss.toast(loan.loanId + ': cuotas regeneradas (' + out.plan.length + ') desde ' + fmtDate_(out.plan[0].due) + '.', '🔁 Cuotas', 6); } catch (e) {}
+    return out;
+  });
+}
+
+/**
+ * Menú: regenera el cronograma del préstamo de la FILA ACTIVA (en "Prestatarios" o "Pagos
+ * Atrasados") con la deuda congelada a hoy y la 1.ª cuota venciendo la SEMANA PRÓXIMA (hoy + 7
+ * días). Pide la cantidad de cuotas (por defecto 3). Luego tildá "PDF de cuotas 🧾" para el PDF.
+ */
+function regenerarCuotasPrestamoUI() {
+  const ss = getSS_(), ui = SpreadsheetApp.getUi();
+  const sh = ss.getActiveSheet(), name = sh.getName(), ar = ss.getActiveRange();
+  let loanId = '';
+  if (ar) {
+    if (name === CFG.SHEETS.BORROWERS) loanId = String(sh.getRange(ar.getRow(), PB.LOAN_ID).getValue()).trim();
+    else if (name === CFG.SHEETS.LATE) loanId = String(sh.getRange(ar.getRow(), 1).getValue()).trim();
+  }
+  if (!/^L-/i.test(loanId)) {
+    ui.alert('Seleccioná la fila de un préstamo (ID "L-…") en "Prestatarios" o "Pagos Atrasados" y volvé a ejecutar.');
+    return;
+  }
+  const resp = ui.prompt('Regenerar cuotas (desde la semana próxima)',
+    'Préstamo ' + loanId + ': se congela la deuda a hoy (capital + interés + mora) y se arma un nuevo cronograma con la 1.ª cuota venciendo la SEMANA PRÓXIMA (hoy + 7 días).\n\nCantidad de cuotas (por defecto 3):', ui.ButtonSet.OK_CANCEL);
+  if (resp.getSelectedButton() !== ui.Button.OK) return;
+  const n = parseInt(String(resp.getResponseText()).replace(/\D/g, ''), 10) || 3;
+  const out = regenerarCuotasPrestamo_(loanId, n);
+  if (out) ui.alert('Cuotas regeneradas',
+    out.loanId + ': ' + fmtMoney_(out.owed) + ' en ' + out.plan.length + ' cuota(s), desde ' + fmtDate_(out.plan[0].due) + ' (la 1.ª vence la semana próxima). ' +
+    'La mora quedó congelada. Tildá "PDF de cuotas 🧾" en "Pagos Atrasados" para el PDF actualizado.', ui.ButtonSet.OK);
+}
+
+/**
  * Casilla "Plan de pago 📅 (3 cuotas)" de "Pagos Atrasados": reestructura el préstamo
  * de la fila en 3 cuotas mensuales iguales (deuda con mora congelada a hoy), reemplaza
  * sus filas de "Cuotas" por las del plan y envía el plan por correo al prestatario.
@@ -3051,15 +3395,9 @@ function planPagoDesdeAtrasos_(sh, row) {
     cuotasForLoan_(cs, loanId, loan.loanDate, out.owed, 3, null, { dates: out.plan.map(p => p.due), paidOffset: out.paid0 });
   }
 
-  // 3) Correo al prestatario (respaldo: el correo de la fila de "Pagos Atrasados").
-  const email = String(loan.email || sh.getRange(row, 4).getValue() || '').trim();
-  let mailMsg;
-  if (email) { emailPlanPago_(loan, out, email); mailMsg = 'plan enviado a ' + email; }
-  else mailMsg = 'SIN CORREO: plan aplicado pero no se envió aviso';
-
-  // 4) Sello + aviso.
+  // 3) Sello (evita reaplicar el plan con otro clic) + aviso. NO se envía correo en este paso.
   sh.getRange(row, LATE_PLAN_SENT_COL).setValue(new Date()).setNumberFormat('yyyy-mm-dd');
-  ss.toast(loanId + ' reestructurado: ' + fmtMoney_(out.owed) + ' en 3 cuotas; ' + mailMsg + '.', '📅 Plan de pago', 8);
+  ss.toast(loanId + ' reestructurado: ' + fmtMoney_(out.owed) + ' en 3 cuotas (sin enviar correo).', '📅 Plan de pago', 8);
 }
 
 /** Correo con el plan de pago en 3 cuotas (deuda congelada, fechas y montos). */
@@ -3117,12 +3455,23 @@ function docCuotasDesdeAtrasos_(sh, row) {
   const ss = getSS_();
   const loanId = String(sh.getRange(row, 1).getValue()).trim();
   if (!loanId) { ss.toast('La fila seleccionada no tiene un préstamo.', '⚠ PDF de cuotas', 6); return; }
-  const loan = findLoanById_(loanId);
-  if (!loan) { ss.toast('No se encontró el préstamo ' + loanId + ' en "Prestatarios".', '⚠ PDF de cuotas', 6); return; }
-  let cuotas = cuotasDeLoan_(loanId);
+  const f = generateCuotasPdfFile_(loanId);
+  sh.getRange(row, LATE_DOC_DONE_COL).setValue(new Date()).setNumberFormat('yyyy-mm-dd');
+  ss.toast('PDF de cuotas de ' + loanId + ' guardado en la carpeta del prestatario.', '🧾 PDF de cuotas', 8);
+  return f;
+}
+
+/**
+ * Genera el PDF del cronograma de cuotas de un préstamo (de la hoja "Cuotas"; si no tiene
+ * cronograma, su pago único) y lo guarda en la carpeta del prestatario. Devuelve el archivo.
+ * Reutilizado por "Pagos Atrasados" y por la hoja "En Plan". Lanza si no se encuentra el préstamo.
+ */
+function generateCuotasPdfFile_(loanId) {
+  const loan = findLoanById_(String(loanId || '').trim());
+  if (!loan) throw new Error('No se encontró el préstamo ' + loanId + ' en "Prestatarios".');
+  let cuotas = cuotasDeLoan_(loan.loanId);
   if (!cuotas.length) {
-    // Sin filas en "Cuotas": préstamo de pago único → una sola cuota derivada del préstamo.
-    const paid = round2_(loanPayments_(loanId).reduce((s, p) => s + p.amount, 0));
+    const paid = round2_(loanPayments_(loan.loanId).reduce((s, p) => s + p.amount, 0));
     const total = round2_(Number(loan.totalDue) || 0);
     cuotas = [{
       num: 1, due: (loan.dueDate instanceof Date) ? loan.dueDate : null, monto: total,
@@ -3130,19 +3479,27 @@ function docCuotasDesdeAtrasos_(sh, row) {
       estado: daysLate_(loan.dueDate, new Date()) > 0 ? CST.OVERDUE : CST.PENDING,
     }];
   }
-  const f = savePdfToBorrower_(cuotasDocHtml_(loan, cuotas), 'Cuotas ' + loan.loanId + ' - ' + loan.name + '.pdf', loan);
-  sh.getRange(row, LATE_DOC_DONE_COL).setValue(new Date()).setNumberFormat('yyyy-mm-dd');
-  ss.toast('PDF de cuotas de ' + loanId + ' guardado en la carpeta del prestatario.', '🧾 PDF de cuotas', 8);
-  return f;
+  return savePdfToBorrower_(cuotasDocHtml_(loan, cuotas), 'Cuotas ' + loan.loanId + ' - ' + loan.name + '.pdf', loan);
 }
 
 /** HTML del documento de cuotas: detalle del préstamo + cronograma con pagado/saldo por cuota. */
 function cuotasDocHtml_(loan, cuotas) {
   const lender = companyName_(), footer = getSetting_('Pie del Contrato');
-  const feeAccum = round2_(accruedMora_(loan) || 0);
   const totMonto = round2_(cuotas.reduce((s, c) => s + c.monto, 0));
   const totPag = round2_(cuotas.reduce((s, c) => s + c.pagado, 0));
   const totSaldo = round2_(cuotas.reduce((s, c) => s + c.saldo, 0));
+  // Capital+interés ORIGINAL (sin mora). Si "Total a Pagar" viene vacío, se deriva del préstamo.
+  const baseTotal = round2_(Number(loan.totalDue) || round2_(loan.principal * (1 + loanRateForTerm_(loan.term))));
+  // Total realmente PAGADO del préstamo. En un préstamo reestructurado, los pagos ANTERIORES al
+  // plan YA redujeron el cronograma (no figuran en el "Pagado" por cuota): se incorporan en el
+  // resumen para que la cuenta cierre (deuda original + mora − pagado = cronograma).
+  const totalPaidReal = round2_(loanPayments_(loan.loanId).reduce((s, p) => s + p.amount, 0));
+  // ¿Préstamo REESTRUCTURADO (plan de pago)? Tiene la mora CONGELADA en "Mora (ajuste)" (la fija
+  // restructurarPrestamo_); entonces la mora ya está DENTRO de las cuotas y NO se vuelve a sumar.
+  const adj = (typeof moraOverrideValue_ === 'function') ? moraOverrideValue_(loan.loanId) : null;
+  const restructured = (adj != null && adj > 0.009);
+  const feeAccum = restructured ? round2_(adj) : round2_(accruedMora_(loan) || 0);
+  const montoHoy = restructured ? totSaldo : round2_(totSaldo + feeAccum);
   const cell = 'padding:6px 8px;border:1px solid #ccc';
   const filas = cuotas.map(c => {
     const late = c.saldo > 0.009 && (c.due instanceof Date) && daysLate_(c.due, new Date()) > 0;
@@ -3168,11 +3525,12 @@ function cuotasDocHtml_(loan, cuotas) {
     <h2>Resumen</h2>
     <table>
       <tr><td class="k">Capital</td><td>${fmtMoney_(loan.principal)}</td></tr>
+      ${restructured ? `<tr><td class="k">Total a pagar original (capital + interés)</td><td>${fmtMoney_(baseTotal)}</td></tr>` : ''}
+      ${feeAccum > 0 ? `<tr><td class="k" style="color:#900">Recargo por mora ${restructured ? 'congelado (incluido en las cuotas)' : 'acumulado'}</td><td style="color:#900"><b>${fmtMoney_(feeAccum)}</b></td></tr>` : ''}
+      ${totalPaidReal > 0.009 ? `<tr><td class="k">Total pagado${restructured ? ' (descontado del cronograma)' : ''}</td><td>${fmtMoney_(totalPaidReal)}</td></tr>` : `<tr><td class="k">Total pagado</td><td>${fmtMoney_(totPag)}</td></tr>`}
       <tr><td class="k">Total del cronograma (${cuotas.length} cuota${cuotas.length === 1 ? '' : 's'})</td><td><b>${fmtMoney_(totMonto)}</b></td></tr>
-      <tr><td class="k">Total pagado</td><td>${fmtMoney_(totPag)}</td></tr>
-      ${feeAccum > 0 ? `<tr><td class="k" style="color:#900">Recargo por mora acumulado</td><td style="color:#900"><b>${fmtMoney_(feeAccum)}</b></td></tr>` : ''}
       <tr><td class="k">Saldo pendiente del cronograma</td><td><b>${fmtMoney_(totSaldo)}</b></td></tr>
-      ${feeAccum > 0 ? `<tr><td class="k">Monto a pagar hoy (saldo + mora)</td><td><b>${fmtMoney_(round2_(totSaldo + feeAccum))}</b></td></tr>` : ''}
+      ${feeAccum > 0 ? `<tr><td class="k">Monto a pagar hoy (saldo + mora)</td><td><b>${fmtMoney_(montoHoy)}</b></td></tr>` : ''}
     </table>
     <h2>Cuotas</h2>
     <table><tr><th style="text-align:center">Cuota</th><th>Vencimiento</th><th style="text-align:right">Monto</th><th style="text-align:right">Pagado</th><th style="text-align:right">Saldo</th><th style="text-align:center">Estado</th></tr>
@@ -3223,11 +3581,13 @@ function statementData_(loan) {
   // Total Pagado). Si está saldado, no hay atraso ni recargo por mora.
   const out = Math.max(0, round2_(loan.totalDue - totalPaid));
   const paid = out <= 0.009;
-  const dLate = paid ? 0 : daysLate_(loan.dueDate);
-  // Mora POR CUOTA (recargo diario configurable, tras la gracia, con tope % del total a devolver) —
-  // consistente con computeOutstanding_. Incluye cuotas vencidas aunque el vencimiento final no llegó.
-  const feeAccum = paid ? 0 : accruedMora_(loan);
-  const overdue = !paid && (feeAccum > 0 || ((loan.dueDate instanceof Date) && new Date().getTime() > loan.dueDate.getTime()));
+  // Mora COBRADA (histórica): respeta la Fecha de Pago y queda como constancia aunque el
+  // préstamo esté saldado (congelada al último pago). Días de atraso = hasta el pago que lo
+  // saldó, o hasta hoy si sigue impago. Espeja la hoja "Estudio de Estados".
+  const endDate = (paid && pays.length) ? pays[pays.length - 1].date : new Date();
+  const dLate = daysLate_(loan.dueDate, endDate);
+  const feeAccum = chargedMora_(loan);
+  const overdue = !paid && (loan.dueDate instanceof Date) && new Date().getTime() > loan.dueDate.getTime();
   return { pays, out, totalPaid, paid, overdue, dLate, feeAccum };
 }
 
@@ -3259,7 +3619,7 @@ function statementHtml_(loan) {
   const cell = 'padding:6px 8px;border:1px solid #ccc';
   let payRows = d.pays.map(p => `<tr><td style="${cell}">${fmtDate_(p.date)}</td><td style="${cell};text-align:right">${fmtMoney_(p.amount)}</td></tr>`).join('');
   if (!payRows) payRows = `<tr><td colspan="2" style="${cell}">— Sin pagos registrados —</td></tr>`;
-  const feeRows = d.overdue ?
+  const feeRows = d.feeAccum > 0 ?
     `<tr><td class="k">Días de atraso</td><td>${d.dLate}</td></tr>
      <tr><td class="k" style="color:#900">Recargo por mora (${lateFeePctText_()}/día)</td><td style="color:#900"><b>${fmtMoney_(d.feeAccum)}</b></td></tr>` : '';
   return `<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><style>
@@ -3410,6 +3770,21 @@ function sbSendAgreement(loanId) {
 }
 function sbSendStatement(loanId) { return emailStatement(loanId); }
 function sbRefresh() { refreshAll(true); return 'Saldos y resumen actualizados.'; }
+/**
+ * Actualiza SOLO la hoja "Pagos Atrasados" (recargo por mora) — versión LIGERA de ⑤ para
+ * evitar el tiempo de espera de refreshAll, que además rearma Resumen, Panel, Estadísticas,
+ * Estados y Recordatorios. Reconstruye el detalle de mora; las columnas "Recargo por Mora
+ * (acum.)" / "Saldo con Mora" de "Prestatarios" (VLOOKUP a esta hoja) y el Estado se
+ * recalculan solos. Úsela cuando un préstamo pagado tarde no muestre la mora.
+ */
+function refreshLateOnly() {
+  guard_('refreshLateOnly', function () {
+    const ss = getSS_();
+    rebuildLateSheet_(ss);
+    SpreadsheetApp.flush();
+    try { ss.toast('Pagos Atrasados (mora) actualizado.', '⑤· Mora', 5); } catch (e) {}
+  });
+}
 function sbMoveCleared() {
   const n = doMoveCleared_();
   return n ? ('Se movieron ' + n + ' préstamo(s) saldado(s) a la hoja "Saldados".')
@@ -3440,7 +3815,7 @@ function refreshAll(silent) {
   cleanupLegacySheets_(ss);
   updateAllOutstanding_();
   try { refreshPaymentNames_(); } catch (e) { logError_('refreshAll:refreshPaymentNames_', e); }
-  setupSummary_(ss); setupPanel_(ss); setupStats_(ss); setupStatements_(ss); rebuildLateSheet_(ss); rebuildRemindersSheet_(ss);
+  setupSummary_(ss); setupPanel_(ss); setupStats_(ss); setupStatements_(ss); rebuildLateSheet_(ss); rebuildEnPlanSheet_(ss); rebuildRemindersSheet_(ss);
   SpreadsheetApp.flush();
   if (!silent) SpreadsheetApp.getUi().alert('Actualizado. Saldos, resumen, panel, estadísticas y pagos atrasados recalculados.');
 }
@@ -4207,7 +4582,11 @@ function onEditInstallable(e) {
       if (c0 <= PP.AMOUNT && cN >= PP.LOAN_ID) {
         const ids = {};
         for (let row = r0; row <= rN; row++) { const id = String(sh.getRange(row, PP.LOAN_ID).getValue()).trim(); if (id) ids[id] = true; }
-        Object.keys(ids).forEach(id => { recalcLoanPayments_(id); updateLoanOutstanding_(id); });
+        const touched = Object.keys(ids);
+        touched.forEach(id => { recalcLoanPayments_(id); updateLoanOutstanding_(id); });
+        // Un pago puede saldar el capital pero dejar mora pendiente: reconstruir "Pagos Atrasados"
+        // para que "Recargo por Mora (acum.)" / "Saldo con Mora" (VLOOKUP) y el Estado queden al día.
+        if (touched.length) { try { rebuildLateSheet_(getSS_()); } catch (err) { logError_('onEdit:PAGOS:rebuildLate', err); } }
       }
       // Casilla "Enviar recibo": envía/reenvía el recibo de pago de esa fila.
       // Se resuelve por NOMBRE de encabezado (funciona en el layout migrado o nuevo).
@@ -4330,6 +4709,39 @@ function onEditInstallable(e) {
           sh.getRange(row, LATE_DOC_COL).setValue(false);
           try { docCuotasDesdeAtrasos_(sh, row); }
           catch (err) { logError_('onEdit:LATE:docCuotas', err); getSS_().toast(err.message || String(err), '⚠ No se pudo generar el PDF', 8); }
+        }
+      }
+    } else if (name === CFG.SHEETS.PLAN) {
+      // Casilla "Plan de pago 📅 (3 cuotas)": REGENERA el plan (= "Regenerar cuotas": deuda
+      // congelada a hoy, 1.ª cuota la semana próxima, SIN correo). Sella "Plan enviado".
+      if (PLAN_PLAN_COL >= c0 && PLAN_PLAN_COL <= cN) {
+        for (let row = rN; row >= r0; row--) {
+          if (sh.getRange(row, PLAN_PLAN_COL).getValue() !== true) continue;
+          sh.getRange(row, PLAN_PLAN_COL).setValue(false);
+          const loanId = String(sh.getRange(row, 1).getValue()).trim();
+          if (!loanId) continue;
+          try {
+            const out = regenerarCuotasPrestamo_(loanId, 3);
+            sh.getRange(row, PLAN_PLAN_DONE_COL).setValue(new Date()).setNumberFormat('yyyy-mm-dd');
+            if (out) getSS_().toast(loanId + ': plan regenerado en ' + out.plan.length + ' cuotas desde ' + fmtDate_(out.plan[0].due) + '.', '📅 Plan regenerado', 6);
+          } catch (err) { logError_('onEdit:PLAN:regenerar', err); getSS_().toast(err.message || String(err), '⚠ No se pudo regenerar el plan', 8); }
+        }
+      }
+      // Casilla "PDF de cuotas 🧾": genera el PDF del cronograma y deja el enlace en "Enlace PDF".
+      if (PLAN_DOC_COL >= c0 && PLAN_DOC_COL <= cN) {
+        for (let row = rN; row >= r0; row--) {
+          if (sh.getRange(row, PLAN_DOC_COL).getValue() !== true) continue;
+          sh.getRange(row, PLAN_DOC_COL).setValue(false);
+          const loanId = String(sh.getRange(row, 1).getValue()).trim();
+          if (!loanId) continue;
+          try {
+            const f = generateCuotasPdfFile_(loanId);
+            if (f) {
+              sh.getRange(row, PLAN_LINK_COL).setFormula('=HYPERLINK("' + f.getUrl() + '","📄 Ver PDF")');
+              sh.getRange(row, PLAN_DOC_DONE_COL).setValue(new Date()).setNumberFormat('yyyy-mm-dd');
+            }
+            getSS_().toast('PDF de cuotas de ' + loanId + ' generado (ver "Enlace PDF").', '🧾 PDF de cuotas', 6);
+          } catch (err) { logError_('onEdit:PLAN:docCuotas', err); getSS_().toast(err.message || String(err), '⚠ No se pudo generar el PDF', 8); }
         }
       }
     } else if (name === CFG.SHEETS.NEW) {
@@ -4739,6 +5151,41 @@ function recalcLoanPayments_(loanId) {
   }
 }
 
+/**
+ * Reafirma el "Saldo Posterior" (con mora) en TODAS las filas de pago con ID Préstamo.
+ * Resuelve las columnas por NOMBRE de encabezado (robusto al layout migrado). Devuelve la
+ * cantidad de filas actualizadas. Fuente de la fórmula: paymentBalanceFormula_.
+ */
+function writePaymentBalanceFormulas_(ss) {
+  ss = ss || getSS_();
+  const sh = ss.getSheetByName(CFG.SHEETS.PAYMENTS); if (!sh) return 0;
+  const H = headerIndex_(sh);
+  const idC = colByAny_(H, ['ID Préstamo', 'ID Prestamo']) || PP.LOAN_ID;
+  const balC = colByAny_(H, ['Saldo Posterior']) || PP.BALANCE;
+  const last = sh.getLastRow(); if (last < 2) return 0;
+  const ids = sh.getRange(2, idC, last - 1, 1).getValues();
+  let n = 0;
+  for (let i = 0; i < ids.length; i++) {
+    if (String(ids[i][0]).trim() === '') continue;
+    const r = i + 2;
+    sh.getRange(r, balC).setFormula(paymentBalanceFormula_(r));
+    n++;
+  }
+  return n;
+}
+/**
+ * Menú: recalcula el "Saldo Posterior" de la hoja "Pagos" para que incluya la MORA (monto real
+ * adeudado del préstamo tras cada pago). Acción LIGERA e independiente — no toca Resumen, Panel,
+ * Estadísticas ni otras hojas, así que no afecta otras funcionalidades.
+ */
+function actualizarSaldoPosteriorPagos() {
+  guard_('actualizarSaldoPosteriorPagos', function () {
+    const ss = getSS_();
+    const n = writePaymentBalanceFormulas_(ss);
+    SpreadsheetApp.flush();
+    try { ss.toast(n + ' fila(s): «Saldo Posterior» (con mora) actualizado en «Pagos».', '💳 Pagos · saldo', 6); } catch (e) {}
+  });
+}
 /** Próximo número de ID Pago (máx. existente + 1), leyendo la columna "ID Pago". */
 function nextPaymentSeq_(ps) {
   ps = ps || getSS_().getSheetByName(CFG.SHEETS.PAYMENTS);

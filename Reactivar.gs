@@ -455,6 +455,7 @@ function reactivateBorrowers_(ss) {
   const MOR = morC ? a1col_(morC) : '';
   const ADJ = adjC ? a1col_(adjC) : '';
   const BM = bmC ? a1col_(bmC) : K; // Estado cae al saldo base si aún no existe "Saldo con Mora"
+  const PLAN = planC ? a1col_(planC) : ''; // "Suma de cuotas" (detecta préstamos EN PLAN)
   // Columnas de "Pagos" (para SUMIF de Total Pagado, V-17).
   let payLoanL = 'B', payAmtL = 'D';
   if (pg) { const PH = headerIndex_(pg); payLoanL = a1col_(colByAny_(PH, ['ID Préstamo', 'ID Prestamo']) || 2); payAmtL = a1col_(colByAny_(PH, ['Monto Pagado']) || 4); }
@@ -462,7 +463,12 @@ function reactivateBorrowers_(ss) {
 
   // Fórmulas por columna calculada.
   if (tasC) setColFormulas_(sh, tasC, b.first, b.count, r => `=IF($${D}${r}="","",IF($${D}${r}=15,0.25,IF($${D}${r}=30,0.5,IF($${D}${r}=60,1,IF($${D}${r}=90,1,"")))))`);
-  if (venC) setColFormulas_(sh, venC, b.first, b.count, r => `=IF($${F}${r}="","",$${F}${r}+$${D}${r})`);
+  // Vencimiento: si el préstamo tiene cronograma en "Cuotas", es la fecha de la ÚLTIMA cuota
+  // (así un plan reestructurado NO vuelve a figurar vencido ni se reinstala la fecha original);
+  // si no hay cuotas, Fecha Préstamo + Plazo (días).
+  const CUN = CFG.SHEETS.INSTALLMENTS, cuDueL = a1col_(CU.DUE), cuLoanL = a1col_(CU.LOAN_ID);
+  const maxCuotaDue_ = rr => `MAXIFS('${CUN}'!$${cuDueL}:$${cuDueL},'${CUN}'!$${cuLoanL}:$${cuLoanL},$${A}${rr})`;
+  if (venC) setColFormulas_(sh, venC, b.first, b.count, r => `=IF($${F}${r}="","",IF(${maxCuotaDue_(r)}>0,${maxCuotaDue_(r)},$${F}${r}+$${D}${r}))`);
   if (intC) setColFormulas_(sh, intC, b.first, b.count, r => `=IF($${C}${r}="","",$${C}${r}*$${E}${r})`);
   if (totC) setColFormulas_(sh, totC, b.first, b.count, r => `=IF($${C}${r}="","",$${C}${r}+$${Hh}${r})`);
   if (pagC) setColFormulas_(sh, pagC, b.first, b.count, r => `=IF($${A}${r}="","",SUMIF('${PGN}'!$${payLoanL}:$${payLoanL},$${A}${r},'${PGN}'!$${payAmtL}:$${payAmtL}))`);
@@ -484,8 +490,12 @@ function reactivateBorrowers_(ss) {
   // Enlace de Firma = enlace clicable a la página de firma del contrato (o "✔ Firmado").
   if (linkC) { const base = webAppBaseUrl_(), firmaL = firmaC ? a1col_(firmaC) : ''; setColFormulas_(sh, linkC, b.first, b.count, r => signingLinkFormula_(r, A, firmaL, base)); }
   // V-16: Estado se DERIVA del monto a pagar (Saldo con Mora) y la fecha. PAGADO sólo si nada
-  // se debe, incluida la mora. V-15: sin mora si saldo 0.
-  if (estC) setColFormulas_(sh, estC, b.first, b.count, r => `=IF($${A}${r}="","",IF($${BM}${r}<=0,"${ST.PAID}",IF(OR(${cuotaVencidaExpr_('$' + A + r)},TODAY()>$${G}${r}),"${ST.OVERDUE}","${ST.ACTIVE}")))`);
+  // se debe, incluida la mora. V-15: sin mora si saldo 0. EN PLAN: reestructurado al día
+  // (la "Suma de cuotas" supera el "Total a Pagar" por la mora congelada) → se distingue del ACTIVO.
+  if (estC) setColFormulas_(sh, estC, b.first, b.count, r => {
+    const planExpr = PLAN ? `N($${PLAN}${r})>N($${I}${r})+0.009` : 'FALSE';
+    return `=IF($${A}${r}="","",IF($${BM}${r}<=0,"${ST.PAID}",IF(OR(${cuotaVencidaExpr_('$' + A + r)},TODAY()>$${G}${r}),"${ST.OVERDUE}",IF(${planExpr},"${ST.PLAN}","${ST.ACTIVE}"))))`;
+  });
 
   // Nombre/DNI (si "Prestatarios" los muestra como columnas): se resuelven del cliente por
   // "ID Cliente" con INDEX/MATCH. Repuebla toda la cartera, sanando filas que quedaron en blanco.
@@ -564,7 +574,11 @@ function writeBorrowerRowFormulas_(bs, r) {
   const setF = (names, formula) => { const c = colByAny_(H, names); if (c) bs.getRange(r, c).setFormula(formula); };
   // Tasa tolerante a días (15/30/60) y meses (15/1/2): 15→25%, 30/1→50%, 60/2→100%.
   setF(['Tasa'], `=IF($${D}${r}="","",IF($${D}${r}=15,0.25,IF(OR($${D}${r}=30,$${D}${r}=1),0.5,IF(OR($${D}${r}=60,$${D}${r}=2,$${D}${r}=90,$${D}${r}=3),1,""))))`);
-  setF(['Vencimiento', 'Fecha de Vencimiento'], `=IF($${F}${r}="","",IF($${D}${r}=15,$${F}${r}+15,IF(OR($${D}${r}=30,$${D}${r}=60,$${D}${r}=90),$${F}${r}+$${D}${r},EDATE($${F}${r},$${D}${r}))))`);
+  // Vencimiento: fecha de la ÚLTIMA cuota si hay cronograma (plan reestructurado); si no, por plazo.
+  const CUN = CFG.SHEETS.INSTALLMENTS, cuDueL = a1col_(CU.DUE), cuLoanL = a1col_(CU.LOAN_ID);
+  const maxCuotaDue = `MAXIFS('${CUN}'!$${cuDueL}:$${cuDueL},'${CUN}'!$${cuLoanL}:$${cuLoanL},$${A}${r})`;
+  const vencFb = `IF($${D}${r}=15,$${F}${r}+15,IF(OR($${D}${r}=30,$${D}${r}=60,$${D}${r}=90),$${F}${r}+$${D}${r},EDATE($${F}${r},$${D}${r})))`;
+  setF(['Vencimiento', 'Fecha de Vencimiento'], `=IF($${F}${r}="","",IF(${maxCuotaDue}>0,${maxCuotaDue},${vencFb}))`);
   setF(['Interés', 'Interes'], `=IF($${C}${r}="","",$${C}${r}*$${E}${r})`);
   setF(['Total a Pagar', 'Total a pagar'], `=IF($${C}${r}="","",$${C}${r}+$${Hh}${r})`);
   setF(['Total Pagado'], `=IF($${A}${r}="","",SUMIF('${PGN}'!$${payLoanL}:$${payLoanL},$${A}${r},'${PGN}'!$${payAmtL}:$${payAmtL}))`);
@@ -580,7 +594,11 @@ function writeBorrowerRowFormulas_(bs, r) {
   // Suma de cuotas = total del plan (Σ "Monto Cuota" de "Cuotas"); estable ante los pagos.
   setF(['Suma de cuotas', 'Total a Pagar (con mora)'], borrowerPlanTotalFormula_(r, A, I));
   // Estado: PAGADO sólo cuando el "Saldo con Mora" llega a 0 (incluye la mora pendiente).
-  setF(['Estado'], `=IF($${A}${r}="","",IF($${BM}${r}<=0,"${ST.PAID}",IF(OR(${cuotaVencidaExpr_('$' + A + r)},TODAY()>$${G}${r}),"${ST.OVERDUE}","${ST.ACTIVE}")))`);
+  // EN PLAN: reestructurado al día ("Suma de cuotas" > "Total a Pagar" por la mora congelada).
+  const planCc = colByAny_(H, ['Suma de cuotas', 'Total a Pagar (con mora)']);
+  const PLAN = planCc ? a1col_(planCc) : '';
+  const planExpr = PLAN ? `N($${PLAN}${r})>N($${I}${r})+0.009` : 'FALSE';
+  setF(['Estado'], `=IF($${A}${r}="","",IF($${BM}${r}<=0,"${ST.PAID}",IF(OR(${cuotaVencidaExpr_('$' + A + r)},TODAY()>$${G}${r}),"${ST.OVERDUE}",IF(${planExpr},"${ST.PLAN}","${ST.ACTIVE}"))))`);
   // Enlace de Firma = enlace clicable a la página de firma del contrato (o "✔ Firmado").
   const firmaC = colByAny_(H, ['Estado de Firma']);
   setF(['Enlace de Firma'], signingLinkFormula_(r, A, firmaC ? a1col_(firmaC) : '', webAppBaseUrl_()));
@@ -599,15 +617,11 @@ function reactivatePayments_(ss) {
   if (!idC) return 'falta ID Préstamo';
   const b = dataBlock_(sh, idC); if (!b.count) return 'sin datos';
 
-  const idL = a1col_(idC), montoL = a1col_(montoC);
-  // Saldo posterior: Total a Pagar del préstamo − pagos acumulados hasta esta fila.
-  if (saldoC && bs) {
-    const BH = headerIndex_(bs);
-    const bIdL = a1col_(colByAny_(BH, ['ID Préstamo', 'ID Prestamo']) || 1);
-    const bTotL = a1col_(colByAny_(BH, ['Total a Pagar', 'Total a pagar']) || 9);
-    const BSN = CFG.SHEETS.BORROWERS;
-    setColFormulas_(sh, saldoC, b.first, b.count, r =>
-      `=IF($${idL}${r}="","",IFERROR(INDEX('${BSN}'!$${bTotL}:$${bTotL},MATCH($${idL}${r},'${BSN}'!$${bIdL}:$${bIdL},0)),0)-SUMIFS($${montoL}$${b.first}:$${montoL}${r},$${idL}$${b.first}:$${idL}${r},$${idL}${r}))`);
+  // Saldo posterior: (Total a Pagar + Recargo por Mora acum.) − pagos acumulados hasta esta fila.
+  // Se delega en paymentBalanceFormula_ (fuente única, incluye la mora y resuelve columnas por
+  // NOMBRE) para que el saldo coincida con "Saldo con Mora" de "Prestatarios".
+  if (saldoC && bs && typeof paymentBalanceFormula_ === 'function') {
+    setColFormulas_(sh, saldoC, b.first, b.count, r => paymentBalanceFormula_(r));
     fmtCol_(sh, saldoC, b.first, b.count, CFG.CURRENCY_FMT);
   }
   fmtCol_(sh, montoC, b.first, b.count, CFG.CURRENCY_FMT);
@@ -734,6 +748,7 @@ function reactivatePanel_(ss) {
   put('Préstamos activos', `COUNTIFS('${BSN}'!$${bEstL}:$${bEstL},"${ST.ACTIVE}",'${BSN}'!$${bIdL}:$${bIdL},"<>")`);
   put('Préstamos vencidos', `COUNTIFS('${BSN}'!$${bEstL}:$${bEstL},"${ST.OVERDUE}",'${BSN}'!$${bIdL}:$${bIdL},"<>")`);
   put('Préstamos pagados', `COUNTIFS('${BSN}'!$${bEstL}:$${bEstL},"${ST.PAID}",'${BSN}'!$${bIdL}:$${bIdL},"<>")`);
+  put('Préstamos en plan', `COUNTIFS('${BSN}'!$${bEstL}:$${bEstL},"${ST.PLAN}",'${BSN}'!$${bIdL}:$${bIdL},"<>")`);
   put('Contratos sin firmar', `COUNTIF('${BSN}'!$${bFirmaL}:$${bFirmaL},"${SIGN.PENDING}")`);
   const capCell = put('Capital prestado', capitalPrestado);
   const cobCell = put('Total cobrado', totalCobrado);
