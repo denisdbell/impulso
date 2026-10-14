@@ -145,6 +145,12 @@ function onOpen() {
   // Silencioso: no cambia la hoja activa ni muestra toast. Un fallo aquí no debe
   // impedir que se cargue el menú.
   try { buildClientLevels({ silent: true }); } catch (e) {}
+
+  // Reconstruir "Pagos Atrasados" en cada apertura. Un préstamo entra en mora por el
+  // PASO DEL TIEMPO (nadie edita nada cuando vence), así que onEdit no alcanza: solo una
+  // reconstrucción al abrir o el disparador diario la mantienen al día. Silencioso y
+  // tolerante a fallos para no impedir la carga del menú.
+  try { rebuildLateSheet_(getSS_()); } catch (e) {}
 }
 
 function openSidebar() {
