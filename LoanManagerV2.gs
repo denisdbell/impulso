@@ -1359,11 +1359,11 @@ function setupStatements_(ss) {
     ['Capital', `=IFERROR(VLOOKUP($B$4,'${B}'!$A:$E,5,FALSE),"")`],           // 9
     ['Total a Pagar', `=IFERROR(VLOOKUP($B$4,'${B}'!$A:$K,11,FALSE),"")`],     // 10
     ['Total Pagado', `=IFERROR(VLOOKUP($B$4,'${B}'!$A:$L,12,FALSE),"")`],     // 11
-    // Días de Atraso: respeta la FECHA DE PAGO. Si está saldado (Saldo Pendiente B14 ≤ 0),
-    // son los días entre el Vencimiento y el ÚLTIMO pago (recargo COBRADO, congelado — queda
-    // constancia aunque esté pago); si sigue impago, HOY − Vencimiento. Así el Recargo por
-    // Mora (B13) muestra lo que se aplicó por el atraso en vez de 0.
-    ['Días de Atraso', `=IFERROR(IF(VLOOKUP($B$4,'${B}'!$A:$I,9,FALSE)="","",MAX(0,IF($B$14<=0.009,INT(IFERROR(MAXIFS('${P}'!$C:$C,'${P}'!$B:$B,$B$4),0)),INT(TODAY()))-INT(VLOOKUP($B$4,'${B}'!$A:$I,9,FALSE)))),"")`], // 12
+    // Días de Atraso: respeta la FECHA DE PAGO. Si sigue impago (Saldo Pendiente B14 > 0), HOY −
+    // Vencimiento; si está saldado, los días entre el Vencimiento y el pago que CUBRIÓ EL TOTAL
+    // BASE (no el último pago: los posteriores sólo cubren mora). El acumulado por fecha se arma
+    // con MAP+SUMIFS sobre los pagos del préstamo. Espeja computeOutstanding_ / chargedMora_.
+    ['Días de Atraso', `=IFERROR(LET(id,$B$4,tot,$B$10,due,VLOOKUP($B$4,'${B}'!$A:$I,9,FALSE),IF(due="","",IF($B$14>0.009,MAX(0,INT(TODAY())-INT(due)),LET(d,FILTER('${P}'!$C$2:$C,'${P}'!$B$2:$B=id),frz,MIN(MAP(d,LAMBDA(x,IF(SUMIFS('${P}'!$D:$D,'${P}'!$B:$B,id,'${P}'!$C:$C,"<="&x)>=tot-0.009,x,"")))),MAX(0,INT(frz)-INT(due)))))),"")`], // 12
     // Recargo por mora = días de atraso MENOS la gracia, × recargo diario × Total, con
     // TOPE = (Tope de mora %) × Total a Pagar ($B$10). Espeja computeOutstanding_ (gracia + tope).
     ['Recargo por Mora (acum.)', `=IFERROR(IF(OR($B$12="",$B$12<=0),0,MIN(MAX(0,$B$12-IFERROR(VLOOKUP("Días de gracia antes de mora",'${CFG.SHEETS.SETTINGS}'!$A:$B,2,FALSE),0))*$B$10*IFERROR(VLOOKUP("Recargo por Mora diario (%)",'${CFG.SHEETS.SETTINGS}'!$A:$B,2,FALSE)/100,0.05),$B$10*IFERROR(VLOOKUP("Tope de mora (% del total a devolver)",'${CFG.SHEETS.SETTINGS}'!$A:$B,2,FALSE)/100,1))),"")`], // 13
@@ -1880,6 +1880,11 @@ function setupPanel_(ss) {
   const todStart = 'TODAY()', todNext = 'TODAY()+1';                      // hoy: [hoy, mañana)
   const pwStart = 'TODAY()-WEEKDAY(TODAY(),2)-6';                         // lunes de la semana pasada
   const pwNext  = 'TODAY()-WEEKDAY(TODAY(),2)+1';                         // = lunes de esta semana (exclusivo)
+  // Ventanas "siguiente exclusivo" para los cobros por período (cntPay/amtPay usan [inicio, siguiente)).
+  const ydStart = 'TODAY()-1', ydNext = 'TODAY()';                        // ayer: [ayer, hoy)
+  const wkNext  = 'TODAY()-WEEKDAY(TODAY(),2)+8';                         // lunes de la semana próxima (exclusivo) → esta semana = lun–dom
+  const moNext  = 'EOMONTH(TODAY(),0)+1';                                 // 1.º del mes próximo (exclusivo) → este mes completo
+  const pmStart = 'EOMONTH(TODAY(),-2)+1', pmNext = 'EOMONTH(TODAY(),-1)+1'; // mes anterior completo
 
   // ----- 1) Vencimientos por período (TODAS las cuotas no pagadas, por fecha de vencimiento) -----
   const cntDue = (s, e) => qsP ? `=COUNTIFS('${Q}'!$${qDueL}$2:$${qDueL},">="&(${s}),'${Q}'!$${qDueL}$2:$${qDueL},"<="&(${e}),'${Q}'!$${qBalL}$2:$${qBalL},">0.009")` : '=0';
@@ -1927,18 +1932,22 @@ function setupPanel_(ss) {
   sh.getRange(29, 2, noPlanRows.length, 1).setNumberFormat('0');
   sh.getRange(29, 3, noPlanRows.length, 1).setNumberFormat(CFG.CURRENCY_FMT);
 
-  // ----- 3) Cobros recientes (pagos registrados en "Pagos" por Fecha de Pago) -----
+  // ----- 3) Cobros por período (pagos registrados en "Pagos" por Fecha de Pago; día/semana/mes, actual y anterior) -----
   const payDateL = colL_(colByAny_(PH, ['Fecha de Pago']) || PP.DATE);
   const payDateR = `'${P}'!$${payDateL}$2:$${payDateL}`;
   const payAmtR = `'${P}'!$${payAmtL}$2:$${payAmtL}`;
   const cntPay = (s, nx) => pgP ? `=COUNTIFS(${payDateR},">="&(${s}),${payDateR},"<"&(${nx}))` : '=0';
   const amtPay = (s, nx) => pgP ? `=SUMIFS(${payAmtR},${payDateR},">="&(${s}),${payDateR},"<"&(${nx}))` : '=0';
-  sh.getRange('A33').setValue('Cobros recientes').setFontWeight('bold').setFontColor('#38761d');
-  sh.getRange('A33').setNote('Pagos registrados en la hoja "Pagos" según su Fecha de Pago. "Pagos cobrados" = cantidad de pagos; "Monto cobrado" = suma de "Monto Pagado". La semana pasada va de lunes a domingo.');
+  sh.getRange('A33').setValue('Cobros por período').setFontWeight('bold').setFontColor('#38761d');
+  sh.getRange('A33').setNote('Pagos registrados en la hoja "Pagos" según su Fecha de Pago, por día/semana/mes (período actual y anterior). "Pagos cobrados" = cantidad de pagos; "Monto cobrado" = suma de "Monto Pagado". La semana va de lunes a domingo.');
   sh.getRange(34, 1, 1, 3).setValues([['Período', 'Pagos cobrados', 'Monto cobrado']]).setFontWeight('bold');
   const payRows = [
-    ['Hoy', cntPay(todStart, todNext), amtPay(todStart, todNext)],
-    ['Semana pasada (lun–dom)', cntPay(pwStart, pwNext), amtPay(pwStart, pwNext)],
+    ['Hoy',                     cntPay(todStart, todNext), amtPay(todStart, todNext)],
+    ['Ayer',                    cntPay(ydStart,  ydNext),  amtPay(ydStart,  ydNext)],
+    ['Esta semana (lun–dom)',   cntPay(wkStart,  wkNext),  amtPay(wkStart,  wkNext)],
+    ['Semana pasada (lun–dom)', cntPay(pwStart,  pwNext),  amtPay(pwStart,  pwNext)],
+    ['Este mes',                cntPay(moStart,  moNext),  amtPay(moStart,  moNext)],
+    ['Mes anterior',            cntPay(pmStart,  pmNext),  amtPay(pmStart,  pmNext)],
   ];
   sh.getRange(35, 1, payRows.length, 1).setValues(payRows.map(r => [r[0]])).setFontWeight('bold');
   sh.getRange(35, 2, payRows.length, 1).setFormulas(payRows.map(r => [r[1]]));
@@ -1946,13 +1955,13 @@ function setupPanel_(ss) {
   sh.getRange(35, 2, payRows.length, 1).setNumberFormat('0');
   sh.getRange(35, 3, payRows.length, 1).setNumberFormat(CFG.CURRENCY_FMT);
 
-  sh.getRange('A38').setValue('Próximos vencimientos (7 días):').setFontWeight('bold');
+  sh.getRange('A42').setValue('Próximos vencimientos (7 días):').setFontWeight('bold');
   // Nombre resuelto desde "Clientes" vía ID Cliente (col B). Vencimiento=G, Saldo=K, Estado=L.
   const nameArr = `ARRAYFORMULA(IFERROR(VLOOKUP('${B}'!$${cliL}2:$${cliL},'${C}'!$A:$B,2,FALSE),""))`;
-  sh.getRange('A39').setFormula(
+  sh.getRange('A43').setFormula(
     `=IFERROR(SORT(FILTER({'${B}'!$${idL}2:$${idL},${nameArr},'${B}'!$${venL}2:$${venL},'${B}'!$${salL}2:$${salL}},` +
     `('${B}'!$${estL}2:$${estL}<>"${ST.PAID}")*('${B}'!$${venL}2:$${venL}>=TODAY())*('${B}'!$${venL}2:$${venL}<=TODAY()+7)),3,TRUE),"— sin vencimientos próximos —")`);
-  sh.getRange('A38').setNote('Muestra préstamos no pagados que vencen dentro de 7 días.');
+  sh.getRange('A42').setNote('Muestra préstamos no pagados que vencen dentro de 7 días.');
   sh.setColumnWidth(1, 240); sh.setColumnWidth(2, 200); sh.setColumnWidth(3, 130); sh.setColumnWidth(4, 130);
 }
 
@@ -2217,7 +2226,35 @@ function setupStats_(ss) {
   sh.getRange('E21').setFormula(`=${saldoTotal}`);
   sh.getRange('E20:E21').setNumberFormat(money);
 
-  sh.setColumnWidth(1, 280); sh.setColumnWidth(2, 150);
+  // 4) Préstamos vs. cobros por mes del AÑO ACTUAL (barras) + ganancia neta mensual.
+  // "Prestado" = capital colocado por Fecha del Préstamo; "Cobrado" = pagos por Fecha de Pago;
+  // "Ganancia" = Cobrado − Prestado (flujo neto de caja del mes). Solo préstamos "L-…".
+  const fecL = colL_(colByAny_(BH, ['Fecha del Préstamo', 'Fecha Préstamo', 'Fecha de Préstamo', 'Fecha Prestamo']) || PB.LOAN_DATE);
+  const payDateL = colL_(colByAny_(PH, ['Fecha de Pago']) || PP.DATE);
+  const meses = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+  const mIni = m => `DATE(YEAR(TODAY()),${m},1)`;              // 1.º del mes m del año en curso
+  const mFin = m => `DATE(YEAR(TODAY()),${m + 1},1)`;          // 1.º del mes siguiente (exclusivo); m=12 → enero del próximo año
+  const lentMo = m => `=SUMIFS('${B}'!$${capL}:$${capL},'${B}'!$${fecL}:$${fecL},">="&${mIni(m)},'${B}'!$${fecL}:$${fecL},"<"&${mFin(m)},'${B}'!$${idL}:$${idL},"L-*")`;
+  const paidMo = m => pgS ? `=SUMIFS('${P}'!$${payAmtL}:$${payAmtL},'${P}'!$${payDateL}:$${payDateL},">="&${mIni(m)},'${P}'!$${payDateL}:$${payDateL},"<"&${mFin(m)},'${P}'!$${payIdL}:$${payIdL},"L-*")` : '=0';
+  sh.getRange('A23').setValue('Préstamos vs. cobros por mes (año actual)').setFontWeight('bold').setFontColor('#1c4587');
+  sh.getRange('A23').setNote('Por mes del año en curso. "Prestado" = capital colocado según Fecha del Préstamo; "Cobrado" = pagos recibidos según Fecha de Pago; "Ganancia" = Cobrado − Prestado (flujo neto de caja del mes). Solo préstamos "L-…".');
+  sh.getRange('A24:D24').setValues([['Mes', 'Prestado', 'Cobrado', 'Ganancia']]).setFontWeight('bold');
+  const mesLbl = meses.map(x => [x]), lentF = [], paidF = [], ganF = [];
+  for (let m = 1; m <= 12; m++) {
+    const rr = 24 + m;                                         // filas 25..36
+    lentF.push([lentMo(m)]); paidF.push([paidMo(m)]); ganF.push([`=C${rr}-B${rr}`]);
+  }
+  sh.getRange(25, 1, 12, 1).setValues(mesLbl).setFontWeight('bold');     // A: Mes
+  sh.getRange(25, 2, 12, 1).setFormulas(lentF);                          // B: Prestado
+  sh.getRange(25, 3, 12, 1).setFormulas(paidF);                          // C: Cobrado
+  sh.getRange(25, 4, 12, 1).setFormulas(ganF);                           // D: Ganancia
+  sh.getRange(25, 2, 12, 3).setNumberFormat(money);
+  // Ganancia mensual negativa en rojo (sin pisar la regla del efectivo disponible fijada arriba).
+  const rulesStats = sh.getConditionalFormatRules();
+  rulesStats.push(redIfNegativeRule_(sh.getRange(25, 4, 12, 1)));
+  sh.setConditionalFormatRules(rulesStats);
+
+  sh.setColumnWidth(1, 280); sh.setColumnWidth(2, 150); sh.setColumnWidth(3, 130);
   sh.setColumnWidth(4, 170); sh.setColumnWidth(5, 120);
 
   // ---- Gráficos ----
@@ -2249,6 +2286,17 @@ function setupStats_(ss) {
     .setOption('colors', ['#38761d', '#e8a33d'])
     .build();
   sh.insertChart(pieFund);
+
+  // Barras: prestado vs. cobrado por mes del año actual (la diferencia = ganancia neta mensual).
+  const colMensual = sh.newChart().setChartType(Charts.ChartType.COLUMN)
+    .addRange(sh.getRange('A24:D36'))
+    .setPosition(49, 1, 0, 0)
+    .setOption('title', 'Prestado vs. cobrado por mes (año actual) — ganancia = cobrado − prestado')
+    .setOption('width', 900).setOption('height', 340)
+    .setOption('legend', 'top')
+    .setOption('colors', ['#e06666', '#6aa84f', '#1c4587'])
+    .build();
+  sh.insertChart(colMensual);
 
   return sh;
 }
@@ -2502,8 +2550,8 @@ function computeOutstanding_(principal, rate, loanDate, payments, asOf, paymentC
   cuotas.forEach(c => { c.cursor = c.dueMs; });
 
   // Acumula la mora de cada cuota impaga hasta el instante t (tras su gracia, con su tope).
-  // El tope se aplica sobre la mora TOTAL cobrada (moraCharged), no sobre la vigente: así, si un
-  // pago redujo la mora y ésta vuelve a correr, la mora total NUNCA supera el tope (p. ej. 100%).
+  // El tope se aplica sobre la mora TOTAL cobrada (moraCharged): la mora sólo corre mientras la
+  // cuota tiene capital pendiente y se paga al final (ver applyPay), nunca supera su tope.
   const accrueTo = t => {
     for (const c of cuotas) {
       const startMs = c.dueMs + grace * DAY;
@@ -2518,15 +2566,14 @@ function computeOutstanding_(principal, rate, loanDate, payments, asOf, paymentC
       c.cursor = t;
     }
   };
-  // Aplica un pago a la cuota más antigua con saldo: primero mora, luego capital+interés.
+  // Aplica un pago CAPITAL-PRIMERO: dos pasadas sobre las cuotas más antiguas — primero todo el
+  // capital+interés (c.balance), luego la mora (c.mora). Como la mora sólo devenga mientras el
+  // capital sigue impago (ver accrueTo), cancelar el capital DETIENE el reloj de mora en la fecha
+  // de ese pago: un préstamo pagado tarde sólo acumula mora hasta que se cubre el total base.
   const applyPay = amt => {
     let rem = round2_(amt);
-    for (const c of cuotas) {
-      if (rem <= 0) break;
-      if (c.mora > 0) { const m = Math.min(rem, c.mora); c.mora = round2_(c.mora - m); rem = round2_(rem - m); }
-      if (rem <= 0) break;
-      if (c.balance > 0) { const b = Math.min(rem, c.balance); c.balance = round2_(c.balance - b); rem = round2_(rem - b); }
-    }
+    for (const c of cuotas) { if (rem <= 0) break; if (c.balance > 0) { const b = Math.min(rem, c.balance); c.balance = round2_(c.balance - b); rem = round2_(rem - b); } }
+    for (const c of cuotas) { if (rem <= 0) break; if (c.mora > 0) { const m = Math.min(rem, c.mora); c.mora = round2_(c.mora - m); rem = round2_(rem - m); } }
   };
 
   const pays = payments.filter(p => new Date(p.date).getTime() <= cutoff.getTime())
@@ -2581,6 +2628,17 @@ function accruedMora_(loan, asOf) {
   return Math.max(0, round2_(withMora - principalDue));
 }
 /**
+ * Fecha en que los pagos ACUMULADOS alcanzaron el total base (capital+interés): la mora deja de
+ * correr ahí, aunque existan pagos POSTERIORES que cubren la mora. Devuelve la Fecha de Pago del
+ * pago que cruzó el total, o null si nunca se alcanzó. Misma regla que applyPay (capital-primero).
+ */
+function baseSettledDate_(loan, pays) {
+  const sorted = pays.slice().sort((a, b) => new Date(a.date) - new Date(b.date));
+  let acc = 0;
+  for (const p of sorted) { acc = round2_(acc + p.amount); if (acc >= round2_(loan.totalDue) - 0.009) return new Date(p.date); }
+  return null;
+}
+/**
  * Mora COBRADA (histórica) de un préstamo: el recargo por mora que se APLICÓ por los días de
  * atraso, congelado a la fecha en que se saldó (o a hoy si sigue impago). A diferencia de
  * accruedMora_ —que devuelve lo que AÚN se adeuda y por eso da 0 cuando ya se pagó—, esta deja
@@ -2594,14 +2652,10 @@ function chargedMora_(loan, asOf) {
   if (ov != null) return ov;
   asOf = (asOf instanceof Date) ? asOf : new Date();
   const pays = loanPayments_(loan.loanId);
-  const totalPaid = pays.reduce((s, p) => s + p.amount, 0);
-  const settled = totalPaid >= round2_(loan.totalDue) - 0.009;
-  // Fecha hasta la que corrió la mora: si está saldado, el último pago; si no, hoy.
-  let endDate = asOf;
-  if (settled && pays.length) {
-    const lastMs = Math.max.apply(null, pays.map(p => new Date(p.date).getTime()));
-    endDate = new Date(lastMs);
-  }
+  // Fecha hasta la que corrió la mora: la del pago que cubrió el total base (capital+interés); si
+  // nunca se cubrió, hoy. Los pagos POSTERIORES (que sólo cubren la mora) NO la corren: se congela
+  // al saldarse el base (misma regla que applyPay, capital-primero).
+  const endDate = baseSettledDate_(loan, pays) || asOf;
   const effDays = Math.max(0, daysLate_(loan.dueDate, endDate) - moraGraceDays_());
   if (effDays <= 0) return 0;
   const base = round2_(loan.totalDue);
@@ -3588,9 +3642,9 @@ function statementData_(loan) {
   const out = Math.max(0, round2_(loan.totalDue - totalPaid));
   const paid = out <= 0.009;
   // Mora COBRADA (histórica): respeta la Fecha de Pago y queda como constancia aunque el
-  // préstamo esté saldado (congelada al último pago). Días de atraso = hasta el pago que lo
-  // saldó, o hasta hoy si sigue impago. Espeja la hoja "Estudio de Estados".
-  const endDate = (paid && pays.length) ? pays[pays.length - 1].date : new Date();
+  // préstamo esté saldado. Días de atraso = hasta el pago que cubrió el total base (capital+
+  // interés), o hasta hoy si sigue impago. Espeja la hoja "Estudio de Estados" y chargedMora_.
+  const endDate = baseSettledDate_(loan, pays) || new Date();
   const dLate = daysLate_(loan.dueDate, endDate);
   const feeAccum = chargedMora_(loan);
   const overdue = !paid && (loan.dueDate instanceof Date) && new Date().getTime() > loan.dueDate.getTime();
