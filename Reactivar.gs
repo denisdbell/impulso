@@ -1011,14 +1011,40 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
   // (el instalador de fórmulas migrado no las toca): antes quedaban en blanco al aprobar.
   const nameCol = colByAny_(H, ['Nombre']);
   const dniCol = colByAny_(H, ['DNI']);
-  const loanId = nextLoanId_(), tRow = insertBorrowerRow_(bs, idCol);
-  bs.getRange(tRow, idCol).setValue(loanId);
-  if (override) bs.getRange(tRow, idCol).setNote('Aprobado con anulación de límites (override) el ' + fmtDate_(new Date()) + '.');
-  bs.getRange(tRow, cliCol).setValue(clienteId);
-  bs.getRange(tRow, capCol).setValue(amount);
-  bs.getRange(tRow, plzCol).setValue(term);
-  bs.getRange(tRow, fecCol).setValue(new Date()).setNumberFormat('yyyy-mm-dd');
-  if (firmaCol) bs.getRange(tRow, firmaCol).setValue(SIGN.PENDING);
+  // Sección crítica (mismo patrón que cuotasForLoan_): un lock de documento serializa las
+  // ejecuciones CONCURRENTES y un "claim" idempotente por contenido de la fila evita que,
+  // ante clics rápidos → varios onEdit a la vez (o "Procesar nuevos" corriendo en paralelo),
+  // dos ejecuciones den de alta el MISMO préstamo. Sin esto, ambas leían la fila antes de
+  // que se borrara (nb.deleteRow iba al final) e insertaban → préstamos DUPLICADOS.
+  const claimKey = 'approve:' + Utilities.base64Encode(
+    Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, rowVals.join('␟')));
+  const cache = CacheService.getScriptCache();
+  let loanId, tRow;
+  const lock = LockService.getDocumentLock();
+  try { lock.waitLock(30000); } catch (e) { logError_('approveApplicantV2_:lock', e); }
+  try {
+    // El claim se pone recién acá (validaciones ya OK): una validación fallida NO debe
+    // bloquear un reintento legítimo. El lock hace atómico el get+put entre ejecuciones:
+    // la primera inserta y reclama; la segunda, serializada detrás, ve la clave y sale.
+    if (cache.get(claimKey)) return { ok: false, msg: 'Solicitud ya procesada (duplicado evitado)' };
+    cache.put(claimKey, '1', 120); // ventana de reclamo: 2 min
+    loanId = nextLoanId_(); tRow = insertBorrowerRow_(bs, idCol);
+    bs.getRange(tRow, idCol).setValue(loanId);
+    if (override) bs.getRange(tRow, idCol).setNote('Aprobado con anulación de límites (override) el ' + fmtDate_(new Date()) + '.');
+    bs.getRange(tRow, cliCol).setValue(clienteId);
+    bs.getRange(tRow, capCol).setValue(amount);
+    bs.getRange(tRow, plzCol).setValue(term);
+    bs.getRange(tRow, fecCol).setValue(new Date()).setNumberFormat('yyyy-mm-dd');
+    if (firmaCol) bs.getRange(tRow, firmaCol).setValue(SIGN.PENDING);
+    // Reclama la solicitud YA (borra la fila origen) para que ninguna otra ejecución
+    // serializada detrás la reprocese; el resto del alta (fórmulas, cuotas, fotos, correo)
+    // va FUERA del lock, referenciado por loanId/tRow ya únicos (así no anida con el lock
+    // interno de cuotasForLoan_, y no retiene el lock durante el correo/PDF).
+    nb.deleteRow(row);
+    SpreadsheetApp.flush();
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
+  }
   // Fórmulas calculadas (Tasa/Venc/Interés/Total/Pagado/Saldo/Estado) en la fila nueva,
   // para que el préstamo quede completo al instante (Total ≠ $0 en el contrato/panel).
   try { writeBorrowerRowFormulas_(bs, tRow); } catch (e) { logError_('approveApplicantV2_:formulasFila', e); }
@@ -1102,7 +1128,6 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
     }
   }
 
-  nb.deleteRow(row);
   return { ok: true, loanId: loanId, name: name, overridden: !!override };
 }
 

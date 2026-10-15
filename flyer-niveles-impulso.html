@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<!--
+  Flyer bilingüe (ES/EN) — Escalera de Niveles de Impulso Crédito.
+  Cifras tomadas de la configuración de impulso-v2 (11).xlsx:
+    Límite inicial 150.000 · Incremento 100.000 · Tope historial 500.000
+    Tramos de plazo: 25% hasta 150.000 (15 días) · 50% hasta 300.000 (30 días) · 100% >300.000 (90 días, 3 cuotas)
+    Mora: 5% por día, 0 días de gracia, tope 100% del total a devolver.
+  Para imprimir/compartir: abrir en el navegador → Imprimir → Guardar como PDF.
+-->
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Impulso Crédito — Escalera de Niveles / Levels Ladder</title>
+<style>
+  :root{
+    --brand:#1c4587; --brand2:#2a66c4; --ink:#1a2233; --muted:#5a6473;
+    --ok:#1e7a46; --okbg:#e4f3ea; --warn:#b4480a; --warnbg:#fdeee1; --line:#e3e7ef;
+    --gold:#b7892b; --paper:#ffffff; --soft:#f5f7fb;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:#eef1f6;color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.45;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .sheet{max-width:1000px;margin:24px auto;background:var(--paper);
+    box-shadow:0 10px 30px rgba(20,34,51,.12);border-radius:14px;overflow:hidden}
+  header{background:linear-gradient(135deg,var(--brand),var(--brand2));color:#fff;
+    padding:26px 32px;display:flex;align-items:center;justify-content:space-between;gap:16px}
+  header .brand{font-size:26px;font-weight:800;letter-spacing:.3px}
+  header .tag{font-size:13px;opacity:.9;margin-top:2px}
+  header .pill{background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.35);
+    border-radius:999px;padding:8px 16px;font-size:13px;font-weight:600;white-space:nowrap}
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:0}
+  .col{padding:24px 28px}
+  .col+.col{border-left:1px dashed var(--line)}
+  .lang{display:inline-block;font-size:12px;font-weight:700;letter-spacing:1px;
+    color:#fff;background:var(--brand);border-radius:6px;padding:3px 10px;margin-bottom:12px}
+  h2{font-size:18px;margin:18px 0 8px;color:var(--brand)}
+  h2:first-of-type{margin-top:4px}
+  p{margin:6px 0;font-size:14px;color:var(--ink)}
+  .lead{font-size:14.5px;color:var(--muted)}
+  table{width:100%;border-collapse:collapse;margin:8px 0 4px;font-size:13px}
+  th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:var(--soft);color:var(--muted);font-size:11.5px;text-transform:uppercase;letter-spacing:.4px}
+  td .amt{font-weight:800;color:var(--brand);white-space:nowrap}
+  .lvl{font-weight:700}
+  .lvl .n0{color:var(--muted)} .lvl .nx{color:var(--gold)}
+  .terms td:first-child{white-space:nowrap;font-weight:600}
+  .chip{display:inline-block;background:var(--okbg);color:var(--ok);border-radius:6px;
+    padding:1px 7px;font-size:12px;font-weight:700;margin:1px 0}
+  .box{border-radius:10px;padding:14px 16px;margin-top:10px}
+  .box.ok{background:var(--okbg);border:1px solid #bfe3cd}
+  .box.warn{background:var(--warnbg);border:1px solid #f3c9a9}
+  .box h3{margin:0 0 6px;font-size:14.5px}
+  .box.ok h3{color:var(--ok)} .box.warn h3{color:var(--warn)}
+  .box ul{margin:6px 0 0;padding-left:18px}
+  .box li{font-size:13px;margin:3px 0}
+  .big{font-size:15px;font-weight:800}
+  footer{background:var(--soft);padding:14px 32px;font-size:11.5px;color:var(--muted);
+    border-top:1px solid var(--line);text-align:center}
+  @media print{
+    body{background:#fff}
+    .sheet{box-shadow:none;margin:0;border-radius:0;max-width:none}
+    @page{size:A4 landscape;margin:10mm}
+  }
+  @media (max-width:760px){.cols{grid-template-columns:1fr}.col+.col{border-left:0;border-top:1px dashed var(--line)}}
+</style>
+</head>
+<body>
+<div class="sheet">
+  <header>
+    <div>
+      <div class="brand">Impulso Crédito</div>
+      <div class="tag">Escalera de Niveles · Levels Ladder</div>
+    </div>
+    <div class="pill">Cumplí a tiempo → prestá más · Pay on time → borrow more</div>
+  </header>
+
+  <div class="cols">
+    <!-- ================= ESPAÑOL ================= -->
+    <section class="col">
+      <span class="lang">ESPAÑOL</span>
+
+      <h2>¿Cómo funciona?</h2>
+      <p class="lead">Cuanto más devolvés <b>a tiempo</b>, más podés pedir. Cada préstamo
+      saldado puntualmente te sube un escalón y habilita un límite mayor.</p>
+
+      <h2>Niveles y límite de monto</h2>
+      <table>
+        <tr><th>Nivel</th><th>Podés pedir hasta</th><th>Cómo llegar</th></tr>
+        <tr><td class="lvl"><span class="n0">Inicial</span></td><td><span class="amt">$150.000</span></td><td>Cliente nuevo / sin historial</td></tr>
+        <tr><td class="lvl"><span class="nx">Nivel 1</span></td><td><span class="amt">$250.000</span></td><td>1 préstamo devuelto a tiempo (de al menos $150.000)</td></tr>
+        <tr><td class="lvl"><span class="nx">Nivel 2</span></td><td><span class="amt">$350.000</span></td><td>2 devoluciones a tiempo, una de al menos $250.000</td></tr>
+        <tr><td class="lvl"><span class="nx">Nivel 3</span></td><td><span class="amt">$450.000</span></td><td>3 devoluciones a tiempo, una de al menos $350.000</td></tr>
+      </table>
+      <p class="lead">Muchos préstamos chicos <b>no</b> hacen subir de nivel: hay que ir
+      probando montos cada vez mayores y pagando puntualmente.</p>
+
+      <h2>Plazos y cuotas (según el monto)</h2>
+      <table class="terms">
+        <tr><th>Monto</th><th>Plazo</th><th>Interés</th><th>Pago</th></tr>
+        <tr><td>Hasta $150.000</td><td>15 o 30 días<br>(elegís vos)</td><td>25% / 50%</td><td>1 pago</td></tr>
+        <tr><td>$150.000 – $300.000</td><td>30 días</td><td>50%</td><td>1 pago</td></tr>
+        <tr><td>$300.000 – $500.000</td><td>90 días</td><td>100%</td><td>3 cuotas mensuales<br>(días 30 · 60 · 90)</td></tr>
+      </table>
+
+      <div class="box warn">
+        <h3>⚠️ ¿Qué pasa si pagás tarde?</h3>
+        <ul>
+          <li><b>Recargo por mora del 5% por día</b> sobre el total a devolver, <b>desde el primer día</b> de atraso (sin días de gracia).</li>
+          <li>El recargo se acumula hasta un <b>tope del 100%</b> del total: en el peor caso tu deuda <b>se duplica</b>.</li>
+          <li>El préstamo pasa a estado <b>VENCIDO</b>.</li>
+          <li><b>Perdés tu nivel:</b> la escalera se reinicia al límite <b>Inicial ($150.000)</b> y tenés que volver a construir tu historial. Un préstamo pagado tarde <b>nunca</b> suma para subir de nivel.</li>
+        </ul>
+      </div>
+      <div class="box ok">
+        <h3>✓ Si pagás a tiempo</h3>
+        <p style="margin:0">Subís de nivel, accedés a montos y plazos mayores, y mantenés tu historial <span class="chip">Al día</span>.</p>
+      </div>
+    </section>
+
+    <!-- ================= ENGLISH ================= -->
+    <section class="col">
+      <span class="lang">ENGLISH</span>
+
+      <h2>How it works</h2>
+      <p class="lead">The more you repay <b>on time</b>, the more you can borrow. Each loan
+      paid punctually moves you up one step and unlocks a higher limit.</p>
+
+      <h2>Levels &amp; borrowing limit</h2>
+      <table>
+        <tr><th>Level</th><th>You can borrow up to</th><th>How to get there</th></tr>
+        <tr><td class="lvl"><span class="n0">Starter</span></td><td><span class="amt">$150,000</span></td><td>New client / no history</td></tr>
+        <tr><td class="lvl"><span class="nx">Level 1</span></td><td><span class="amt">$250,000</span></td><td>1 loan repaid on time (of at least $150,000)</td></tr>
+        <tr><td class="lvl"><span class="nx">Level 2</span></td><td><span class="amt">$350,000</span></td><td>2 on-time repayments, one of at least $250,000</td></tr>
+        <tr><td class="lvl"><span class="nx">Level 3</span></td><td><span class="amt">$450,000</span></td><td>3 on-time repayments, one of at least $350,000</td></tr>
+      </table>
+      <p class="lead">Many small loans do <b>not</b> move you up: you must prove progressively
+      larger amounts <i>and</i> pay them on time.</p>
+
+      <h2>Terms &amp; installments (by amount)</h2>
+      <table class="terms">
+        <tr><th>Amount</th><th>Term</th><th>Interest</th><th>Payment</th></tr>
+        <tr><td>Up to $150,000</td><td>15 or 30 days<br>(your choice)</td><td>25% / 50%</td><td>1 payment</td></tr>
+        <tr><td>$150,000 – $300,000</td><td>30 days</td><td>50%</td><td>1 payment</td></tr>
+        <tr><td>$300,000 – $500,000</td><td>90 days</td><td>100%</td><td>3 monthly installments<br>(days 30 · 60 · 90)</td></tr>
+      </table>
+
+      <div class="box warn">
+        <h3>⚠️ What happens if you pay late?</h3>
+        <ul>
+          <li><b>Late surcharge of 5% per day</b> on the total to repay, <b>from day one</b> of delay (no grace period).</li>
+          <li>The surcharge builds up to a <b>cap of 100%</b> of the total: worst case, your debt <b>doubles</b>.</li>
+          <li>The loan is marked <b>OVERDUE</b> (VENCIDO).</li>
+          <li><b>You lose your level:</b> the ladder resets to the <b>Starter limit ($150,000)</b> and you must rebuild your history. A loan paid late <b>never</b> counts toward moving up.</li>
+        </ul>
+      </div>
+      <div class="box ok">
+        <h3>✓ If you pay on time</h3>
+        <p style="margin:0">You climb a level, unlock higher amounts and longer terms, and keep your record <span class="chip">In good standing</span>.</p>
+      </div>
+    </section>
+  </div>
+
+  <footer>
+    Impulso Crédito · Buenos Aires, Argentina — Montos en pesos argentinos (ARS). Las condiciones pueden
+    actualizarse en la configuración del sistema. / Amounts in Argentine pesos (ARS). Terms may change per system settings.
+  </footer>
+</div>
+</body>
+</html>
