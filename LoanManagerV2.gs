@@ -34,6 +34,7 @@ const CFG = {
     AGREEMENT: 'Estudio de Contratos', STATEMENTS: 'Estudio de Estados', REMINDER: 'Estudio de Recordatorios', NEW: 'Nuevos Prestatarios',
     PANEL: 'Panel', STATS: 'Estadísticas', LATE: 'Pagos Atrasados', PLAN: 'En Plan', CLEARED: 'Saldados', REJECTED: 'Rechazados', ERRORS: 'Errores', HELP: 'Instrucciones',
     SIGN: 'Firmas', CLIENTS: 'Clientes', INSTALLMENTS: 'Cuotas', LEVELS: 'Niveles de Clientes',
+    DEVICES: 'Dispositivos',
   },
 };
 const ST = { ACTIVE: 'ACTIVO', OVERDUE: 'VENCIDO', PAID: 'PAGADO', CLEARED: 'SALDADO', PLAN: 'EN PLAN' };
@@ -360,7 +361,7 @@ function setup() {
   PropertiesService.getScriptProperties().setProperty('SS_ID', ss.getId());
   setupSettings_(ss); setupClientes_(ss); setupBorrowers_(ss); setupPayments_(ss); setupCuotas_(ss); setupSummary_(ss);
   setupAgreement_(ss); setupStatements_(ss); setupReminders_(ss); setupNew_(ss); setupPanel_(ss); setupStats_(ss); setupLate_(ss); setupCleared_(ss); setupRejected_(ss);
-  setupErrors_(ss); setupHelp_(ss); setupFirmas_(ss);
+  setupErrors_(ss); setupHelp_(ss); setupFirmas_(ss); setupDispositivos_(ss);
   rebuildLateSheet_(ss);
   ensureTriggers_();
   const s1 = ss.getSheetByName('Sheet1') || ss.getSheetByName('Hoja 1');
@@ -391,6 +392,7 @@ function applyFeatureUpdates() {
       'Monto máximo por préstamo', 'Tope tramo 25% (15 días)', 'Tope tramo 50% (30 días)',
       // V-32 escalera de graduación + recuperación (mora): claves nuevas.
       'Límite inicial (préstamo nuevo)', 'Incremento de graduación', 'Límite máximo por historial (graduación)',
+      'Atraso que congela el nivel (días)', 'Atraso que reinicia el nivel (días)',
       'Días de gracia antes de mora', 'Tope de mora (% del total a devolver)',
     ]);
     done.push(nAdded ? (nAdded + ' ajuste(s) nuevo(s) en «Configuración»') : '«Configuración» ya estaba al día');
@@ -418,6 +420,11 @@ function applyFeatureUpdates() {
         setSettingValue_(stsh, 'Incremento de graduación', '50000');
       if (stsh && String(getSetting_('Límite máximo por historial (graduación)') || '').trim() === '')
         setSettingValue_(stsh, 'Límite máximo por historial (graduación)', '500000');
+      // Escalera graduada ante atrasos (V-32): ≤3 días congela, 4–15 días baja un nivel, >15 reinicia.
+      if (stsh && String(getSetting_('Atraso que congela el nivel (días)') || '').trim() === '')
+        setSettingValue_(stsh, 'Atraso que congela el nivel (días)', '3');
+      if (stsh && String(getSetting_('Atraso que reinicia el nivel (días)') || '').trim() === '')
+        setSettingValue_(stsh, 'Atraso que reinicia el nivel (días)', '15');
       // Mora: sin días de gracia y tope al 100% del TOTAL A DEVOLVER. Migra los valores
       // sembrados por versiones anteriores (3 / 50 y la clave "% del capital"); respeta
       // cualquier otro valor manual.
@@ -577,6 +584,10 @@ function setupSettings_(ss) {
     ['Límite inicial (préstamo nuevo)', '150000'],
     ['Incremento de graduación', '50000'],
     ['Límite máximo por historial (graduación)', '500000'],
+    // Escalera graduada ante atrasos (V-32): ≤ N días congela el nivel; de N+1 hasta M días baja
+    // un nivel (recuperable); > M días o un préstamo VENCIDO sin pagar reinicia a Inicial.
+    ['Atraso que congela el nivel (días)', '3'],
+    ['Atraso que reinicia el nivel (días)', '15'],
     ['Pie del Contrato', 'Este acuerdo es legalmente vinculante desde la firma de ambas partes.'],
     ['Días de aviso antes del vencimiento', '3'],
     ['Días de aviso de recordatorio', '7'],
@@ -585,6 +596,7 @@ function setupSettings_(ss) {
     ['Horizonte de protección del crecimiento (días)', '60'],
     ['Ventana para estimar el ritmo de colocación (días)', '60'],
     ['Aceptar solicitudes de préstamo (SÍ/NO)', 'SÍ'],
+    ['Capturar ubicación en la firma (SÍ/NO)', 'SÍ'],
   ];
   sh.getRange(1, 1, rows.length, 2).setValues(rows);
   sh.getRange(1, 1, 1, 2).setFontWeight('bold').setBackground('#1c4587').setFontColor('#fff');
@@ -988,6 +1000,89 @@ function setupFirmas_(ss) {
     sh.getRange(2, 1, CFG.MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd hh:mm');
   }
   sh.setFrozenRows(1);
+  return sh;
+}
+
+/* ===================== AUDITORÍA DE DISPOSITIVOS ===================== */
+/**
+ * Hoja "Dispositivos": acta detallada de la huella de dispositivo, las señales de
+ * fraude y la ubicación de cada firma. Una fila por evento (modo append, igual que
+ * "Firmas"). Se enlaza al cliente por "ID Cliente" y al préstamo por "ID Préstamo".
+ * El detalle completo del dispositivo vive AQUÍ (la hoja "Firmas" no se amplía).
+ */
+const DISPOSITIVOS_HEADERS = ['Fecha y hora', 'ID Préstamo', 'ID Cliente', 'DNI', 'Nombre', 'Correo',
+  'Huella de dispositivo (SHA-256)', 'Equipo / SO', 'Modelo', 'Navegador', 'Arquitectura',
+  'Pantalla', 'Densidad (DPR)', 'Color (bits)', 'Táctil (puntos)', 'Núcleos CPU', 'Memoria (GB)',
+  'Idiomas', 'Zona horaria', 'Desfase UTC', 'Red', 'IP', 'Ubicación (IP)', 'GPS (lat,long)',
+  'Precisión GPS (m)', 'Origen de ubicación', 'Automatización (webdriver)', 'Tiempo de lectura (s)',
+  'Trazos de firma', 'Duración del trazo (ms)', 'userAgent'];
+function setupDispositivos_(ss) {
+  const sh = getOrCreate_(ss, CFG.SHEETS.DEVICES);
+  const head = sh.getLastRow() >= 1 ? sh.getRange(1, 1, 1, DISPOSITIVOS_HEADERS.length).getValues()[0].map(h => String(h).trim()) : [];
+  if (head.join('|') !== DISPOSITIVOS_HEADERS.join('|')) {
+    sh.getRange(1, 1, 1, DISPOSITIVOS_HEADERS.length).setValues([DISPOSITIVOS_HEADERS])
+      .setFontWeight('bold').setBackground('#38761d').setFontColor('#fff').setWrap(true);
+    [150, 100, 90, 110, 180, 200, 230, 150, 120, 120, 110, 110, 90, 80, 90, 80, 90, 150, 170, 80, 70, 120, 220, 160, 110, 130, 130, 120, 100, 120, 260]
+      .forEach((w, i) => sh.setColumnWidth(i + 1, w));
+    sh.getRange(2, 1, CFG.MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd hh:mm');
+  }
+  sh.setFrozenRows(1);
+  return sh;
+}
+
+/** ¿Capturar ubicación en la firma? Interruptor de "Configuración" (default: SÍ). */
+function locationFlag_() {
+  const v = String(getSetting_('Capturar ubicación en la firma (SÍ/NO)') || 'SÍ').trim().toUpperCase();
+  return !(v === 'NO' || v === 'N' || v === 'FALSE' || v === '0');
+}
+
+/**
+ * Huella única y ESTABLE del dispositivo: SHA-256 sobre las señales que no cambian
+ * entre firmas (SO, modelo, navegador, pantalla, color, DPR, zona horaria, idiomas,
+ * núcleos, memoria, táctil). Se excluyen las volátiles (IP, red, viewport, GPS) para
+ * que el mismo equipo produzca el mismo hash → detecta "mismo dispositivo, N préstamos".
+ */
+function deviceFingerprint_(dev) {
+  dev = dev || {};
+  const canon = [dev.os, dev.model, dev.browser, dev.screen, dev.color, dev.dpr,
+    dev.tz, dev.langs, dev.cores, dev.memory, dev.touch]
+    .map(x => String(x == null ? '' : x).trim()).join('|');
+  if (!canon.replace(/\|/g, '')) return ''; // sin señales → sin huella
+  return hexDigest_(canon);
+}
+
+/**
+ * Agrega una fila a "Dispositivos" con toda la huella/ubicación de la firma. Best-effort:
+ * quien llama lo envuelve en try/catch para que un fallo NUNCA interrumpa la firma.
+ */
+function logDeviceInfo_(loan, clientId, meta) {
+  const sh = setupDispositivos_(getSS_());
+  const dev = (meta && meta.device) || {};
+  const loc = dev.loc || {};
+  const now = (meta && meta.signedAt) || new Date();
+  // Cruce liviano de la ubicación IP contra el domicilio declarado (señal de fraude).
+  let ipLoc = String(loc.ipText || '');
+  const dom = String(loan.direccion || '').toLowerCase();
+  if (ipLoc && dom) {
+    const hit = ipLoc.toLowerCase().split(/[,·]/).some(t => t.trim().length > 2 && dom.indexOf(t.trim()) !== -1);
+    if (!hit) ipLoc = '⚠ (revisar vs domicilio) ' + ipLoc;
+  }
+  const na = x => (x == null || x === '') ? 'N/D' : x;
+  sh.appendRow([
+    now, loan.loanId, clientId || loan.clientId || '', loan.dni || '', loan.name || '', loan.email || '',
+    (meta && meta.deviceFp) || '',
+    na(dev.os), na(dev.model), na(dev.browser), na(dev.arch),
+    na(dev.screen), na(dev.dpr), na(dev.color), na(dev.touch),
+    na(dev.cores), na(dev.memory), na(dev.langs),
+    na(dev.tz), na(dev.tzOffset), na(dev.net),
+    (meta && meta.ip) || 'N/D', ipLoc || 'N/D',
+    loc.gps || '', (loc.gpsAcc == null ? '' : loc.gpsAcc), na(loc.source),
+    dev.webdriver ? 'SÍ' : 'No',
+    (meta && meta.dwellMs != null) ? Math.round(meta.dwellMs / 1000) : '',
+    (meta && meta.strokes != null) ? meta.strokes : '',
+    (meta && meta.drawMs != null) ? meta.drawMs : '',
+    String((meta && meta.userAgent) || dev.userAgent || '').slice(0, 300),
+  ]);
   return sh;
 }
 
@@ -2774,7 +2869,7 @@ function makeAgreementFile_(loan) {
 function makeSignedAgreementFile_(loan, sig) {
   return savePdfToBorrower_(agreementHtml_(loan, sig), 'Contrato Firmado ' + loan.loanId + ' - ' + loan.name + '.pdf', loan);
 }
-/** @param {object=} sig  Firma opcional: { dataUrl, signedAt (Date), method, userAgent }. */
+/** @param {object=} sig  Firma opcional: { dataUrl, signedAt (Date), method, userAgent, ip, hash, device, deviceFp }. */
 function agreementHtml_(loan, sig) {
   const lender = companyName_(), footer = getSetting_('Pie del Contrato');
   const signatories = ownerSignatories_();   // ambos titulares firman todos los contratos
@@ -2802,6 +2897,14 @@ function agreementHtml_(loan, sig) {
   const firmadoEl = (sig && sig.dataUrl) ? fmtDate_(sig.signedAt || new Date()) : '__________';
   const fill = v => (v && String(v).trim()) ? esc_(v) : '<span style="color:#9aa4ad;letter-spacing:1px">________________________</span>';
   const kv = (k, v) => `<tr><td class="k">${k}</td><td>${v}</td></tr>`;
+  // Resumen de ubicación para el panel de firma (prioridad GPS > IP > zona horaria).
+  const locSummary = s => {
+    const d = (s && s.device) || {}, l = d.loc || {};
+    if (l.source === 'GPS' && l.gps && l.gps.indexOf('GPS:') !== 0) return l.gps + (l.gpsAcc != null ? ' (±' + l.gpsAcc + ' m)' : '') + ' · GPS';
+    if (l.ipText) return l.ipText + ' · IP';
+    if (l.source === 'desactivada') return 'No capturada';
+    return d.tz ? ('Zona horaria: ' + d.tz) : '—';
+  };
   const borrowerSig = (sig && sig.dataUrl) ? sig.dataUrl : '';
   const sigCell = (img, name, role) =>
     `<td>${img ? `<img src="${img}" alt="firma" style="max-height:44px;max-width:88%;display:block;margin:0 auto 1px">` : '<div style="height:40px"></div>'}` +
@@ -2962,7 +3065,7 @@ function agreementHtml_(loan, sig) {
       <td style="border:none"></td>
     </tr></table>
     ${sig && sig.dataUrl ? `<div class="box" style="margin-top:18px">
-      <div class="box-title">Registro de firma</div>
+      <div class="box-title">Constancia de firma electrónica</div>
       <table style="margin:0;font-size:10pt">
         ${kv('Firmó', esc_(loan.name) + ' · DNI ' + esc_(loan.dni))}
         ${kv('Correo confirmado', esc_(loan.email))}
@@ -2971,7 +3074,13 @@ function agreementHtml_(loan, sig) {
         ${kv('Fecha y hora', fmtDateTime_(sig.signedAt || new Date()))}
         ${kv('Cómo se firmó', sig.method === 'upload' ? 'Imagen de firma cargada' : 'Firma dibujada en pantalla')}
         ${kv('Dirección IP', fill(sig.ip))}
-        ${kv('Dispositivo', esc_(String(sig.userAgent || '').slice(0, 200)))}
+        ${kv('Ubicación', esc_(locSummary(sig)))}
+        ${kv('Equipo / SO', fill((sig.device && sig.device.os) || ''))}
+        ${kv('Navegador', fill((sig.device && sig.device.browser) || ''))}
+        ${kv('Pantalla', fill((sig.device && sig.device.screen) ? (sig.device.screen + (sig.device.dpr ? (' · DPR ' + sig.device.dpr) : '')) : ''))}
+        ${kv('Automatización detectada', (sig.device && sig.device.webdriver) ? 'Sí (revisar)' : 'No (firmante humano)')}
+        ${kv('Dispositivo (completo)', esc_(String(sig.userAgent || '').slice(0, 200)))}
+        ${kv('Huella de dispositivo (SHA-256)', sig.deviceFp ? '<span style="font-family:monospace;font-size:8.5pt;word-break:break-all">' + esc_(sig.deviceFp) + '</span>' : '<span class="note">No disponible</span>')}
         ${kv('Huella del documento (SHA-256)', sig.hash ? '<span style="font-family:monospace;font-size:8.5pt;word-break:break-all">' + esc_(sig.hash) + '</span>' : '<span class="note">Se registra en la hoja «Firmas».</span>')}
       </table>
     </div>` : ''}
@@ -4295,7 +4404,7 @@ function getContractForSigning(loanId, dni) {
     const status = loc ? String(loc.sh.getRange(loc.row, firmaCols_(loc.sh).status).getValue() || '').toUpperCase() : '';
     if (status === SIGN.SIGNED)
       return { ok: true, signed: true, msg: 'Este contrato ya fue firmado. Le enviamos una copia por correo.' };
-    return { ok: true, signed: false, name: loan.name, contractHtml: agreementHtml_(loan) };
+    return { ok: true, signed: false, name: loan.name, contractHtml: agreementHtml_(loan), captureLocation: locationFlag_() };
   });
 }
 
@@ -4326,6 +4435,8 @@ function submitSignature(loanId, dni, signatureDataUrl, agree, meta) {
     const bytes = Utilities.base64Decode(m[2]);
     const method = (meta && meta.method === 'upload') ? 'upload' : 'draw';
     const ip = String((meta && meta.ip) || '').slice(0, 60);
+    const devInfo = (meta && meta.device) || {};
+    const deviceFp = deviceFingerprint_(devInfo); // huella única y estable del equipo
     const folder = borrowerFolder_(borrowerFolderName_(loan.name, loan.dni));
     folder.createFile(Utilities.newBlob(bytes, mime, 'Firma ' + loanId + '.' + ext));
 
@@ -4347,6 +4458,7 @@ function submitSignature(loanId, dni, signatureDataUrl, agree, meta) {
     const sig = {
       dataUrl: signatureDataUrl, signedAt: now, method: method,
       userAgent: (meta && meta.userAgent) || '', ip: ip, hash: '',
+      device: devInfo, deviceFp: deviceFp, // resumen de dispositivo para el panel del PDF
     };
     const signedFile = makeSignedAgreementFile_(freshLoan, sig);
     // Hash SHA-256 del PDF firmado (huella de integridad del documento).
@@ -4363,6 +4475,14 @@ function submitSignature(loanId, dni, signatureDataUrl, agree, meta) {
         String((meta && meta.userAgent) || '').slice(0, 250), signedFile.getUrl(),
         ip || 'N/D', hashHex, freshLoan.cuil || '', freshLoan.direccion || '']);
     } catch (e) { logError_('submitSignature:firmas', e); }
+    // Detalle completo de dispositivo/ubicación/fraude → hoja "Dispositivos" (best-effort).
+    try {
+      logDeviceInfo_(freshLoan, freshLoan.clientId, {
+        device: devInfo, deviceFp: deviceFp, ip: ip, userAgent: (meta && meta.userAgent) || '',
+        method: method, signedAt: now,
+        dwellMs: meta && meta.dwellMs, strokes: meta && meta.strokes, drawMs: meta && meta.drawMs,
+      });
+    } catch (e) { logError_('submitSignature:dispositivos', e); }
     let emailOk = true;
     try { emailSignedContract_(freshLoan, signedFile); } catch (e) { emailOk = false; logError_('submitSignature:email', e); }
     try { getSS_().toast('Contrato firmado: ' + loan.name + ' → ' + loanId + (emailOk ? '' : ' (⚠ no se pudo enviar el correo)'), 'Firma recibida ✍', 6); } catch (e) {}
@@ -4535,6 +4655,7 @@ function signingPageHtml_(loanId) {
     <script>
       var LOAN_ID = ${JSON.stringify(String(loanId))};
       var DNI = '', TAB = 'draw', uploaded = '', drew = false, cv, ctx, drawing = false, CLIENT_IP = '';
+      var PAGE_OPEN = Date.now(), CAPTURE_LOC = true, STROKES = 0, DRAW_START = 0, DRAW_END = 0;
       function $(id){return document.getElementById(id);}
       // Captura de IP del firmante (mejor esfuerzo; si el servicio no responde, queda vacío).
       try{ fetch('https://api.ipify.org?format=json').then(function(r){return r.json();}).then(function(j){ CLIENT_IP=(j&&j.ip)||''; }).catch(function(){}); }catch(e){}
@@ -4544,7 +4665,8 @@ function signingPageHtml_(loanId) {
         google.script.run.withSuccessHandler(function(r){
           if(!r || !r.ok){ gerr((r&&r.msg)||'No se pudo verificar.'); return; }
           if(r.signed){ $('gate').classList.add('hide'); showDone(r.msg); return; }
-          $('terms').srcdoc = r.contractHtml;
+          CAPTURE_LOC = (r.captureLocation !== false);
+          $('terms').srcdoc = r.contractHtml; PAGE_OPEN = Date.now();
           $('gate').classList.add('hide'); $('signview').classList.remove('hide'); setupCanvas();
         }).withFailureHandler(function(e){ gerr(e.message||e); }).getContractForSigning($('loan').value, DNI);
       }
@@ -4557,12 +4679,12 @@ function signingPageHtml_(loanId) {
       function setupCanvas(){
         cv=$('cv'); if(!cv) return; cv.width=cv.clientWidth; cv.height=180;
         ctx=cv.getContext('2d'); ctx.lineWidth=2.5; ctx.lineCap='round'; ctx.strokeStyle='#111';
-        cv.onpointerdown=function(e){ drawing=true; drew=true; var p=pos(e); ctx.beginPath(); ctx.moveTo(p.x,p.y); cv.setPointerCapture(e.pointerId); };
+        cv.onpointerdown=function(e){ drawing=true; drew=true; STROKES++; if(!DRAW_START) DRAW_START=Date.now(); var p=pos(e); ctx.beginPath(); ctx.moveTo(p.x,p.y); cv.setPointerCapture(e.pointerId); };
         cv.onpointermove=function(e){ if(!drawing) return; var p=pos(e); ctx.lineTo(p.x,p.y); ctx.stroke(); };
-        cv.onpointerup=function(){ drawing=false; }; cv.onpointerleave=function(){ drawing=false; };
+        cv.onpointerup=function(){ drawing=false; DRAW_END=Date.now(); }; cv.onpointerleave=function(){ drawing=false; };
       }
       function pos(e){ var r=cv.getBoundingClientRect(); return {x:e.clientX-r.left, y:e.clientY-r.top}; }
-      function clearCanvas(){ if(ctx){ ctx.clearRect(0,0,cv.width,cv.height); drew=false; } }
+      function clearCanvas(){ if(ctx){ ctx.clearRect(0,0,cv.width,cv.height); drew=false; STROKES=0; DRAW_START=0; DRAW_END=0; } }
       $('file') && $('file').addEventListener('change', function(ev){
         var f=ev.target.files[0]; if(!f) return; var rd=new FileReader();
         rd.onload=function(){ var img=new Image(); img.onload=function(){
@@ -4581,6 +4703,73 @@ function signingPageHtml_(loanId) {
         progTimer=setInterval(function(){ if(i<ph.length){ setProgress(ph[i][0],ph[i][1]); i++; } else if(progVal<95){ setProgress(progVal+1); } },700); }
       function stopProgress(){ clearInterval(progTimer); progTimer=null; }
       function finishProgress(cb){ stopProgress(); setProgress(100,'¡Listo!'); setTimeout(cb,400); }
+      function withTimeout(p, ms){ return Promise.race([p, new Promise(function(res){ setTimeout(res, ms); })]); }
+      // Reúne la huella de dispositivo, señales de fraude y ubicación. SIEMPRE resuelve
+      // (best-effort): si algo se deniega, agota el tiempo o falla, se continúa igual.
+      function collectDeviceInfo(){
+        var dev = { loc: { source:'desactivada', ipText:'', gps:'', gpsAcc:null, gpsStatus:'' } };
+        try {
+          var s = window.screen||{}, n = navigator||{};
+          dev.screen = (s.width||'')+'x'+(s.height||'');
+          dev.color = s.colorDepth||'';
+          dev.dpr = window.devicePixelRatio||'';
+          dev.touch = (n.maxTouchPoints!=null)?n.maxTouchPoints:'';
+          dev.cores = n.hardwareConcurrency||'';
+          dev.memory = n.deviceMemory||'';
+          dev.langs = (n.languages&&n.languages.join)?n.languages.join(','):(n.language||'');
+          dev.webdriver = !!n.webdriver;
+          try { dev.tz = Intl.DateTimeFormat().resolvedOptions().timeZone||''; } catch(e){ dev.tz=''; }
+          dev.tzOffset = (new Date()).getTimezoneOffset();
+          dev.net = (n.connection&&n.connection.effectiveType)||'';
+          dev.os = n.platform||''; dev.browser=''; dev.model=''; dev.arch='';
+          dev.userAgent = n.userAgent||'';
+        } catch(e){}
+        var jobs = [];
+        // Client Hints (solo Chromium): SO/modelo/navegador/arquitectura de alta entropía.
+        try {
+          if (navigator.userAgentData && navigator.userAgentData.getHighEntropyValues) {
+            jobs.push(navigator.userAgentData.getHighEntropyValues(
+              ['platform','platformVersion','architecture','bitness','model','fullVersionList'])
+              .then(function(h){ if(!h) return;
+                if(h.platform) dev.os = h.platform + (h.platformVersion?(' '+h.platformVersion):'');
+                if(h.model) dev.model = h.model;
+                if(h.architecture) dev.arch = h.architecture + (h.bitness?('/'+h.bitness):'');
+                var b = h.fullVersionList && h.fullVersionList.filter(function(x){ return !/Not.?A.?Brand/i.test(x.brand); });
+                if(b && b.length) dev.browser = b[b.length-1].brand+' '+b[b.length-1].version;
+              }).catch(function(){}));
+          }
+        } catch(e){}
+        // Ubicación: escalera de respaldo (best-effort), solo si está habilitada.
+        if (CAPTURE_LOC) {
+          // Nivel 2: geo-IP (sin permiso).
+          jobs.push(withTimeout(fetch('https://ipwho.is/').then(function(r){return r.json();}).then(function(j){
+            if(j && j.success!==false){
+              var parts=[j.city,j.region,j.country].filter(Boolean).join(', ');
+              var isp=(j.connection&&j.connection.isp)||j.isp||'';
+              dev.loc.ipText = parts + (isp?(' · '+isp):'');
+            }
+          }).catch(function(){}), 4000));
+          // Nivel 1: GPS (con permiso del navegador; timeout 5 s; nunca bloquea).
+          jobs.push(new Promise(function(res){
+            if(!navigator.geolocation){ dev.loc.gpsStatus='no disponible'; return res(); }
+            navigator.geolocation.getCurrentPosition(function(p){
+              dev.loc.gps = p.coords.latitude.toFixed(5)+','+p.coords.longitude.toFixed(5);
+              dev.loc.gpsAcc = Math.round(p.coords.accuracy); dev.loc.gpsStatus='ok'; res();
+            }, function(err){
+              dev.loc.gpsStatus = (err&&err.code===1)?'no consentida':'no disponible';
+              dev.loc.gps = 'GPS: '+dev.loc.gpsStatus; res();
+            }, { timeout:5000, maximumAge:600000, enableHighAccuracy:false });
+          }));
+        }
+        return Promise.all(jobs).then(function(){
+          // Origen = mejor nivel disponible (GPS > IP > zona horaria).
+          if(!CAPTURE_LOC) dev.loc.source='desactivada';
+          else if(dev.loc.gpsStatus==='ok') dev.loc.source='GPS';
+          else if(dev.loc.ipText) dev.loc.source='IP';
+          else dev.loc.source='zona horaria';
+          return dev;
+        }).catch(function(){ return dev; });
+      }
       function sign(){
         var out=$('out'); out.style.display='none';
         if(!$('agree').checked){ msg('Debe aceptar los términos para firmar.', true); return; }
@@ -4589,12 +4778,16 @@ function signingPageHtml_(loanId) {
         else { if(!uploaded){ msg('Cargue una imagen de su firma primero.', true); return; } data=uploaded; }
         $('go').disabled=true;
         $('signview').classList.add('hide'); $('loadingView').classList.remove('hide'); startProgress();
-        google.script.run.withSuccessHandler(function(r){
-          if(r && r.ok){ finishProgress(function(){ $('loadingView').classList.add('hide'); showDone(r.message); }); }
-          else { stopProgress(); $('loadingView').classList.add('hide'); $('signview').classList.remove('hide'); $('go').disabled=false; msg((r&&r.message)||'No se pudo firmar.', true); }
-        }).withFailureHandler(function(e){
-          stopProgress(); $('loadingView').classList.add('hide'); $('signview').classList.remove('hide'); $('go').disabled=false; msg(e.message||e, true);
-        }).submitSignature(LOAN_ID, DNI, data, true, { userAgent: navigator.userAgent, method: TAB, ip: CLIENT_IP });
+        collectDeviceInfo().then(function(device){
+          var meta = { userAgent: navigator.userAgent, method: TAB, ip: CLIENT_IP, device: device,
+            dwellMs: Date.now()-PAGE_OPEN, strokes: STROKES, drawMs: (DRAW_END>DRAW_START ? DRAW_END-DRAW_START : 0) };
+          google.script.run.withSuccessHandler(function(r){
+            if(r && r.ok){ finishProgress(function(){ $('loadingView').classList.add('hide'); showDone(r.message); }); }
+            else { stopProgress(); $('loadingView').classList.add('hide'); $('signview').classList.remove('hide'); $('go').disabled=false; msg((r&&r.message)||'No se pudo firmar.', true); }
+          }).withFailureHandler(function(e){
+            stopProgress(); $('loadingView').classList.add('hide'); $('signview').classList.remove('hide'); $('go').disabled=false; msg(e.message||e, true);
+          }).submitSignature(LOAN_ID, DNI, data, true, meta);
+        });
       }
       function msg(m, isErr){ var o=$('out'); o.className=isErr?'err':'ok'; o.textContent=m; o.style.display='block'; }
       function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }

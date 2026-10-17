@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<!-- Flyer conciso ES — render a PNG con Chrome headless (820x1180 @2x). Cifras: impulso-v2 (11).xlsx -->
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<style>
+  :root{
+    --brand:#1c4587;--brand2:#2a66c4;--ink:#1a2233;--muted:#5a6473;
+    --ok:#1e7a46;--okbg:#e6f4ec;--warn:#b4480a;--warnbg:#fdeee1;--line:#e3e7ef;
+    --gold:#b7892b;--soft:#f5f7fb;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{width:820px;height:870px}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    color:var(--ink);background:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact;
+    display:flex;flex-direction:column}
+  header{background:linear-gradient(135deg,var(--brand),var(--brand2));color:#fff;padding:30px 44px}
+  header .brand{font-size:34px;font-weight:800;letter-spacing:.3px}
+  header .tag{font-size:19px;margin-top:6px;opacity:.95;font-weight:600}
+  main{padding:26px 44px 0;flex:1}
+  h2{font-size:21px;color:var(--brand);margin:20px 0 10px;display:flex;align-items:center;gap:8px}
+  h2:first-child{margin-top:0}
+  table{width:100%;border-collapse:collapse;font-size:16px}
+  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line)}
+  th{background:var(--soft);color:var(--muted);font-size:13px;text-transform:uppercase;letter-spacing:.5px}
+  .amt{font-weight:800;color:var(--brand);white-space:nowrap;font-size:17px}
+  .lvl{font-weight:700}.n0{color:var(--muted)}.nx{color:var(--gold)}
+  td.sm{font-size:14px;color:var(--muted)}
+  .terms td:first-child{font-weight:700;white-space:nowrap}
+  .warn{background:var(--warnbg);border:1px solid #f3c9a9;border-radius:12px;padding:16px 20px;margin-top:22px}
+  .warn h3{color:var(--warn);font-size:19px;margin-bottom:8px}
+  .warn ul{padding-left:20px}
+  .warn li{font-size:15px;margin:5px 0}
+  footer{background:var(--soft);border-top:1px solid var(--line);padding:16px 44px;
+    display:flex;justify-content:space-between;align-items:center}
+  footer .note{font-size:12.5px;color:var(--muted);max-width:60%}
+  .ok-pill{background:var(--okbg);color:var(--ok);border:1px solid #bfe3cd;border-radius:999px;
+    padding:9px 18px;font-size:15px;font-weight:800;white-space:nowrap}
+  b.hl{color:var(--warn)}
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">Impulso Crédito</div>
+    <div class="tag">Escalera de Niveles — pagá a tiempo y prestá más</div>
+  </header>
+
+  <main>
+    <h2>🎓 Niveles y límite de monto</h2>
+    <table>
+      <tr><th>Nivel</th><th>Podés pedir hasta</th><th>Cómo subir</th></tr>
+      <tr><td class="lvl"><span class="n0">Inicial</span></td><td><span class="amt">$150.000</span></td><td class="sm">Cliente nuevo</td></tr>
+      <tr><td class="lvl"><span class="nx">Nivel 1</span></td><td><span class="amt">$250.000</span></td><td class="sm">1 préstamo pagado a tiempo (≥ $150.000)</td></tr>
+      <tr><td class="lvl"><span class="nx">Nivel 2</span></td><td><span class="amt">$350.000</span></td><td class="sm">2 pagos a tiempo, uno ≥ $250.000</td></tr>
+      <tr><td class="lvl"><span class="nx">Nivel 3</span></td><td><span class="amt">$450.000</span></td><td class="sm">3 pagos a tiempo, uno ≥ $350.000</td></tr>
+    </table>
+
+    <h2>💳 Plazos y cuotas (según el monto)</h2>
+    <table class="terms">
+      <tr><th>Monto</th><th>Plazo</th><th>Interés</th><th>Pago</th></tr>
+      <tr><td>Hasta $150.000</td><td>15 o 30 días</td><td>25% / 50%</td><td>1 pago</td></tr>
+      <tr><td>$150.000 – $300.000</td><td>30 días</td><td>50%</td><td>1 pago</td></tr>
+      <tr><td>$300.000 – $500.000</td><td>90 días</td><td>100%</td><td>3 cuotas (30·60·90)</td></tr>
+    </table>
+
+    <div class="warn">
+      <h3>⚠️ Si pagás tarde</h3>
+      <ul>
+        <li><b class="hl">5% por día</b> de recargo sobre el total, desde el primer día (sin gracia).</li>
+        <li>Se acumula hasta el <b class="hl">100% del total</b>: tu deuda puede <b class="hl">duplicarse</b>.</li>
+        <li>Tu <b>nivel</b> baja según cuánto te atrases (la mora no cambia):
+          <ul>
+            <li><b class="hl">Hasta 3 días</b>: se <b>congela</b> — no baja, pero ese préstamo no suma para subir.</li>
+            <li><b class="hl">4 a 15 días</b>: <b>bajás un nivel</b> — lo recuperás devolviendo a tiempo.</li>
+            <li><b class="hl">Más de 15 días</b>, o un préstamo <b class="hl">VENCIDO</b> sin pagar: volvés al <b>límite inicial de $150.000</b>.</li>
+          </ul>
+        </li>
+      </ul>
+    </div>
+  </main>
+
+  <footer>
+    <div class="note">Montos en pesos (ARS). Condiciones sujetas a la configuración vigente del sistema.</div>
+    <div class="ok-pill">✓ Pagá a tiempo = subí de nivel</div>
+  </footer>
+</body>
+</html>

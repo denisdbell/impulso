@@ -100,7 +100,7 @@ const VALIDATION_RULES = [
   ['V-29', 'Formulario', 'Monto', 'El monto no puede superar el tope configurable (por defecto $500.000).', 'El monto máximo por préstamo es $500.000.', 'BLOQUEA', 'ALTA'],
   ['V-30', 'Formulario', 'Monto/Plazo', 'El plazo/tasa/cuotas se DERIVAN del monto: ≤$150.000→elige 15d/25% o 30d/50% (1 cuota); ≤$300.000→30d/50%/1; >$300.000→90d/100%/3 cuotas.', 'El plazo se calcula según el monto.', 'BLOQUEA', 'ALTA'],
   ['V-31', 'Alta', 'Cuotas', 'Préstamo grande (>$300.000): se genera un cronograma de 3 cuotas mensuales (día 30/60/90), cada una = Total÷3.', '—', 'AUTOMÁTICO', 'ALTA'],
-  ['V-32', 'Aprobación', 'Monto', 'Escalera de graduación: el monto ≤ límite por historial de repago del prestatario. Para subir de nivel hay que haber DEVUELTO A TIEMPO un préstamo cuyo Capital sea ≥ el límite del nivel anterior (muchos préstamos chicos NO promueven). Un atraso REINICIA la escalera: solo cuentan los saldados a tiempo DESPUÉS del último atraso. Mora vigente → límite inicial.', 'Supera el límite por historial del prestatario. Se amplía devolviendo a tiempo un préstamo de al menos el tope actual (no basta con montos chicos), o con «Anular límites».', 'BLOQUEA', 'ALTA'],
+  ['V-32', 'Aprobación', 'Monto', 'Escalera de graduación: el monto ≤ límite por historial de repago del prestatario. Para subir de nivel hay que haber DEVUELTO A TIEMPO un préstamo cuyo Capital sea ≥ el límite del nivel anterior (muchos préstamos chicos NO promueven). Los atrasos GRADÚAN la escalera: ≤3 días la congelan, 4–15 días bajan un nivel (recuperable con repagos a tiempo), >15 días o un préstamo VENCIDO sin pagar reinician a Inicial.', 'Supera el límite por historial del prestatario. Se amplía devolviendo a tiempo un préstamo de al menos el tope actual (no basta con montos chicos), o con «Anular límites».', 'BLOQUEA', 'ALTA'],
   ['V-33', 'Formulario y Aprobación', 'Cliente', 'Cliente BLOQUEADO (columna «Bloqueado» = SÍ en Clientes): se rechaza toda solicitud y aprobación que coincida por correo, DNI, CUIL o teléfono. ABSOLUTO: no se anula con «Anular límites». Desbloquear = vaciar la columna «Bloqueado».', 'No es posible procesar solicitudes para este cliente. Ante cualquier duda, comunicate con el prestamista.', 'BLOQUEA', 'ALTA'],
   ['V-34', 'Aprobación', 'Referencias', 'Al menos UNA referencia debe estar VALIDADA (casilla «Ref 1 Validada?» o «Ref 2 Validada?» = SÍ) en «Nuevos Prestatarios» antes de aprobar/otorgar el préstamo. No se anula con «Anular límites».', 'Validá al menos una referencia antes de aprobar el préstamo.', 'BLOQUEA', 'ALTA'],
   ['V-35', 'Formulario', 'Nombre', 'El nombre del solicitante y el de cada referencia deben tener al menos 10 caracteres.', 'El nombre debe tener al menos 10 caracteres.', 'BLOQUEA', 'MEDIA'],
@@ -474,9 +474,17 @@ function lookupClienteForIntake(email, dni) {
     res.settledCount = h.settledCount;
     res.onTimeCount = h.onTimeCount;
     res.onTimeMaxPrincipal = h.onTimeMaxPrincipal;
-    // Límite reducido HOY: mora vigente, o atrasos sin repagos a tiempo posteriores
-    // (un atraso reinicia la escalera; se recupera saldando a tiempo).
-    res.hasArrears = !!(h.everDefaulted || (h.lateCount > 0 && h.onTimeCount === 0));
+    // Deuda vencida sin pagar → límite inicial hasta regularizar (mensaje fuerte).
+    res.hasArrears = !!h.everDefaulted;
+    // Nivel bajado por atraso(s) moderado(s) (4–15 días): recuperable devolviendo a tiempo.
+    res.levelDropped = (Number(h.demotionSteps) || 0) > 0;
+    // Un atraso grave (>15 días) reinició la escalera al inicial y aún no se reconstruyó.
+    res.levelReset = !!h.levelReset;
+    // Datos para explicar el nivel en el formulario: posición en la escalera, próximo techo y máximo.
+    res.atMaxLevel = !!g.atMax;
+    res.levelNum = g.n;
+    res.maxLevelNum = g.maxN;
+    res.nextMax = Math.min(g.cap, g.max + g.step); // techo del próximo nivel (= actual si ya es el máximo)
     const cByDni = clienteByDni_(dnV.norm);
     if (cByDni && normEmail_(cByDni.email) === emV.norm) {
       res.found = true;                   // mismo cliente (DNI + correo)
@@ -785,24 +793,25 @@ function clientLoanCount_(clientId) {
  *   • "Prestatarios": préstamos del cliente (PAGADO = saldado; VENCIDO = mora vigente).
  *   • "Saldados":     préstamos ya archivados (todos saldados), enlazados por DNI.
  *   • "Pagos":        fecha del ÚLTIMO pago por préstamo → decide on-time vs. atrasado.
- * Detección de ATRASO: se marca `lateCount` si CUALQUIER préstamo (en cualquier estado)
- * tiene un pago posterior a su Fecha de Vencimiento. Como los pagos son cronológicos, el
- * último pago > vencimiento ⇔ hubo al menos un pago tardío. `everDefaulted` = tiene una
- * mora VIGENTE hoy (fuerza el límite inicial mientras dure).
- * ESCALERA CON REINICIO: un atraso NO degrada para siempre — reinicia la escalera.
- * `onTimeCount` cuenta SOLO los préstamos saldados a tiempo DESPUÉS del último atraso
- * (`lastLateTime` = fecha del pago tardío más reciente; 0 = nunca se atrasó, cuentan
- * todos). El momento de saldado de cada préstamo es su último pago en "Pagos"
- * (doMoveCleared_ conserva "Pagos" al archivar); si no hay pagos registrados (datos
- * migrados) se usa "Fecha de Saldado" de "Saldados"; sin ninguna de las dos, el
- * préstamo no suma tras un atraso (conservador). Empates: se exige estrictamente
- * posterior (los pagos suelen guardarse solo con fecha). Devuelve
- *   { settledCount, onTimeCount, lateCount, everDefaulted, lastLateTime }.
+ * Detección de ATRASO graduada por MAGNITUD: para cada préstamo saldado se calcula cuántos
+ * días se pagó tarde (daysLate_ entre su vencimiento y el último pago). `everDefaulted` = tiene
+ * un préstamo VENCIDO sin pagar hoy (fuerza el límite inicial mientras dure).
+ * ESCALERA GRADUADA (recuperable): se recorren los préstamos saldados en orden cronológico (por
+ * fecha de saldado) manteniendo una penalización `penalty` autorreparable —
+ *   • a tiempo             → suma on-time (y recuerda su Capital) y SANA una baja previa (penalty−1),
+ *   • ≤ MINOR días tarde   → CONGELA el nivel: no suma ni resta,
+ *   • MINOR+1..SEVERE tarde → BAJA un nivel (penalty+1; recuperable con repagos a tiempo),
+ *   • > SEVERE días tarde  → REINICIA la escalera (penalty, on-time y Capital vuelven a 0).
+ * MINOR/SEVERE salen de "Configuración" (por defecto 3 y 15). El momento de saldado de cada
+ * préstamo es su último pago en "Pagos" (doMoveCleared_ conserva "Pagos" al archivar); si no hay
+ * pagos registrados (datos migrados) se usa "Fecha de Saldado" de "Saldados", y en última instancia
+ * el vencimiento, SOLO para ordenar. Devuelve
+ *   { settledCount, onTimeCount, lateCount, everDefaulted, onTimeMaxPrincipal, demotionSteps, levelReset }.
  * Solo lectura: NO escribe ni envía correos.
  */
 function repaymentHistory_(dni) {
   const dniN = normDni_(dni);
-  const res = { settledCount: 0, onTimeCount: 0, lateCount: 0, everDefaulted: false, lastLateTime: 0, onTimeMaxPrincipal: 0 };
+  const res = { settledCount: 0, onTimeCount: 0, lateCount: 0, everDefaulted: false, onTimeMaxPrincipal: 0, demotionSteps: 0, levelReset: false };
   if (!dniN) return res;
   const ss = getSS_();
   const cli = clienteByDni_(dniN);
@@ -824,13 +833,14 @@ function repaymentHistory_(dni) {
     });
   }
 
-  const dayEnd_ = d => { const x = new Date(d); x.setHours(23, 59, 59, 999); return x.getTime(); };
-  // ¿El préstamo tuvo algún pago posterior a su vencimiento? (último pago > vencimiento).
-  const isLate_ = (loanId, dueDate) => {
+  const dueAsDate_ = d => (d instanceof Date) ? d : (d ? new Date(d) : null);
+  // Días completos de atraso del préstamo (0 si a tiempo o sin pago registrado): entre su
+  // vencimiento y el último pago. daysLate_ redondea por día calendario, igual que la mora.
+  const daysLateOf_ = (loanId, dueDate) => {
     const pay = lastPayByLoan[String(loanId).trim()];
-    const due = (dueDate instanceof Date) ? dueDate : (dueDate ? new Date(dueDate) : null);
-    if (pay == null || !due || !isFinite(due.getTime())) return false;
-    return pay > dayEnd_(due);
+    const due = dueAsDate_(dueDate);
+    if (pay == null || !due || !isFinite(due.getTime())) return 0;
+    return daysLate_(due, new Date(pay));
   };
   // Acumula los préstamos del cliente (deduplicados por ID: un préstamo puede figurar
   // en ambas hojas a mitad de un archivado) para evaluarlos en dos pasadas.
@@ -874,30 +884,54 @@ function repaymentHistory_(dni) {
     data.forEach(r => { if (normDni_(r[dniC - 1]) === dniN) addLoan_(r[idC - 1], r[dueC - 1], true, r[setC - 1], r[capC - 1]); });
   }
 
-  // Pasada 1 — atrasos y momento del ÚLTIMO atraso (el pago tardío más reciente).
+  // Umbrales de la escalera graduada (Configuración; por defecto 3 y 15). SEVERE nunca < MINOR.
+  const MINOR = settingDays_('Atraso que congela el nivel (días)', 3);
+  let SEVERE = settingDays_('Atraso que reinicia el nivel (días)', 15);
+  if (SEVERE < MINOR) SEVERE = MINOR;
+
+  const toTime_ = v => { const t = (v instanceof Date) ? v.getTime() : Date.parse(v); return isFinite(t) ? t : null; };
+  // Momento de saldado (para ordenar cronológicamente): último pago; si falta, "Fecha de
+  // Saldado"; en última instancia el vencimiento (solo para ordenar datos migrados sin pagos).
+  const settleTimeOf_ = L => {
+    const t = (lastPayByLoan[L.id] != null) ? lastPayByLoan[L.id] : toTime_(L.fallbackSettle);
+    return (t != null) ? t : (toTime_(L.due) || 0);
+  };
+
+  // Pasada 1 — magnitud del atraso de cada préstamo (0 = a tiempo), conteo total de atrasos y
+  // momento de saldado para ordenar.
   loans.forEach(L => {
-    L.late = isLate_(L.id, L.due);
-    if (L.late) {
-      res.lateCount++;
-      const t = lastPayByLoan[L.id];
-      if (t != null && t > res.lastLateTime) res.lastLateTime = t;
-    }
+    L.daysLate = daysLateOf_(L.id, L.due);
+    L.late = L.daysLate > 0;
+    if (L.late) res.lateCount++;
+    L.settleTime = settleTimeOf_(L);
   });
 
-  // Pasada 2 — la escalera se RECONSTRUYE: solo suman on-time los préstamos saldados
-  // (sin atraso) DESPUÉS del último atraso. Sin atrasos → cuentan todos, como antes.
-  const toTime_ = v => { const t = (v instanceof Date) ? v.getTime() : Date.parse(v); return isFinite(t) ? t : null; };
-  // Cuenta un préstamo saldado a tiempo y recuerda el MAYOR capital devuelto a tiempo
-  // (V-32: la promoción exige haber devuelto un préstamo ≥ límite del nivel anterior).
-  const countOnTime_ = L => { res.onTimeCount++; res.onTimeMaxPrincipal = Math.max(res.onTimeMaxPrincipal, Number(L.principal) || 0); };
-  loans.forEach(L => {
-    if (!L.settled) return;
-    res.settledCount++;
-    if (L.late) return;                                   // saldado tarde: nunca suma
-    if (!res.lastLateTime) { countOnTime_(L); return; }   // nunca se atrasó
-    const settleTime = (lastPayByLoan[L.id] != null) ? lastPayByLoan[L.id] : toTime_(L.fallbackSettle);
-    if (settleTime != null && settleTime > res.lastLateTime) countOnTime_(L);
-  });
+  // Pasada 2 — escalera GRADUADA: recorre los saldados en orden cronológico manteniendo una
+  // penalización autorreparable. Leve (≤MINOR) congela; moderado (≤SEVERE) baja un nivel y lo
+  // SANA un repago a tiempo posterior; grave (>SEVERE) reinicia. Mora vigente → Inicial lo
+  // resuelve graduationLevelFor_ con `everDefaulted`.
+  let penalty = 0, lastWasSevere = false;
+  loans.filter(L => L.settled)
+    .sort((a, b) => a.settleTime - b.settleTime)
+    .forEach(L => {
+      res.settledCount++;
+      if (L.daysLate > SEVERE) {                 // grave → reinicia la escalera
+        penalty = 0; res.onTimeCount = 0; res.onTimeMaxPrincipal = 0; lastWasSevere = true;
+      } else if (L.daysLate > MINOR) {           // moderado → baja un nivel (recuperable)
+        penalty++; lastWasSevere = false;
+      } else if (L.daysLate > 0) {               // leve → congela (ni suma ni resta)
+        lastWasSevere = false;                   // conserva nivel, pero el tardío no promueve
+      } else {                                   // a tiempo → suma y sana una baja previa
+        res.onTimeCount++;
+        res.onTimeMaxPrincipal = Math.max(res.onTimeMaxPrincipal, Number(L.principal) || 0);
+        if (penalty > 0) penalty--;
+        lastWasSevere = false;
+      }
+    });
+  res.demotionSteps = penalty;
+  // El último préstamo saldado fue un atraso grave que reinició la escalera y aún no se reconstruyó:
+  // sirve para explicar en el formulario por qué el límite volvió al inicial.
+  res.levelReset = lastWasSevere;
 
   return res;
 }
@@ -914,8 +948,10 @@ function repaymentHistory_(dni) {
  *     ANTERIOR (= Límite inicial + Incremento·(n-1)), probando ese tamaño antes de habilitar más.
  * El nivel final es el MENOR de ambos topes (y del tope máximo). Devolver muchos préstamos
  * chicos NO promueve (p. ej. 5×$100.000 → sigue Inicial); un único préstamo grande tampoco
- * saltea escalones (la cantidad lo frena). Un atraso REINICIA la escalera (solo cuentan los
- * saldados a tiempo posteriores al último atraso). Una mora VIGENTE fuerza el límite inicial.
+ * saltea escalones (la cantidad lo frena). Atrasos (escalera GRADUADA, ver repaymentHistory_):
+ * cada atraso moderado (4–15 días) resta un escalón (`demotionSteps`, recuperable con repagos a
+ * tiempo); uno leve (≤3 días) congela; uno grave (>15 días) reinicia on-time/Capital. Una mora
+ * VIGENTE (préstamo VENCIDO sin pagar) fuerza el límite inicial.
  */
 function graduationLevelFor_(h) {
   let floor = settingMoney_('Límite inicial (préstamo nuevo)', 150000);
@@ -924,12 +960,19 @@ function graduationLevelFor_(h) {
   if (!(step > 0)) step = 50000;                         // config inválida → paso por defecto
   if (cap < floor) cap = floor;                          // tope nunca por debajo del inicial
   const maxN = Math.max(0, Math.floor((cap - floor) / step));
-  if (h.everDefaulted) return { level: 'Inicial', max: floor };
+  // Empaqueta el nivel n con todo lo que el formulario necesita para explicarlo (nivel/techo,
+  // escalón, tope y si ya está en el máximo). atMax: true cuando no hay más escalones por subir.
+  const pack = n => ({
+    level: n === 0 ? 'Inicial' : 'Nivel ' + n, max: floor + step * n,
+    n: n, maxN: maxN, step: step, floor: floor, cap: cap, atMax: maxN > 0 ? n >= maxN : true,
+  });
+  if (h.everDefaulted) return pack(0);
   const proven = Number(h.onTimeMaxPrincipal) || 0;
   const byCount = Math.max(0, Number(h.onTimeCount) || 0);   // un repago a tiempo por escalón
   const bySize  = proven >= floor ? Math.floor((proven - floor) / step) + 1 : 0; // tamaño probado
-  const n = Math.min(maxN, byCount, bySize);
-  return { level: n === 0 ? 'Inicial' : 'Nivel ' + n, max: floor + step * n };
+  const demote  = Math.max(0, Number(h.demotionSteps) || 0); // atrasos moderados: −1 escalón c/u
+  const n = Math.max(0, Math.min(maxN, byCount, bySize) - demote);
+  return pack(n);
 }
 function graduationMax_(dni) {
   return graduationLevelFor_(repaymentHistory_(dni)).max;
@@ -958,6 +1001,7 @@ function buildClientLevels(opts) {
     .setFontWeight('bold').setBackground('#674ea7').setFontColor('#fff');
   sh.setFrozenRows(1);
   sh.getRange(1, HEADERS.length).setNote('Mayor Capital que el cliente devolvió A TIEMPO. V-32: para subir de nivel hay que haber devuelto a tiempo un préstamo ≥ el límite del nivel anterior (no basta con muchos préstamos chicos).');
+  sh.getRange(1, 9).setNote('Al día = sin atrasos que bajen el nivel. Nivel reducido por atraso = bajó uno o más escalones por atraso(s) de 4–15 días (se recupera devolviendo a tiempo). Mora vigente = tiene un préstamo VENCIDO sin pagar → límite inicial hasta regularizar.');
 
   const widths = [110, 200, 110, 90, 130, 150, 160, 150, 120, 200];
   widths.forEach((w, i) => sh.setColumnWidth(i + 1, w));
@@ -969,7 +1013,7 @@ function buildClientLevels(opts) {
     const h = repaymentHistory_(c.dniNorm);
     const g = graduationLevelFor_(h);
     return { c: c, h: h, level: g.level, max: g.max,
-      estado: h.everDefaulted ? 'Mora vigente' : 'Al día',
+      estado: h.everDefaulted ? 'Mora vigente' : ((Number(h.demotionSteps) || 0) > 0 ? 'Nivel reducido por atraso' : 'Al día'),
       sortKey: h.everDefaulted ? -1 : h.onTimeCount };
   }).sort((a, b) => b.sortKey - a.sortKey || normName_(a.c.name).localeCompare(normName_(b.c.name)));
 
@@ -994,6 +1038,7 @@ function buildClientLevels(opts) {
     ccContains_(lvl, 'Nivel', '#b6d7a8'),  // verde — cualquier nivel graduado (Nivel 1..7)
     cc_(lvl, 'Inicial', '#efefef'),  // gris
     cc_(est, 'Mora vigente', '#ea9999'), // rojo
+    cc_(est, 'Nivel reducido por atraso', '#fce5cd'), // naranja — bajó de nivel, recuperable
     cc_(est, 'Al día', '#d9ead3'),       // verde claro
   ]);
 
@@ -1031,12 +1076,13 @@ function validateApprovalV2_(clientId, amount, override, dni, ident) {
     if (amt > avail)
       return { ok: false, code: 'V-09', msg: 'El préstamo (' + fmtMoney_(amt) + ') supera el capital disponible para prestar (' + fmtMoney_(fs.net) + (fs.net < 0 ? ' — sobregiro' : '') + ').' };
     // V-32 — escalera de graduación: el monto ≤ límite por historial de repago del
-    // prestatario. Sin historial o con mora vigente → límite inicial; un atraso reinicia
-    // la escalera (sube de nuevo saldando a tiempo). Clave por DNI (sobrevive a "Saldados").
+    // prestatario. Sin historial, o con mora vigente (préstamo VENCIDO sin pagar), o tras un
+    // atraso grave → límite inicial; un atraso moderado baja un nivel (recuperable saldando a
+    // tiempo). Clave por DNI (sobrevive a "Saldados").
     const gmax = graduationMax_(dni);
     if (gmax > 0 && amt > gmax) {
       const gstep = settingMoney_('Incremento de graduación', 50000);
-      return { ok: false, code: 'V-32', msg: 'El monto (' + fmtMoney_(amt) + ') supera el límite por historial del prestatario (' + fmtMoney_(gmax) + '). Para subir al próximo tramo (+' + fmtMoney_(gstep) + ') debe DEVOLVER A TIEMPO un préstamo de al menos ' + fmtMoney_(gmax) + ' Y sumar un repago a tiempo más (no basta con muchos préstamos chicos ni con uno solo grande); los atrasos reinician la escalera. O usá «Anular límites».' };
+      return { ok: false, code: 'V-32', msg: 'El monto (' + fmtMoney_(amt) + ') supera el límite por historial del prestatario (' + fmtMoney_(gmax) + '). Para subir al próximo tramo (+' + fmtMoney_(gstep) + ') debe DEVOLVER A TIEMPO un préstamo de al menos ' + fmtMoney_(gmax) + ' Y sumar un repago a tiempo más (no basta con muchos préstamos chicos ni con uno solo grande); los atrasos de 4–15 días bajan un nivel y los de más de 15 días (o un préstamo VENCIDO sin pagar) reinician la escalera. O usá «Anular límites».' };
     }
     // Tope de concentración por prestatario: % configurable del FONDO TOTAL
     // (Configuración ▸ "Tope de concentración…"). Base estable = fondo total (no el
@@ -1379,6 +1425,7 @@ function intakeSmartHtml_() {
               <li id="tierLi3">De <b>${fmtMoney_(tier2Max_())}</b> a <b>${fmtMoney_(loanMax_())}</b>: <b style="color:#1c4587">90 días (100%)</b> — <b>3 cuotas mensuales</b> (vencen día 30, 60 y 90).</li>
             </ul>
             <div id="maxBanner" style="margin-top:7px;padding:7px 11px;background:#fff4e5;border:1px solid #f0b357;border-radius:8px;color:#7a4a00">⚠️ <b>Monto máximo por préstamo: ${fmtMoney_(loanMax_())}</b></div>
+            <div id="levelInfo" style="display:none;margin-top:7px"></div>
           </div>
           <label>Monto solicitado (ARS) <span class="req">*</span><input name="amount" id="amount" type="text" inputmode="numeric" autocomplete="off" placeholder="Ej: 100.000" required style="font-size:20px;font-weight:bold;height:auto;padding:12px"></label>
           <div id="amountWords" style="display:none;margin:6px 0 2px;font-size:19px;font-weight:bold;color:#1c4587;line-height:1.35"></div>
@@ -1488,6 +1535,8 @@ function intakeSmartHtml_() {
       var amountEl=document.getElementById('amount'),termEl=document.getElementById('term');
       // Tramos por monto (el monto determina plazo/tasa/cuotas; se calcula, no se elige).
       var T1MAX=${tier1Max_()}, T2MAX=${tier2Max_()}, LOANMAX=${loanMax_()};
+      // Umbrales de la escalera graduada (Configuración) para explicar los atrasos en el formulario.
+      var LVL_FREEZE=${settingDays_('Atraso que congela el nivel (días)', 3)}, LVL_RESET=Math.max(${settingDays_('Atraso que reinicia el nivel (días)', 15)}, ${settingDays_('Atraso que congela el nivel (días)', 3)});
       // Límite del prestatario (escalera de graduación, V-32). Arranca en el tope global y se
       // ajusta al identificarse (según su historial de repago). Nunca supera LOANMAX.
       var MAXAMT=LOANMAX;
@@ -1717,21 +1766,17 @@ function intakeSmartHtml_() {
       (function(){ var s=document.getElementById('term15o30'); if(s) s.addEventListener('change',recalc); })();
 
       // V-32 — refleja el límite del prestatario (escalera de graduación) en el formulario:
-      // banner con su tope actual + motivo, y atenúa los tramos por encima de su límite.
+      // banner con su tope actual, tarjeta de nivel explicativa, y atenúa los tramos por encima.
       function renderLimit(r){
         MAXAMT=(r&&r.maxAmount>0)?r.maxAmount:LOANMAX;
         var banner=document.getElementById('maxBanner');
         if(banner){
-          var reason='';
-          if(r){
-            // El motivo se basa en el NIVEL real (que exige monto demostrado, no solo cantidad):
-            // así no dice "ampliado" cuando el cliente sigue en Inicial por haber devuelto montos chicos.
-            if(r.hasArrears) reason=' — por atrasos previos, tu límite volvió al inicial. Se recupera saldando a tiempo';
-            else if(r.level!=='Inicial') reason=' — ampliado por tu historial de pagos a tiempo';
-            else reason=' — límite inicial (sube devolviendo a tiempo un préstamo de este monto)';
-          }
-          banner.innerHTML='⚠️ <b>Tu límite actual: '+fmt(MAXAMT)+'</b><span style="font-weight:normal">'+esc(reason)+'</span>';
+          // Identificado → la tarjeta de nivel (abajo) muestra límite + motivo + cómo subir, así
+          // que ocultamos el aviso naranja genérico para no repetir el monto.
+          if(r){ banner.style.display='none'; }
+          else { banner.style.display=''; banner.innerHTML='⚠️ <b>Monto máximo por préstamo: '+fmt(LOANMAX)+'</b>'; }
         }
+        renderLevelInfo(r);
         function dim(id,off){var li=document.getElementById(id); if(!li)return; li.style.opacity=off?'0.4':'';
           var tag=li.querySelector('.tierTag');
           if(off&&!tag){tag=document.createElement('span');tag.className='tierTag';tag.style.cssText='color:#a06000;font-style:italic;font-weight:normal';tag.textContent=' — disponible al ampliar tu límite';li.appendChild(tag);}
@@ -1740,6 +1785,62 @@ function intakeSmartHtml_() {
         dim('tierLi2', MAXAMT<=T1MAX);
         dim('tierLi3', MAXAMT<=T2MAX);
         recalc();
+      }
+
+      // Tarjeta de nivel: explica de forma breve y amable en qué nivel está el cliente, por qué
+      // (subió por buen historial, bajó por un atraso, o llegó al máximo) y qué hacer para subir.
+      // Discreta: aparece recién al identificarse y trae un desplegable con "cómo funcionan".
+      function renderLevelInfo(r){
+        var box=document.getElementById('levelInfo'); if(!box) return;
+        if(!r){ box.style.display='none'; return; }
+        var lvl=r.level||'Inicial', isIni=(lvl==='Inicial'), maxN=r.maxLevelNum||0;
+        var badge=isIni?'Nivel inicial':(lvl+(maxN?(' de '+maxN):''));
+        var nextTxt=(r.nextMax>0)?fmt(r.nextMax):'', proveTxt=fmt(MAXAMT);
+        // tone: good (verde) · warn (ámbar) · bad (rojo) · max (verde) · neutral (gris)
+        var tone, status, action;
+        if(r.hasArrears){
+          tone='bad';
+          status='Tenés una deuda vencida.';
+          action='Mientras no la regularices, tu límite vuelve al inicial. Saldala para recuperar tu nivel.';
+        } else if(r.atMaxLevel && !isIni){
+          tone='max';
+          status='¡Llegaste al nivel máximo!';
+          action='Tenés el límite más alto disponible ('+fmt(MAXAMT)+'). No hay niveles por encima: seguí pagando a tiempo para conservarlo.';
+        } else if(r.levelDropped){
+          tone='warn';
+          status='Bajaste de nivel por un atraso de pago.';
+          action='Para volver a subir, devolvé a tiempo tus próximos préstamos: cada repago puntual te recupera un nivel.';
+        } else if(r.levelReset){
+          tone='warn';
+          status='Un atraso de más de '+LVL_RESET+' días reinició tu escalera al nivel inicial.';
+          action='Reconstruí tu historial devolviendo a tiempo; cada préstamo puntual te hace subir de nuevo.';
+        } else if(!isIni){
+          tone='good';
+          status='Tu límite está ampliado por tu buen historial de pagos.';
+          action='Para pasar al próximo tramo'+(nextTxt?(' (hasta '+nextTxt+')'):'')+': devolvé a tiempo un préstamo de al menos '+proveTxt+' y sumá un repago puntual más.';
+        } else {
+          tone='neutral';
+          status=(r.found?'Estás en el nivel inicial.':'¡Bienvenido/a! Empezás en el nivel inicial.');
+          action='Devolviendo a tiempo un préstamo de al menos '+proveTxt+' subís de nivel y accedés a montos y plazos mayores (muchos préstamos chicos no suman).';
+        }
+        var pal={bad:['#fdeaea','#b3261e'],warn:['#fdf0dd','#8a5a00'],good:['#e7f4ea','#1e7a34'],max:['#e7f4ea','#1e7a34'],neutral:['#eef1f6','#44506a']};
+        var p=pal[tone]||pal.neutral;
+        var rules='Tu <b>límite</b> crece con tu historial: devolvé a tiempo y subís de nivel (más monto y mejores plazos). '+
+          'Si pagás tarde, tu nivel cambia según cuánto te atrases: hasta <b>'+LVL_FREEZE+' días</b> se <b>congela</b>, de <b>'+(LVL_FREEZE+1)+' a '+LVL_RESET+' días</b> <b>baja uno</b> (recuperable), '+
+          'más de <b>'+LVL_RESET+' días</b> o una <b>deuda vencida</b> te devuelven al <b>inicial</b>. El recargo por mora corre aparte, desde el primer día.';
+        box.innerHTML=
+          '<div style="border:1px solid #dbe3f0;background:#f7f9fc;border-radius:10px;padding:9px 12px">'+
+            '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'+
+              '<span style="display:inline-block;padding:2px 10px;border-radius:999px;background:'+p[0]+';color:'+p[1]+';font-weight:700;font-size:12px">'+esc(badge)+'</span>'+
+              '<span style="color:#5b6675;font-size:13px">Límite actual: <b style="color:#1c4587">'+fmt(MAXAMT)+'</b></span>'+
+            '</div>'+
+            '<div style="margin-top:6px;font-size:13px;line-height:1.5;color:'+p[1]+';font-weight:600">'+esc(status)+'</div>'+
+            '<div style="margin-top:2px;font-size:13px;line-height:1.5;color:#5b6675">'+esc(action)+'</div>'+
+            '<details style="margin-top:7px"><summary style="cursor:pointer;color:#1c4587;font-weight:600;font-size:12px">¿Cómo funcionan los niveles?</summary>'+
+              '<div style="margin-top:5px;font-size:12.5px;line-height:1.55;color:#5b6675">'+rules+'</div>'+
+            '</details>'+
+          '</div>';
+        box.style.display='block';
       }
 
       // Valida todo el formulario y enfoca el primer error.

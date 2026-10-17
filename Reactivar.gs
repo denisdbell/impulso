@@ -385,6 +385,7 @@ function reactivarFuncionalidad() {
     run('Panel', () => reactivatePanel_(ss));
     run('Estadísticas', () => reactivateStats_(ss));
     run('Novedades (recibos + topes)', () => installNewFeatureColumns_(ss));
+    run('Dispositivos', () => reactivateDispositivos_(ss));
     // Validaciones de datos (listas/casillas) del módulo Validaciones.
     try { if (typeof applySheetValidations_ === 'function') applySheetValidations_(ss); } catch (e) { logError_('reactivar:validaciones', e); }
     SpreadsheetApp.flush();
@@ -392,6 +393,17 @@ function reactivarFuncionalidad() {
     try { SpreadsheetApp.getActive().toast('Funcionalidad reactivada. Ver detalle en el registro.', 'Listo', 6); } catch (e) { }
     return msg;
   });
+}
+
+/* ======================= DISPOSITIVOS ======================= */
+/**
+ * Crea la hoja "Dispositivos" (acta de huella de dispositivo/ubicación/fraude) si falta,
+ * o asegura su encabezado. Idempotente: delega en setupDispositivos_ (LoanManagerV2.gs).
+ */
+function reactivateDispositivos_(ss) {
+  if (typeof setupDispositivos_ !== 'function') return '⚠ setupDispositivos_ no disponible';
+  setupDispositivos_(ss);
+  return ss.getSheetByName(CFG.SHEETS.DEVICES) ? 'lista (auditoría de dispositivos)' : 'no se pudo crear';
 }
 
 /* ======================= CONFIGURACIÓN ======================= */
