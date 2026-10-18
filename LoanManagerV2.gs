@@ -34,10 +34,10 @@ const CFG = {
     AGREEMENT: 'Estudio de Contratos', STATEMENTS: 'Estudio de Estados', REMINDER: 'Estudio de Recordatorios', NEW: 'Nuevos Prestatarios',
     PANEL: 'Panel', STATS: 'Estadísticas', LATE: 'Pagos Atrasados', PLAN: 'En Plan', CLEARED: 'Saldados', REJECTED: 'Rechazados', ERRORS: 'Errores', HELP: 'Instrucciones',
     SIGN: 'Firmas', CLIENTS: 'Clientes', INSTALLMENTS: 'Cuotas', LEVELS: 'Niveles de Clientes',
-    DEVICES: 'Dispositivos',
+    DEVICES: 'Dispositivos', FREEZE_REQ: 'Solicitudes de Congelamiento', PLAN_REQ: 'Solicitudes de Plan de Pago',
   },
 };
-const ST = { ACTIVE: 'ACTIVO', OVERDUE: 'VENCIDO', PAID: 'PAGADO', CLEARED: 'SALDADO', PLAN: 'EN PLAN' };
+const ST = { ACTIVE: 'ACTIVO', OVERDUE: 'VENCIDO', PAID: 'PAGADO', CLEARED: 'SALDADO', PLAN: 'EN PLAN', FROZEN: 'CONGELADO' };
 // Estados de cuota (hoja "Cuotas"): PAGADA / VENCIDA / PENDIENTE.
 const CST = { PAID: 'PAGADA', OVERDUE: 'VENCIDA', PENDING: 'PENDIENTE' };
 // Estado de firma del contrato (columna P de "Prestatarios", modelo normalizado).
@@ -60,6 +60,13 @@ const PB = {
   // Total del PLAN a pagar (incluye mora congelada en préstamos reestructurados). Suma de
   // "Monto Cuota" de "Cuotas"; ESTABLE ante los pagos (a diferencia de "Saldo con Mora").
   TOTAL_PLAN: 27,
+  // Congelamiento del préstamo: fecha en que se detiene el reloj de la mora ("Congelado el";
+  // vacío = no congelado) y acumulador de días ya saltados por ciclos previos de descongelado
+  // ("Días congelados", gestionado por el script). Ver effectiveMoraAsOf_ / frozenInfo_.
+  FROZEN_SINCE: 28, FROZEN_DAYS: 29,
+  // Plan de pago (Acuerdo Transaccional): fecha en que se firmó el acuerdo ("Plan desde"; vacío =
+  // sin plan). Marca el estado EN PLAN y suspende la mora (se fija "Mora (ajuste)"=0 al activar).
+  PLAN_SINCE: 30,
 };
 // Nombre/DNI (col C/D) se muestran en "Prestatarios" (se resuelven de "Clientes"
 // por ID Cliente). La fuente de verdad de la identidad sigue siendo "Clientes".
@@ -72,7 +79,7 @@ const COL_SIGN_STATUS = PB.SIGN_STATUS, COL_SIGN_DATE = PB.SIGN_DATE, COL_SIGN_P
 const PC = { CLIENT_ID: 1, NAME: 2, EMAIL: 3, DNI: 4, PHONE: 5, DNI_NORM: 6, EMAIL_NORM: 7, CREATED: 8, UPDATED: 9 };
 const CLIENTES_HEADERS = ['ID Cliente', 'Nombre', 'Correo', 'DNI', 'Teléfono', 'DNI (norm)', 'Correo (norm)', 'Fecha alta', 'Actualizado'];
 // Mapa de columnas de "Pagos" (modelo normalizado, sin identidad denormalizada).
-const PP = { PAY_ID: 1, LOAN_ID: 2, DATE: 3, AMOUNT: 4, BALANCE: 5, RECEIPT: 6, NAME: 7, DNI: 8, SEND_RECEIPT: 9, GEN_RECEIPT: 10 };
+const PP = { PAY_ID: 1, LOAN_ID: 2, DATE: 3, AMOUNT: 4, BALANCE: 5, RECEIPT: 6, NAME: 7, DNI: 8, SEND_RECEIPT: 9, GEN_RECEIPT: 10, WA_PAYMENT: 11 };
 // Hojas de operaciones diarias: siempre visibles. El resto son de configuración/consulta
 // y se pueden ocultar/mostrar desde el menú ▸ 🗂 Pestañas.
 const MAIN_SHEETS = [
@@ -81,6 +88,8 @@ const MAIN_SHEETS = [
   CFG.SHEETS.PAYMENTS,    // Pagos — registrar cobros
   CFG.SHEETS.INSTALLMENTS,// Cuotas — cronograma de pagos
   CFG.SHEETS.LATE,        // Pagos Atrasados — mora / avisos
+  CFG.SHEETS.FREEZE_REQ,  // Solicitudes de Congelamiento — aprobar/rechazar
+  CFG.SHEETS.PLAN_REQ,    // Solicitudes de Plan de Pago — aprobar/rechazar
   CFG.SHEETS.PANEL,       // Panel — indicadores
 ];
 // Encabezados de "Cuotas" (cronograma; una fila por cuota de cada préstamo).
@@ -97,49 +106,61 @@ const NB = ['Fecha de Envío', 'Nombre completo', 'Correo', 'DNI', 'Teléfono', 
 
 /* ============================ MENÚ ============================ */
 function onOpen() {
-  SpreadsheetApp.getUi().createMenu('Gestor de Préstamos')
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('Gestor de Préstamos')
+    // — Operaciones diarias —
     .addItem('▶ Abrir panel del prestamista', 'openSidebar')
-    .addSeparator()
     .addItem('🆕 Aplicar novedades (columnas y ajustes)', 'applyFeatureUpdates')
-    .addItem('① Configurar / reconstruir hojas', 'setupConfirm')
+    .addItem('⑤ Actualizar saldos y resumen', 'refreshAll')
     .addItem('⑥ Formulario web — publicar / ver enlace', 'showWebFormLink')
-    .addItem('Configurar marca (nombre + logo)', 'setBranding')
+    .addSeparator()
+    // — Informes —
     .addItem('④ Estadísticas y gráficos', 'showStats')
     .addItem('🎓 Niveles de clientes (escalera de graduación)', 'buildClientLevels')
     .addItem('💵 Retiro disponible (sin frenar crecimiento)', 'showWithdrawable')
-    .addItem('⑤ Actualizar saldos y resumen', 'refreshAll')
-    .addItem('⑤· Actualizar SOLO Pagos Atrasados (mora)', 'refreshLateOnly')
-    .addItem('💳 Actualizar Saldo Posterior en «Pagos» (con mora)', 'actualizarSaldoPosteriorPagos')
-    .addItem('🧮 Reparar totales y normalizar pagos', 'repairTotals')
-    .addItem('🧮 Reparar cuotas (duplicadas + fechas)', 'repararCuotas_')
-    .addItem('➕ Crear hoja de Recordatorios de pago', 'createRemindersSheet_')
-    .addItem('📄 Crear hoja de Estudio de Contratos', 'createAgreementSheet_')
-    .addItem('📄 Crear/actualizar hoja de Estudio de Estados', 'createStatementsSheet_')
-    .addItem('📊 Crear/actualizar Panel (incluye «Préstamos en plan»)', 'createPanelSheet_')
-    .addItem('📅 Actualizar «Vencimientos por período» (semana/mes/mes próximo)', 'actualizarVencimientosPanel')
-    .addItem('📋 Crear/actualizar hoja «En Plan» (préstamos reestructurados)', 'createEnPlanSheet_')
-    .addItem('✉ Reenviar enlace de firma (fila seleccionada)', 'resendSigningLink_')
     .addSeparator()
-    .addItem('Registrar un pago', 'openSidebar')
-    .addItem('✔ Mover préstamos saldados → hoja Saldados', 'moveClearedBorrowersConfirm')
+    // — Gestión de préstamos (fila activa) —
     .addItem('🔄 Reestructurar préstamo vencido (congelar mora + plan de cuotas)', 'restructurarPrestamoUI')
-    .addItem('🔁 Regenerar cuotas (1.ª cuota vence la semana próxima)', 'regenerarCuotasPrestamoUI')
-    .addSubMenu(SpreadsheetApp.getUi().createMenu('💸 Mora (fila activa)')
+    .addItem('✔ Mover préstamos saldados → hoja Saldados', 'moveClearedBorrowersConfirm')
+    .addItem('✉ Reenviar enlace de firma (fila seleccionada)', 'resendSigningLink_')
+    .addSubMenu(ui.createMenu('❄ Congelar préstamo (fila activa)')
+      .addItem('❄ Congelar préstamo (la mora deja de crecer)…', 'congelarPrestamoFilaActiva')
+      .addItem('☀ Descongelar préstamo (la mora vuelve a correr)', 'descongelarPrestamoFilaActiva'))
+    .addSubMenu(ui.createMenu('💸 Mora (fila activa)')
       .addItem('Condonar mora (poner en 0)', 'condonarMoraFilaActiva')
       .addItem('Fijar un importe de mora…', 'fijarMoraFilaActiva')
       .addItem('Restaurar mora automática', 'restaurarMoraFilaActiva'))
-    .addSubMenu(SpreadsheetApp.getUi().createMenu('🚫 Bloqueo de clientes (fila activa en Clientes)')
+    .addSubMenu(ui.createMenu('🚫 Bloqueo de clientes (fila activa en Clientes)')
       .addItem('Bloquear cliente…', 'bloquearClienteFilaActiva')
       .addItem('Desbloquear cliente', 'desbloquearClienteFilaActiva'))
     .addSeparator()
-    .addSubMenu(SpreadsheetApp.getUi().createMenu('🗂 Pestañas')
+    .addSubMenu(ui.createMenu('🗂 Pestañas')
       .addItem('Ver solo operaciones diarias', 'showDailyOnly')
       .addItem('Mostrar todas las hojas', 'showAllSheets'))
-    .addSubMenu(SpreadsheetApp.getUi().createMenu('🧪 Datos de prueba')
-      .addItem('Crear 40 prestatarios de prueba', 'seedTestBorrowersConfirm')
-      .addItem('Eliminar prestatarios de prueba', 'removeTestBorrowersConfirm')
+    // — Configuración y mantenimiento (uso poco frecuente) —
+    .addSubMenu(ui.createMenu('⚙ Configuración y mantenimiento')
+      .addItem('① Configurar / reconstruir hojas', 'setupConfirm')
+      .addItem('Configurar marca (nombre + logo)', 'setBranding')
       .addSeparator()
-      .addItem('🧪 Ejecutar pruebas (suite)', 'runAllTests'))
+      .addItem('⑤· Actualizar SOLO Pagos Atrasados (mora)', 'refreshLateOnly')
+      .addItem('💳 Actualizar Saldo Posterior en «Pagos» (con mora)', 'actualizarSaldoPosteriorPagos')
+      .addItem('📅 Actualizar «Vencimientos por período» (semana/mes/mes próximo)', 'actualizarVencimientosPanel')
+      .addItem('🧮 Reparar totales y normalizar pagos', 'repairTotals')
+      .addItem('🧮 Reparar cuotas (duplicadas + fechas)', 'repararCuotas_')
+      .addItem('🔁 Regenerar cuotas (1.ª cuota vence la semana próxima)', 'regenerarCuotasPrestamoUI')
+      .addSeparator()
+      .addItem('➕ Crear hoja de Recordatorios de pago', 'createRemindersSheet_')
+      .addItem('📄 Crear hoja de Estudio de Contratos', 'createAgreementSheet_')
+      .addItem('📄 Crear/actualizar hoja de Estudio de Estados', 'createStatementsSheet_')
+      .addItem('📊 Crear/actualizar Panel (incluye «Préstamos en plan»)', 'createPanelSheet_')
+      .addItem('📋 Crear/actualizar hoja «En Plan» (préstamos reestructurados)', 'createEnPlanSheet_')
+      .addSeparator()
+      .addSubMenu(ui.createMenu('🧪 Datos de prueba')
+        .addItem('Crear 40 prestatarios de prueba', 'seedTestBorrowersConfirm')
+        .addItem('Eliminar prestatarios de prueba', 'removeTestBorrowersConfirm')
+        .addSeparator()
+        .addItem('💬 Crear escenarios de pago (Avisar pago 📲)', 'seedPaymentScenariosConfirm')
+        .addItem('💬 Eliminar escenarios de pago', 'removePaymentScenariosConfirm')))
     .addToUi();
 
   // Regenerar "Niveles de Clientes" en cada apertura para que no quede estático.
@@ -152,6 +173,11 @@ function onOpen() {
   // reconstrucción al abrir o el disparador diario la mantienen al día. Silencioso y
   // tolerante a fallos para no impedir la carga del menú.
   try { rebuildLateSheet_(getSS_()); } catch (e) {}
+
+  // Reconstruir "Estudio de Recordatorios" en cada apertura: igual que la mora, un préstamo entra
+  // en la lista por el PASO DEL TIEMPO (vence o se acerca el vencimiento), así que conviene
+  // refrescarla al abrir. Silencioso y tolerante a fallos; la lista se genera leyendo en bloque.
+  try { if (getSS_().getSheetByName(CFG.SHEETS.REMINDER)) rebuildRemindersSheet_(getSS_()); } catch (e) {}
 }
 
 function openSidebar() {
@@ -184,8 +210,8 @@ function setBranding() {
 function setSetting_(key, value) {
   const sh = getSS_().getSheetByName(CFG.SHEETS.SETTINGS);
   const data = sh.getRange(2, 1, Math.max(sh.getLastRow() - 1, 1), 1).getValues();
-  for (let i = 0; i < data.length; i++) if (String(data[i][0]).trim() === key) { sh.getRange(i + 2, 2).setValue(value); return; }
-  sh.appendRow([key, value]);
+  for (let i = 0; i < data.length; i++) if (String(data[i][0]).trim() === key) { sh.getRange(i + 2, 2).setValue(value); invalidateSettingsCache_(); return; }
+  sh.appendRow([key, value]); invalidateSettingsCache_();
 }
 
 var _logoBlob = null, _logoLoaded = false, _logoUri = null;
@@ -361,7 +387,7 @@ function setup() {
   PropertiesService.getScriptProperties().setProperty('SS_ID', ss.getId());
   setupSettings_(ss); setupClientes_(ss); setupBorrowers_(ss); setupPayments_(ss); setupCuotas_(ss); setupSummary_(ss);
   setupAgreement_(ss); setupStatements_(ss); setupReminders_(ss); setupNew_(ss); setupPanel_(ss); setupStats_(ss); setupLate_(ss); setupCleared_(ss); setupRejected_(ss);
-  setupErrors_(ss); setupHelp_(ss); setupFirmas_(ss); setupDispositivos_(ss);
+  setupErrors_(ss); setupHelp_(ss); setupFirmas_(ss); setupDispositivos_(ss); setupFreezeRequests_(ss); setupPlanRequests_(ss);
   rebuildLateSheet_(ss);
   ensureTriggers_();
   const s1 = ss.getSheetByName('Sheet1') || ss.getSheetByName('Hoja 1');
@@ -394,6 +420,13 @@ function applyFeatureUpdates() {
       'Límite inicial (préstamo nuevo)', 'Incremento de graduación', 'Límite máximo por historial (graduación)',
       'Atraso que congela el nivel (días)', 'Atraso que reinicia el nivel (días)',
       'Días de gracia antes de mora', 'Tope de mora (% del total a devolver)',
+      // Congelamiento (Parte 2): tope de futuros préstamos para clientes que congelaron,
+      // y porcentaje que debe estar PAGADO antes de aprobar/congelar.
+      'Tope de préstamo tras congelamiento', 'Porcentaje a pagar para congelar (%)',
+      // Plan de pago (Acuerdo Transaccional): % inicial a pagar para activar el plan.
+      'Porcentaje inicial para plan de pago (%)',
+      // PRUEBA: redirigir TODOS los avisos de WhatsApp a un número/cliente (vacío = normal).
+      'WhatsApp de prueba (redirigir avisos)',
     ]);
     done.push(nAdded ? (nAdded + ' ajuste(s) nuevo(s) en «Configuración»') : '«Configuración» ya estaba al día');
     // Prefill del tope de concentración (10%) si quedó en blanco, para que sea visible/editable.
@@ -425,6 +458,19 @@ function applyFeatureUpdates() {
         setSettingValue_(stsh, 'Atraso que congela el nivel (días)', '3');
       if (stsh && String(getSetting_('Atraso que reinicia el nivel (días)') || '').trim() === '')
         setSettingValue_(stsh, 'Atraso que reinicia el nivel (días)', '15');
+      // Congelamiento (Parte 2): tope de futuros préstamos para clientes que congelaron un préstamo.
+      if (stsh && String(getSetting_('Tope de préstamo tras congelamiento') || '').trim() === '')
+        setSettingValue_(stsh, 'Tope de préstamo tras congelamiento', '20000');
+      // Porcentaje que debe estar pagado antes de aprobar/congelar (default 50%).
+      if (stsh && String(getSetting_('Porcentaje a pagar para congelar (%)') || '').trim() === '')
+        setSettingValue_(stsh, 'Porcentaje a pagar para congelar (%)', '50');
+      // Plan de pago: % inicial para activar (default 20%).
+      if (stsh && String(getSetting_('Porcentaje inicial para plan de pago (%)') || '').trim() === '')
+        setSettingValue_(stsh, 'Porcentaje inicial para plan de pago (%)', '20');
+      // PRUEBA — redirigir TODOS los avisos de WhatsApp al cliente Denis Bell (C-0028). Para
+      // volver al comportamiento normal (cada prestatario en su número), VACIÁ esta celda.
+      if (stsh && String(getSetting_('WhatsApp de prueba (redirigir avisos)') || '').trim() === '')
+        setSettingValue_(stsh, 'WhatsApp de prueba (redirigir avisos)', 'C-0028');
       // Mora: sin días de gracia y tope al 100% del TOTAL A DEVOLVER. Migra los valores
       // sembrados por versiones anteriores (3 / 50 y la clave "% del capital"); respeta
       // cualquier otro valor manual.
@@ -484,9 +530,59 @@ function applyFeatureUpdates() {
         if (genCol > 0) { psh.getRange(2, genCol, CFG.MAX_ROWS, 1).insertCheckboxes(); psh.setColumnWidth(genCol, 110); }
         const balF = []; for (let r = 2; r <= CFG.MAX_ROWS + 1; r++) balF.push([paymentBalanceFormula_(r)]);
         psh.getRange(2, PP.BALANCE, balF.length, 1).setFormulas(balF);
+        // Columna "Avisar pago 📲": enlaces de WhatsApp de aviso de pago (confirmación + saldo + vencimiento).
+        SpreadsheetApp.flush(); // que el "Saldo Posterior" ya esté calculado antes de leerlo
+        const nWa = fillPaymentWaLinks_(ss);
         done.push('casilla «Generar recibo» + «Saldo Posterior» vivo en «Pagos»');
+        done.push('columna «Avisar pago 📲» (WhatsApp) en «Pagos»' + (nWa ? (' · ' + nWa + ' fila(s)') : ''));
       }
     } catch (e) { logError_('applyFeatureUpdates:pagos', e); }
+    // 7b) Congelamiento de préstamos: columnas "Congelado el" (fecha) + "Días congelados" (auto)
+    //     en "Prestatarios" — permiten frenar la mora de un préstamo (menú ❄ Congelar / ☀ Descongelar).
+    //     Aditivo (apéndalas al final por nombre); todo se resuelve por encabezado.
+    try {
+      const bsf = ss.getSheetByName(CFG.SHEETS.BORROWERS);
+      if (bsf) {
+        const sinceCol = clientesHeaderCol_(bsf, 'Congelado el', true);
+        const daysCol = clientesHeaderCol_(bsf, 'Días congelados', true);
+        if (sinceCol > 0) {
+          bsf.getRange(2, sinceCol, CFG.MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd').setDataValidation(datePicker_());
+          bsf.setColumnWidth(sinceCol, 110);
+          bsf.getRange(1, sinceCol).setNote('CONGELAMIENTO. Fecha desde la que la mora deja de crecer. Vacío = NO congelado. Usá el menú ▸ ❄ Congelar / ☀ Descongelar. Con fecha, el Estado pasa a CONGELADO.');
+        }
+        if (daysCol > 0) {
+          bsf.getRange(2, daysCol, CFG.MAX_ROWS, 1).setNumberFormat('0');
+          bsf.setColumnWidth(daysCol, 110);
+          bsf.getRange(1, daysCol).setNote('Días de atraso ya saltados por descongelados previos (lo gestiona el menú ☀ Descongelar). No editar a mano.');
+        }
+        invalidateHeaderIndexCache_(); // para que rebuildLateSheet_ vea las columnas nuevas
+        done.push('columnas «Congelado el» + «Días congelados» en «Prestatarios»');
+      }
+    } catch (e) { logError_('applyFeatureUpdates:congelamiento', e); }
+    // 7c) Solicitudes de congelamiento (Parte 2): crea la hoja, la columna "Congelamientos" en
+    //     "Clientes" (historial para el tope de futuros préstamos) — todo aditivo/idempotente.
+    try {
+      setupFreezeRequests_(ss);
+      const csf = ss.getSheetByName(CFG.SHEETS.CLIENTS);
+      if (csf) { clientesHeaderCol_(csf, 'Congelamientos', true); invalidateClientesCache_(); }
+      done.push('hoja «Solicitudes de Congelamiento» + columna «Congelamientos» en «Clientes»');
+    } catch (e) { logError_('applyFeatureUpdates:congelamientoSolicitudes', e); }
+    // 7d) Plan de pago (Acuerdo Transaccional): columna "Plan desde" en "Prestatarios" + la hoja
+    //     "Solicitudes de Plan de Pago". Aditivo/idempotente.
+    try {
+      const bsp = ss.getSheetByName(CFG.SHEETS.BORROWERS);
+      if (bsp) {
+        const planCol = clientesHeaderCol_(bsp, 'Plan desde', true);
+        if (planCol > 0) {
+          bsp.getRange(2, planCol, CFG.MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd');
+          bsp.setColumnWidth(planCol, 110);
+          bsp.getRange(1, planCol).setNote('PLAN DE PAGO. Fecha del Acuerdo Transaccional firmado. Vacío = sin plan. Con fecha, el Estado pasa a EN PLAN y la mora queda suspendida. Lo gestiona el flujo de firma.');
+        }
+        invalidateHeaderIndexCache_();
+      }
+      setupPlanRequests_(ss);
+      done.push('columna «Plan desde» en «Prestatarios» + hoja «Solicitudes de Plan de Pago»');
+    } catch (e) { logError_('applyFeatureUpdates:planPago', e); }
     // 8) "Pagos Atrasados": columnas "Tope de mora" y "Plan de pago 📅 (3 cuotas)" — la
     //    reconstrucción reafirma los encabezados nuevos y recalcula el % del tope.
     try { rebuildLateSheet_(ss); done.push('columnas «Tope de mora» + «Plan de pago 📅» en «Pagos Atrasados»'); }
@@ -603,6 +699,7 @@ function setupSettings_(ss) {
   sh.getRange(2, 1, rows.length - 1, 1).setFontWeight('bold');
   sh.setColumnWidth(1, 260); sh.setColumnWidth(2, 500);
   sh.getRange(1, 1, rows.length, 2).setWrap(true); sh.setFrozenRows(1);
+  invalidateSettingsCache_(); // se reescribió toda la hoja de ajustes
 }
 
 function setupBorrowers_(ss) {
@@ -612,7 +709,7 @@ function setupBorrowers_(ss) {
     'Fecha del Préstamo', 'Fecha de Vencimiento', 'Interés', 'Total a Pagar',
     'Total Pagado', 'Saldo Pendiente (hoy)', 'Estado', 'Contrato PDF', 'Contrato Enviado', 'Último Aviso',
     'Estado de Firma', 'Fecha de Firma', 'Contrato Firmado (PDF)', 'Eliminar', 'Enviar recibo desembolso', 'Préstamos (de ' + MAX_LOANS_PER_CLIENT + ')',
-    'Recargo por Mora (acum.)', 'Mora (ajuste)', 'Saldo con Mora', 'Suma de cuotas'];
+    'Recargo por Mora (acum.)', 'Mora (ajuste)', 'Saldo con Mora', 'Suma de cuotas', 'Congelado el', 'Días congelados', 'Plan desde'];
   sh.getRange(1, 1, 1, H.length).setValues([H]).setFontWeight('bold').setBackground('#1c4587').setFontColor('#fff').setWrap(true);
   sh.getRange(1, PB.DELETE).setBackground('#990000').setNote('Tildá para ELIMINAR ese préstamo (borra la fila; recuperable con el historial de versiones).');
   sh.getRange(1, PB.SEND_DISB).setNote('Tildá para enviar el recibo de DESEMBOLSO (entrega de fondos) al prestatario. Sólo se envía si el contrato está FIRMADO. Se destilda solo.');
@@ -622,6 +719,9 @@ function setupBorrowers_(ss) {
   sh.getRange(1, PB.MORA_ADJ).setNote('AJUSTE MANUAL de la mora de ESTE préstamo. Dejala VACÍA para el cálculo automático. Escribí 0 para CONDONAR (eximir) la mora, o un importe para FIJAR un recargo distinto. Afecta el "Recargo por Mora", el "Saldo con Mora", los avisos y el estado de cuenta.');
   sh.getRange(1, PB.BALANCE_MORA).setNote('Monto a pagar HOY = Saldo Pendiente + Recargo por Mora (ya con el ajuste manual, si lo hay).');
   sh.getRange(1, PB.TOTAL_PLAN).setNote('Total del PLAN a pagar, incluyendo la mora congelada (para préstamos reestructurados = total del plan de cuotas). Es la suma de "Monto Cuota" de "Cuotas"; NO cambia con los pagos. "Saldo con Mora" muestra lo que aún falta pagar.');
+  sh.getRange(1, PB.FROZEN_SINCE).setNote('CONGELAMIENTO. Fecha desde la que la mora deja de crecer. Vacío = préstamo NO congelado. Usá el menú ▸ ❄ Congelar / ☀ Descongelar (no hace falta editar a mano). Con fecha, el Estado pasa a CONGELADO.');
+  sh.getRange(1, PB.FROZEN_DAYS).setNote('Días de atraso ya SALTADOS por descongelados previos (gestionado por el menú ☀ Descongelar). Se descuentan del atraso para que el período congelado nunca cobre mora. No editar a mano.');
+  sh.getRange(1, PB.PLAN_SINCE).setNote('PLAN DE PAGO (Acuerdo Transaccional). Fecha en que se firmó el acuerdo. Vacío = sin plan. Con fecha, el Estado pasa a EN PLAN y la mora queda suspendida (Mora (ajuste)=0). Lo gestiona el flujo de firma; no editar a mano.');
   sh.setFrozenRows(1);
   writeBorrowerFormulas_(sh, CFG.MAX_ROWS);
   formatBorrowerColumns_(sh, CFG.MAX_ROWS);
@@ -636,7 +736,7 @@ function setupBorrowers_(ss) {
  */
 function writeBorrowerCapitalBanner_(sh) {
   try {
-    const ID = colL_(PB.LOAN_ID), CAP = colL_(PB.PRINCIPAL), PA = colL_(PB.PAID), col = PB.TOTAL_PLAN + 1; // 1ª columna libre tras las columnas de datos
+    const ID = colL_(PB.LOAN_ID), CAP = colL_(PB.PRINCIPAL), PA = colL_(PB.PAID), col = PB.PLAN_SINCE + 1; // 1ª columna libre tras las columnas de datos
     if (sh.getMaxColumns() < col + 4) sh.insertColumnsAfter(sh.getMaxColumns(), col + 4 - sh.getMaxColumns()); // asegura lugar para el banner
     sh.getRange(1, col, 1, 4).breakApart();
     const banner = sh.getRange(1, col, 1, 4).merge();
@@ -785,13 +885,15 @@ function signingLinkFormula_(r, A, firmaL, base) {
  * ingresar el pago (en la hoja "Pagos" o desde el panel).
  */
 function borrowerStateFormula_(r) {
-  const A = colL_(PB.LOAN_ID), TO = colL_(PB.TOTAL), PA = colL_(PB.PAID), VE = colL_(PB.DUE), BM = colL_(PB.BALANCE_MORA), PL = colL_(PB.TOTAL_PLAN);
+  const A = colL_(PB.LOAN_ID), TO = colL_(PB.TOTAL), PA = colL_(PB.PAID), VE = colL_(PB.DUE), BM = colL_(PB.BALANCE_MORA), PL = colL_(PB.TOTAL_PLAN), FS = colL_(PB.FROZEN_SINCE), PS = colL_(PB.PLAN_SINCE);
   // PAGADO sólo cuando el monto a pagar CON MORA ("Saldo con Mora") llega a 0: un préstamo
   // pagado tarde con recargo pendiente NO figura como PAGADO hasta saldar también la mora.
-  // EN PLAN: préstamo con plan de pago (reestructurado) al día — la "Suma de cuotas" supera el
-  // "Total a Pagar" porque incorpora la mora congelada. Se distingue del ACTIVO normal.
+  // CONGELADO: si "Congelado el" tiene fecha y no está saldado, el préstamo está congelado (la
+  // mora dejó de crecer) — prevalece sobre VENCIDO/ACTIVO para que se vea de un vistazo.
+  // EN PLAN (flag): si "Plan desde" tiene fecha → plan de pago (Acuerdo) vigente, prevalece sobre VENCIDO.
+  // EN PLAN (suma): préstamo reestructurado al día — la "Suma de cuotas" supera el "Total a Pagar".
   return `=IF($${A}${r}="","",IF(AND(ISNUMBER($${TO}${r}),ISNUMBER($${PA}${r}),$${PA}${r}>=$${TO}${r}-0.009,N($${BM}${r})<=0.009),"${ST.PAID}",` +
-    `IF(OR(${cuotaVencidaExpr_('$' + A + r)},AND($${VE}${r}<>"",TODAY()>$${VE}${r})),"${ST.OVERDUE}",IF(OR($${TO}${r}="",$${PA}${r}=""),"…",IF(N($${PL}${r})>N($${TO}${r})+0.009,"${ST.PLAN}","${ST.ACTIVE}")))))`;
+    `IF($${FS}${r}<>"","${ST.FROZEN}",IF($${PS}${r}<>"","${ST.PLAN}",IF(OR(${cuotaVencidaExpr_('$' + A + r)},AND($${VE}${r}<>"",TODAY()>$${VE}${r})),"${ST.OVERDUE}",IF(OR($${TO}${r}="",$${PA}${r}=""),"…",IF(N($${PL}${r})>N($${TO}${r})+0.009,"${ST.PLAN}","${ST.ACTIVE}")))))))`;
 }
 /** Sub-expresión de fórmula: ¿el préstamo (celda con su ID) tiene alguna cuota VENCIDA en "Cuotas"? */
 function cuotaVencidaExpr_(loanIdCellA1) {
@@ -807,6 +909,11 @@ function formatBorrowerColumns_(sh, N) {
   sh.getRange(2, PB.INTEREST, N, 4).setNumberFormat(CFG.CURRENCY_FMT); // Interés..Saldo
   sh.getRange(2, PB.NOTICE, N, 1).setNumberFormat('yyyy-mm-dd');
   sh.getRange(2, PB.SIGN_DATE, N, 1).setNumberFormat('yyyy-mm-dd hh:mm');
+  // Congelamiento: "Congelado el" (fecha, con selector) + "Días congelados" (entero, auto).
+  sh.getRange(2, PB.FROZEN_SINCE, N, 1).setNumberFormat('yyyy-mm-dd').setDataValidation(datePicker_());
+  sh.getRange(2, PB.FROZEN_DAYS, N, 1).setNumberFormat('0');
+  sh.getRange(2, PB.PLAN_SINCE, N, 1).setNumberFormat('yyyy-mm-dd'); // Plan desde (gestionado por el flujo de firma)
+  sh.setColumnWidth(PB.FROZEN_SINCE, 110); sh.setColumnWidth(PB.FROZEN_DAYS, 110); sh.setColumnWidth(PB.PLAN_SINCE, 110);
   // allowInvalid(true): la lista es una AYUDA; no bloquea escrituras del script
   // ni migraciones (el Plazo heredado puede venir como número 1/2/15).
   sh.getRange(2, PB.TERM, N, 1).setDataValidation(SpreadsheetApp.newDataValidation()
@@ -840,7 +947,7 @@ function formatBorrowerColumns_(sh, N) {
 function borrowerFormatRules_(sh) {
   const N = CFG.MAX_ROWS, HI = headerIndex_(sh);
   // Asegura columnas para el banner "Capital disponible" (5 celdas tras la última de datos).
-  const needCols = PB.TOTAL_PLAN + 5;
+  const needCols = PB.PLAN_SINCE + 5;
   if (sh.getMaxColumns() < needCols) sh.insertColumnsAfter(sh.getMaxColumns(), needCols - sh.getMaxColumns());
   const estC = colByAny_(HI, ['Estado']) || PB.STATE;
   const signC = colByAny_(HI, ['Estado de Firma']) || PB.SIGN_STATUS;
@@ -850,7 +957,7 @@ function borrowerFormatRules_(sh) {
   const signRange = sh.getRange(2, signC, N, 1);      // fuera de la franja de Estado (sin conflicto)
   const countRange = sh.getRange(2, countC, N, 1);
   // Banner "Capital disponible" (fila 1, a partir de la 1.ª columna libre tras los datos).
-  const bannerRange = sh.getRange(1, PB.TOTAL_PLAN + 1, 1, 5);
+  const bannerRange = sh.getRange(1, PB.PLAN_SINCE + 1, 1, 5);
   // Regla por fila: colorea toda la franja según el valor del Estado (col. absoluta, fila relativa).
   const byState = (state, bg, fg) => SpreadsheetApp.newConditionalFormatRule()
     .whenFormulaSatisfied('=$' + estL + '2="' + state + '"')
@@ -859,6 +966,7 @@ function borrowerFormatRules_(sh) {
     byState(ST.PAID, '#d9ead3', '#274e13'),
     byState(ST.CLEARED, '#d9ead3', '#274e13'),
     byState(ST.OVERDUE, '#f4cccc', '#990000'),
+    byState(ST.FROZEN, '#d0e0e3', '#0c343d'),  // CONGELADO (mora detenida): hielo/cian — distinto del ACTIVO
     byState(ST.PLAN, '#d9d2e9', '#351c75'),   // EN PLAN (reestructurado al día): violeta
     byState(ST.ACTIVE, '#e8f0fe', '#1c4587'),
     cc_(signRange, SIGN.PENDING, '#f4cccc'),
@@ -1155,7 +1263,7 @@ function setupPayments_(ss) {
   // Modelo normalizado: la identidad vive en "Clientes". Nombre y DNI se muestran
   // aquí por comodidad (se autocompletan al elegir el ID Préstamo); no son la
   // fuente de verdad. El ID Pago se autogenera (P-0001, P-0002, …).
-  const H = ['ID Pago', 'ID Préstamo', 'Fecha de Pago', 'Monto Pagado', 'Saldo Posterior', 'Recibo Enviado', 'Nombre', 'DNI', 'Enviar recibo', 'Generar recibo'];
+  const H = ['ID Pago', 'ID Préstamo', 'Fecha de Pago', 'Monto Pagado', 'Saldo Posterior', 'Recibo Enviado', 'Nombre', 'DNI', 'Enviar recibo', 'Generar recibo', 'Avisar pago 📲'];
   sh.getRange(1, 1, 1, H.length).setValues([H]).setFontWeight('bold').setBackground('#38761d').setFontColor('#fff');
   sh.setFrozenRows(1);
   sh.getRange(2, PP.DATE, CFG.MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd')
@@ -1166,7 +1274,8 @@ function setupPayments_(ss) {
   // "Saldo Posterior" VIVO: lo que falta pagar del préstamo tras cada pago, INCLUIDA la mora.
   const balF = []; for (let r = 2; r <= CFG.MAX_ROWS + 1; r++) balF.push([paymentBalanceFormula_(r)]);
   sh.getRange(2, PP.BALANCE, balF.length, 1).setFormulas(balF);
-  [140, 90, 110, 120, 130, 150, 200, 110, 110, 110].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  [140, 90, 110, 120, 130, 150, 200, 110, 110, 110, 130].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  sh.getRange(1, PP.WA_PAYMENT).setNote('Enlace de WhatsApp con el AVISO DE PAGO listo (confirma el pago recibido, el saldo pendiente y el vencimiento). Se arma solo al registrar el pago; "sin teléfono" si el cliente no tiene un número válido.');
   sh.getRange(1, PP.SEND_RECEIPT).setNote('Tildá para ENVIAR por correo el recibo de pago de esa fila. Se destilda solo y deja el enlace en "Recibo Enviado". (Si el prestatario no tiene correo, usá "Generar recibo".)');
   sh.getRange(1, PP.GEN_RECEIPT).setNote('Tildá para GENERAR el PDF del recibo (con monto pagado y saldo pendiente) sin enviar correo. Se destilda solo y deja el enlace en "Recibo Enviado".');
   sh.getRange(1, PP.BALANCE).setNote('Lo que falta pagar del préstamo después de este pago, INCLUIDA la mora (= "Saldo con Mora" del prestatario en el último pago). Se calcula solo.');
@@ -1447,6 +1556,19 @@ function setupStatements_(ss) {
   sh.getRange('B4').setDataValidation(SpreadsheetApp.newDataValidation()
     .requireValueInRange(ss.getSheetByName(B).getRange('A2:A' + (CFG.MAX_ROWS + 1)), true).setAllowInvalid(false).build())
     .setBackground('#fff2cc').setFontWeight('bold');
+  // Días de Atraso congelado-aware: si "Congelado el" / "Días congelados" existen en "Prestatarios"
+  // (resueltos por encabezado, posición variable en hojas migradas), se recorta HOY a la fecha de
+  // congelamiento y se descuentan los días ya saltados; si no, se usa la fórmula clásica.
+  const bsSheet = ss.getSheetByName(B), Hb = bsSheet ? headerIndex_(bsSheet) : {};
+  const congIdx = colByAny_(Hb, ['Congelado el']), fdIdx = colByAny_(Hb, ['Días congelados', 'Dias congelados']);
+  let diasFormula;
+  if (congIdx && fdIdx) {
+    const congRef = `N(VLOOKUP($B$4,'${B}'!$A:$${colL_(congIdx)},${congIdx},FALSE))`;
+    const fdRef = `N(VLOOKUP($B$4,'${B}'!$A:$${colL_(fdIdx)},${fdIdx},FALSE))`;
+    diasFormula = `=IFERROR(LET(id,$B$4,tot,$B$10,due,VLOOKUP($B$4,'${B}'!$A:$I,9,FALSE),cong,${congRef},fdays,${fdRef},IF(due="","",IF($B$14>0.009,MAX(0,INT(IF(cong>0,MIN(TODAY(),cong),TODAY()))-INT(due)-fdays),LET(d,FILTER('${P}'!$C$2:$C,'${P}'!$B$2:$B=id),frz,MIN(MAP(d,LAMBDA(x,IF(SUMIFS('${P}'!$D:$D,'${P}'!$B:$B,id,'${P}'!$C:$C,"<="&x)>=tot-0.009,x,"")))),MAX(0,INT(frz)-INT(due)-fdays))))),"")`;
+  } else {
+    diasFormula = `=IFERROR(LET(id,$B$4,tot,$B$10,due,VLOOKUP($B$4,'${B}'!$A:$I,9,FALSE),IF(due="","",IF($B$14>0.009,MAX(0,INT(TODAY())-INT(due)),LET(d,FILTER('${P}'!$C$2:$C,'${P}'!$B$2:$B=id),frz,MIN(MAP(d,LAMBDA(x,IF(SUMIFS('${P}'!$D:$D,'${P}'!$B:$B,id,'${P}'!$C:$C,"<="&x)>=tot-0.009,x,"")))),MAX(0,INT(frz)-INT(due)))))),"")`;
+  }
   const rows = [
     ['Prestatario', `=IFERROR(VLOOKUP(${cId},'${C}'!$A:$B,2,FALSE),"")`],     // 6
     ['DNI', `=IFERROR(VLOOKUP(${cId},'${C}'!$A:$D,4,FALSE),"")`],             // 7
@@ -1458,7 +1580,7 @@ function setupStatements_(ss) {
     // Vencimiento; si está saldado, los días entre el Vencimiento y el pago que CUBRIÓ EL TOTAL
     // BASE (no el último pago: los posteriores sólo cubren mora). El acumulado por fecha se arma
     // con MAP+SUMIFS sobre los pagos del préstamo. Espeja computeOutstanding_ / chargedMora_.
-    ['Días de Atraso', `=IFERROR(LET(id,$B$4,tot,$B$10,due,VLOOKUP($B$4,'${B}'!$A:$I,9,FALSE),IF(due="","",IF($B$14>0.009,MAX(0,INT(TODAY())-INT(due)),LET(d,FILTER('${P}'!$C$2:$C,'${P}'!$B$2:$B=id),frz,MIN(MAP(d,LAMBDA(x,IF(SUMIFS('${P}'!$D:$D,'${P}'!$B:$B,id,'${P}'!$C:$C,"<="&x)>=tot-0.009,x,"")))),MAX(0,INT(frz)-INT(due)))))),"")`], // 12
+    ['Días de Atraso', diasFormula], // 12
     // Recargo por mora = días de atraso MENOS la gracia, × recargo diario × Total, con
     // TOPE = (Tope de mora %) × Total a Pagar ($B$10). Espeja computeOutstanding_ (gracia + tope).
     ['Recargo por Mora (acum.)', `=IFERROR(IF(OR($B$12="",$B$12<=0),0,MIN(MAX(0,$B$12-IFERROR(VLOOKUP("Días de gracia antes de mora",'${CFG.SHEETS.SETTINGS}'!$A:$B,2,FALSE),0))*$B$10*IFERROR(VLOOKUP("Recargo por Mora diario (%)",'${CFG.SHEETS.SETTINGS}'!$A:$B,2,FALSE)/100,0.05),$B$10*IFERROR(VLOOKUP("Tope de mora (% del total a devolver)",'${CFG.SHEETS.SETTINGS}'!$A:$B,2,FALSE)/100,1))),"")`], // 13
@@ -1547,8 +1669,8 @@ function statementStudioSend_(sh) {
 /* ===================== ESTUDIO DE RECORDATORIOS (lista) ===================== */
 const REM_HEADERS = ['ID Préstamo', 'Prestatario', 'Fecha de Vencimiento', 'Días (− = atraso)',
   'Estado', 'Total a Pagar', 'Saldo Pendiente', 'Recargo por Mora diario', 'Correo',
-  'Generar PDF 👁', 'Enviar ✉', 'Último PDF'];
-const REM_GEN_COL = 10, REM_SEND_COL = 11, REM_LINK_COL = 12;
+  'Generar PDF 👁', 'Enviar ✉', 'Último PDF', 'Recordar por WhatsApp', 'Pedir congelamiento 📲', 'Pedir plan de pago 📋'];
+const REM_GEN_COL = 10, REM_SEND_COL = 11, REM_LINK_COL = 12, REM_WA_COL = 13, REM_FREEZE_COL = 14, REM_PLANREQ_COL = 15;
 const REM_HEADER_ROW = 3, REM_DATA_START = 4; // fila 1 título, fila 2 control, fila 3 encabezados
 
 /** Construye la estructura (título, casilla de refresco y encabezados) y llena la lista. */
@@ -1556,14 +1678,14 @@ function setupReminders_(ss) {
   const sh = getOrCreate_(ss, CFG.SHEETS.REMINDER); sh.clear();
   sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).clearDataValidations();
   sh.getRange('A1').setValue('ESTUDIO DE RECORDATORIOS DE PAGO').setFontSize(16).setFontWeight('bold').setFontColor('#b45f06');
-  sh.getRange('C1').setValue('Préstamos vencidos (rojo) o próximos a vencer (amarillo). Tilde 👁 para generar el PDF o ✉ para enviarlo por correo.').setFontColor('#666').setWrap(true);
+  sh.getRange('C1').setValue('Préstamos vencidos (rojo) o próximos a vencer (amarillo). Tilde 👁 para generar el PDF o ✉ para enviarlo por correo; 📲 abre WhatsApp con el recordatorio listo.').setFontColor('#666').setWrap(true);
   sh.getRange('A2').setValue('🔄 Actualizar lista →').setFontWeight('bold').setBackground('#cfe2f3');
   sh.getRange('B2').setDataValidation(SpreadsheetApp.newDataValidation().requireCheckbox().build());
   sh.getRange('A1:A2').setWrap(true);
   sh.getRange(REM_HEADER_ROW, 1, 1, REM_HEADERS.length).setValues([REM_HEADERS])
     .setFontWeight('bold').setBackground('#b45f06').setFontColor('#fff').setWrap(true);
   sh.setFrozenRows(REM_HEADER_ROW);
-  [110, 180, 130, 120, 110, 120, 130, 150, 210, 110, 90, 130].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  [110, 180, 130, 120, 110, 120, 130, 150, 210, 110, 90, 130, 170].forEach((w, i) => sh.setColumnWidth(i + 1, w));
   sh.getRange(REM_HEADER_ROW, 1).setNote('Se actualiza con "⑤ Actualizar", con la casilla 🔄 y automáticamente cada día. Incluye préstamos vencidos o que vencen dentro de los "Días de aviso de recordatorio" (Configuración, por defecto 7).');
   rebuildRemindersSheet_(ss);
   return sh;
@@ -1587,7 +1709,7 @@ function rebuildRemindersSheet_(ss) {
     try { setSetting_('Días de aviso de recordatorio', '7'); } catch (e) { logError_('rebuildRemindersSheet_:setting', e); }
   }
   const noticeDays = Number(getSetting_('Días de aviso de recordatorio')) || 7;
-  const feePct = lateFeeRate_(), rows = [], overdueFlags = [];
+  const feePct = lateFeeRate_(), capFrac = moraCapFrac_(), rows = [], overdueFlags = [], waCells = [], freezeCells = [], planCells = [];
   // Cuotas en memoria: recordamos por CUOTA (la próxima impaga), no sólo por préstamo.
   const cs = ss.getSheetByName(CFG.SHEETS.INSTALLMENTS), cuotasByLoan = {};
   if (cs && cs.getLastRow() >= 2) {
@@ -1600,14 +1722,43 @@ function rebuildRemindersSheet_(ss) {
     });
     Object.keys(cuotasByLoan).forEach(k => cuotasByLoan[k].sort((a, b) => a.num - b.num));
   }
-  for (let row = 2; row <= last; row++) {
-    const loan = readLoan_(bs, row);
-    if (!loan.loanId || !(loan.dueDate instanceof Date)) continue;
+  // Lectura EN BLOQUE de "Prestatarios" (una sola vez) + clientes cacheados: evita un getRange por
+  // fila (antes: readLoan_ + getValue del saldo por cada préstamo). Columnas por nombre de
+  // encabezado con los índices PB de respaldo (mismo criterio que readLoan_).
+  const H = headerIndex_(bs);
+  const col = (names, fb) => colByAny_(H, names) || fb;
+  const idC = col(['ID Préstamo', 'ID Prestamo'], PB.LOAN_ID);
+  const cliC = col(['ID Cliente'], PB.CLIENT_ID);
+  const capC = col(['Capital'], PB.PRINCIPAL);
+  const plzC = col(['Plazo (días)', 'Plazo (dias)', 'Plazo (meses)', 'Plazo'], PB.TERM);
+  const tasC = col(['Tasa'], PB.RATE);
+  const fecC = col(['Fecha del Préstamo', 'Fecha Préstamo', 'Fecha de Préstamo', 'Fecha Prestamo'], PB.LOAN_DATE);
+  const venC = col(['Fecha de Vencimiento', 'Vencimiento'], PB.DUE);
+  const intC = col(['Interés', 'Interes'], PB.INTEREST);
+  const totC = col(['Total a Pagar', 'Total a pagar'], PB.TOTAL);
+  const balC = PB.BALANCE;
+  const maxCol = Math.max(idC, cliC, capC, plzC, tasC, fecC, venC, intC, totC, balC);
+  const bdata = bs.getRange(2, 1, last - 1, maxCol).getValues();
+  for (let i = 0; i < bdata.length; i++) {
+    const v = bdata[i], g = c => v[c - 1];
+    const loanId = String(g(idC) || '').trim(); if (!loanId) continue;
+    // Vencimiento, tasa, interés y total con el MISMO respaldo que readLoan_ (se calculan si la
+    // celda está en blanco, p. ej. préstamo recién aprobado sin fórmulas todavía).
+    const term = Number(g(plzC)) || 0;
+    const ld = g(fecC) instanceof Date ? g(fecC) : new Date(g(fecC));
+    const loanDue = g(venC) instanceof Date ? g(venC) : dueDateForTerm_(term || 1, ld);
+    if (!(loanDue instanceof Date) || isNaN(loanDue.getTime())) continue;
+    const principal = Number(g(capC)) || 0;
+    let rate = Number(g(tasC)) || 0; if (!rate) rate = loanRateForTerm_(term);
+    let interest = Number(g(intC)) || 0; if (!interest) interest = round2_(principal * rate);
+    let loanTotal = Number(g(totC)) || 0; if (!loanTotal) loanTotal = round2_(principal + interest);
+    const cli = getClienteById_(String(g(cliC) || '').trim()) || {};
+    const loan = { loanId: loanId, name: cli.name || '', email: cli.email || '', phone: cli.phone || '', dueDate: loanDue, totalDue: loanTotal };
     // Base de aviso: si el préstamo tiene cronograma, se usa la PRÓXIMA cuota impaga
     // (fecha, monto y saldo de esa cuota); si no, el vencimiento y saldo del préstamo.
-    let dueDate = loan.dueDate, totalDue = loan.totalDue, cuotaTxt = '';
-    let out = Number(bs.getRange(row, PB.BALANCE).getValue()) || 0;
-    const qs = cuotasByLoan[loan.loanId];
+    let dueDate = loanDue, totalDue = loanTotal, cuotaTxt = '';
+    let out = Number(g(balC)) || 0;
+    const qs = cuotasByLoan[loanId];
     if (qs && qs.length) {
       const nextQ = qs.filter(q => q.saldo > 0.009 && q.due instanceof Date)[0];
       if (!nextQ) continue; // todas las cuotas pagadas
@@ -1619,9 +1770,17 @@ function rebuildRemindersSheet_(ss) {
     if (daysUntil > noticeDays) continue; // ni vencido ni próximo
     const overdue = daysUntil < 0;
     const feeDay = round2_(totalDue * feePct);
-    rows.push([loan.loanId, loan.name + cuotaTxt, dueDate, daysUntil, overdue ? ST.OVERDUE : 'PRÓXIMO',
-      totalDue, out, feeDay, loan.email, false, false, '']);
+    rows.push([loanId, loan.name + cuotaTxt, dueDate, daysUntil, overdue ? ST.OVERDUE : 'PRÓXIMO',
+      totalDue, out, feeDay, loan.email, false, false, '', '', '', '']);
     overdueFlags.push(overdue);
+    // Enlace de WhatsApp con el recordatorio listo (según el saldo pendiente de esta fila).
+    waCells.push(remWhatsappFormula_(loan, dueDate, out, daysUntil));
+    // Enlace al formulario de congelamiento SOLO para filas vencidas (daysUntil < 0).
+    freezeCells.push(overdue ? (freezeFormWaFormula_(loan) || '') : '');
+    // Enlace al formulario de PLAN DE PAGO: sólo cuando (aprox.) llegó al 100% de mora. El formulario
+    // vuelve a verificar la elegibilidad exacta. atCap ≈ días de atraso × recargo diario ≥ tope.
+    const atCapApprox = overdue && ((-daysUntil) * feePct >= capFrac - 1e-9);
+    planCells.push(atCapApprox ? (planFormWaFormula_(loan) || '') : '');
   }
   // ordena: más atrasados primero (daysUntil ascendente)
   const order = rows.map((r, i) => i).sort((a, b) => rows[a][3] - rows[b][3]);
@@ -1638,6 +1797,18 @@ function rebuildRemindersSheet_(ss) {
   for (let i = 0; i < n; i++) {
     sh.getRange(REM_DATA_START + i, 1, 1, 9).setBackground(sortedFlags[i] ? '#f4cccc' : '#fff2cc');
   }
+  // Columna "Recordar por WhatsApp": enlace clicable por fila; "sin teléfono" si no hay número válido.
+  const sortedWa = order.map(i => waCells[i]);
+  sh.getRange(REM_DATA_START, REM_WA_COL, n, 1).setFormulas(sortedWa.map(x => [x || '']));
+  sortedWa.forEach((x, i) => {
+    if (!x) sh.getRange(REM_DATA_START + i, REM_WA_COL).setValue('sin teléfono').setFontColor('#999');
+  });
+  // Columna "Pedir congelamiento 📲": enlace al formulario, sólo en filas vencidas.
+  const sortedFreeze = order.map(i => freezeCells[i]);
+  sh.getRange(REM_DATA_START, REM_FREEZE_COL, n, 1).setFormulas(sortedFreeze.map(x => [x || '']));
+  // Columna "Pedir plan de pago 📋": enlace al formulario, sólo cuando (aprox.) llegó al 100% de mora.
+  const sortedPlan = order.map(i => planCells[i]);
+  sh.getRange(REM_DATA_START, REM_PLANREQ_COL, n, 1).setFormulas(sortedPlan.map(x => [x || '']));
 }
 
 /* ---- Acciones por renglón en el Estudio de Recordatorios ---- */
@@ -1659,6 +1830,216 @@ function reminderRowSend_(sh, row) { // ✉ genera el PDF y lo envía por correo
     sh.getRange(row, REM_LINK_COL).setFormula('=HYPERLINK("' + file.getUrl() + '","👁 Abrir PDF")');
     getSS_().toast('Recordatorio enviado a ' + loan.email, 'Recordatorio', 5);
   } catch (err) { logError_('reminderRowSend_', err); getSS_().toast(err.message || String(err), '⚠ No se pudo enviar', 8); }
+}
+
+/** Número de WhatsApp de REDIRECCIÓN (modo prueba): si en «Configuración» está cargado
+ *  «WhatsApp de prueba (redirigir avisos)», TODOS los avisos de WhatsApp (aviso de pago,
+ *  recordatorios, congelamiento, plan) se arman hacia ese número en vez del teléfono de
+ *  cada prestatario. El valor puede ser un ID de cliente (p. ej. «C-0028» = Denis Bell) o
+ *  un número suelto. Dejá la celda VACÍA para volver al comportamiento normal (cada cliente
+ *  recibe en su propio número). Devuelve el número listo para wa.me (549…) o '' si no aplica. */
+function waRedirectNumber_() {
+  const raw = String(getSetting_('WhatsApp de prueba (redirigir avisos)') || '').trim();
+  if (!raw) return '';
+  let phone = raw;
+  if (/^C-?\d+/i.test(raw)) {                                   // es un ID de cliente → resolver su teléfono
+    const id = raw.toUpperCase().replace(/^C-?/, 'C-');
+    const c = (typeof getClienteById_ === 'function') ? getClienteById_(id) : null;
+    phone = (c && c.phone) ? c.phone : '';
+  }
+  const e = (typeof normPhoneE164_ === 'function') ? normPhoneE164_(phone) : '';
+  return e ? '549' + e.slice(3) : '';
+}
+
+/** Número para wa.me de un móvil argentino: 549 + área + número (sin el «+»). '' si no es válido.
+ *  normPhoneE164_ devuelve «+54» + 10 dígitos (área+número, SIN el 9 móvil); wa.me lo necesita CON el 9.
+ *  Si hay un número de REDIRECCIÓN de prueba configurado, se usa ESE para todos los avisos. */
+function waNumberAR_(phone) {
+  const redir = waRedirectNumber_();
+  if (redir) return redir;
+  const e = (typeof normPhoneE164_ === 'function') ? normPhoneE164_(phone) : '';
+  return e ? '549' + e.slice(3) : '';
+}
+
+/** Fórmula «=HYPERLINK» que abre WhatsApp con un recordatorio breve (tono informal) para la fila.
+ *  Devuelve '' si el prestatario no tiene un teléfono válido (la celda mostrará «sin teléfono»). */
+function remWhatsappFormula_(loan, dueDate, amount, daysUntil) {
+  const num = waNumberAR_(loan && loan.phone);
+  if (!num) return '';
+  const name = String((loan && loan.name) || '').trim() || 'cliente';
+  const fecha = (dueDate instanceof Date) ? Utilities.formatDate(dueDate, Session.getScriptTimeZone(), 'dd/MM/yyyy') : '';
+  const monto = fmtMoney_(amount), empresa = companyName_();
+  let msg;
+  if (daysUntil > 0)      msg = 'Hola ' + name + ' 👋 Te recordamos que tu préstamo vence el ' + fecha + '. Total a pagar: ' + monto + '. ¡Gracias! ' + empresa;
+  else if (daysUntil === 0) msg = 'Hola ' + name + ' 👋 Tu préstamo vence hoy (' + fecha + '). Total a pagar: ' + monto + '. ¡Gracias! ' + empresa;
+  else                    msg = 'Hola ' + name + ' 👋 Tu préstamo venció el ' + fecha + ' (hace ' + Math.abs(daysUntil) + ' día(s)). Saldo a pagar: ' + monto + '. Por favor regularizá tu pago. ' + empresa;
+  return '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📲 WhatsApp")';
+}
+
+/** Fórmula «=HYPERLINK» que abre WhatsApp al prestatario con el ENLACE al formulario de
+ *  congelamiento (?page=congelar&loan=…). '' si no hay teléfono válido o la app web no está publicada. */
+function freezeFormWaFormula_(loan) {
+  const num = waNumberAR_(loan && loan.phone);
+  const base = webAppBaseUrl_();
+  if (!num || !base) return '';
+  const name = String((loan && loan.name) || '').trim() || 'cliente';
+  const url = base + '?page=congelar&loan=' + encodeURIComponent(loan.loanId);
+  const msg = 'Hola ' + name + ' 👋 Tu préstamo ' + loan.loanId + ' está vencido. Si no podés pagar ahora, ' +
+    'podés pedir CONGELAR la mora (que deje de crecer) acá, con un plazo de hasta 2 semanas: ' + url + ' — ' + companyName_();
+  return '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📲 Congelar")';
+}
+
+/** Fórmula «=HYPERLINK» que abre WhatsApp con el ENLACE al formulario de PLAN DE PAGO (?page=plan).
+ *  Sólo tiene sentido en préstamos al 100% de mora. '' si no hay teléfono o app web publicada. */
+function planFormWaFormula_(loan) {
+  const num = waNumberAR_(loan && loan.phone);
+  const base = webAppBaseUrl_();
+  if (!num || !base) return '';
+  const name = String((loan && loan.name) || '').trim() || 'cliente';
+  const url = base + '?page=plan&loan=' + encodeURIComponent(loan.loanId);
+  const msg = 'Hola ' + name + ' 👋 Tu préstamo ' + loan.loanId + ' llegó al tope de mora. Podés pedir un ' +
+    'PLAN DE PAGO (pago único, 4 o 6 cuotas) y frenar la mora acá: ' + url + ' — ' + companyName_();
+  return '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📋 Plan de pago")';
+}
+
+/** Fecha de "Plan desde" de un préstamo (Acuerdo de plan de pago vigente) o null. Espeja frozenInfo_. */
+function loanPlanSince_(loanId) {
+  const sh = getSS_().getSheetByName(CFG.SHEETS.BORROWERS), last = sh ? sh.getLastRow() : 0;
+  if (last < 2) return null;
+  const H = headerIndex_(sh);
+  const idC = colByAny_(H, ['ID Préstamo', 'ID Prestamo']) || PB.LOAN_ID;
+  const psC = colByAny_(H, ['Plan desde']);
+  if (!psC) return null;
+  const id = String(loanId).trim();
+  const data = sh.getRange(2, 1, last - 1, Math.max(idC, psC)).getValues();
+  for (let i = 0; i < data.length; i++) if (String(data[i][idC - 1]).trim() === id) {
+    const v = data[i][psC - 1]; return v instanceof Date ? v : null;
+  }
+  return null;
+}
+
+/** Estado completo de un préstamo para el aviso de pago por WhatsApp. Reúne saldo base, mora (0 si
+ *  está en plan por "Mora (ajuste)"=0; congelada si está congelado), congelamiento, plan, cuotas y —
+ *  si quedó saldado— el límite vigente del cliente para un nuevo préstamo (graduación V-32). */
+function loanWaStatus_(loan) {
+  const now = new Date();
+  const totalDue = round2_(Number(loan.totalDue) || 0);
+  const pays = (typeof loanPayments_ === 'function') ? loanPayments_(loan.loanId) : [];
+  const totalPaid = round2_(pays.reduce((s, p) => s + (Number(p.amount) || 0), 0));
+  const baseOwed = Math.max(0, round2_(totalDue - totalPaid));          // capital+interés pendiente (sin mora)
+  const frz = frozenInfo_(loan.loanId);
+  const frozen = frz.since instanceof Date;
+  const planSince = loanPlanSince_(loan.loanId);
+  const onPlan = planSince instanceof Date;
+  const mora = round2_(accruedMora_(loan, now));                        // 0 si plan (ajuste=0); congelada si frozen
+  const late = (loan.dueDate instanceof Date) && (typeof daysLate_ === 'function') && daysLate_(loan.dueDate, now) > 0;
+  const owedMora = onPlan ? 0 : mora;                                   // en plan la mora queda suspendida
+  const toClear = round2_(baseOwed + owedMora);
+  const paidOff = toClear <= 0.009;
+  const cuotas = (typeof cuotasDeLoan_ === 'function') ? cuotasDeLoan_(loan.loanId) : [];
+  const s = { now, totalDue, totalPaid, baseOwed, frz, frozen, planSince, onPlan, mora, owedMora,
+    late, toClear, paidOff, cuotas, multiCuota: cuotas.length > 1, limit: null };
+  if (paidOff && typeof graduationMax_ === 'function') {
+    try { s.limit = graduationMax_(normDni_(loan.dni)); } catch (e) { s.limit = null; }
+  }
+  return s;
+}
+
+/** Líneas de estado por cuota para el mensaje: ✅ pagada · 🔸 parcial · ⬜ pendiente (con vencimiento). */
+function cuotaLines_(cuotas) {
+  const tz = Session.getScriptTimeZone(), n = cuotas.length;
+  return cuotas.map(function (c) {
+    const etq = 'Cuota ' + c.num + '/' + n;
+    const venc = c.due instanceof Date ? (' (vence ' + Utilities.formatDate(c.due, tz, 'dd/MM/yyyy') + ')') : '';
+    if (c.saldo <= 0.009) return '✅ ' + etq + ': ' + fmtMoney_(c.monto) + ' PAGADA';
+    if (c.pagado > 0.009) return '🔸 ' + etq + ': pagaste ' + fmtMoney_(c.pagado) + ' de ' + fmtMoney_(c.monto) + ', falta ' + fmtMoney_(c.saldo) + venc;
+    return '⬜ ' + etq + ': ' + fmtMoney_(c.monto) + ' pendiente' + venc;
+  });
+}
+
+/** Arma el TEXTO del aviso de pago según el estado del préstamo (saldado / debe / cuotas / congelado /
+ *  en plan). s = loanWaStatus_(loan). Usa saltos de línea reales (encodeURIComponent → %0A en wa.me). */
+function paymentWaMsg_(loan, s, payDate, amount) {
+  const tz = Session.getScriptTimeZone(), nl = '\n', empresa = companyName_();
+  const name = String((loan && loan.name) || '').trim() || 'cliente';
+  const fPago = (payDate instanceof Date) ? Utilities.formatDate(payDate, tz, 'dd/MM/yyyy') : String(payDate || '');
+  const fVenc = (loan && loan.dueDate instanceof Date) ? Utilities.formatDate(loan.dueDate, tz, 'dd/MM/yyyy') : '';
+  let msg = 'Hola ' + name + ' 👋 Confirmamos tu pago de ' + fmtMoney_(amount) + (fPago ? (' del ' + fPago) : '') +
+    ' en el préstamo ' + loan.loanId + '.';
+  if (s.paidOff) {
+    msg += nl + '✅ ¡Tu préstamo quedó SALDADO! Gracias por tu cumplimiento.';
+    if (s.limit != null) msg += nl + 'Tu límite actual para un nuevo préstamo es ' + fmtMoney_(s.limit) + '.';
+    const base = webAppBaseUrl_();
+    if (base) msg += nl + 'Pedí tu próximo préstamo acá: ' + base;
+  } else if (s.frozen) {
+    const fSince = s.frz.since instanceof Date ? Utilities.formatDate(s.frz.since, tz, 'dd/MM/yyyy') : '';
+    msg += nl + '❄ Tu préstamo está CONGELADO' + (fSince ? (' desde el ' + fSince) : '') + ': la mora NO sigue creciendo.';
+    msg += nl + 'Saldo pendiente: ' + fmtMoney_(s.baseOwed) + (s.mora > 0.009 ? (' + mora congelada ' + fmtMoney_(s.mora)) : '') + '.';
+    msg += nl + 'Total para cancelar: ' + fmtMoney_(s.toClear) + '.';
+  } else if (s.onPlan) {
+    msg += nl + '📋 Estás en un PLAN DE PAGO: la mora quedó SUSPENDIDA mientras cumplas las cuotas.';
+    if (s.cuotas.length) { msg += nl + 'Tus cuotas:'; cuotaLines_(s.cuotas).forEach(function (l) { msg += nl + l; }); }
+    msg += nl + 'Total del plan pendiente: ' + fmtMoney_(s.baseOwed) + '.';
+  } else if (s.multiCuota) {
+    msg += nl + 'Estado de tus cuotas:';
+    cuotaLines_(s.cuotas).forEach(function (l) { msg += nl + l; });
+    if (s.late && s.mora > 0.009) {
+      msg += nl + 'Falta pagar: ' + fmtMoney_(s.baseOwed) + ' + mora por atraso ' + fmtMoney_(s.mora) + '.';
+      msg += nl + 'Total para cancelar: ' + fmtMoney_(s.toClear) + '.';
+    } else {
+      msg += nl + 'Falta pagar en total: ' + fmtMoney_(s.baseOwed) + '.';
+    }
+    if (fVenc) msg += nl + (s.late ? 'Venció el ' : 'Vence el ') + fVenc + '.';
+  } else {
+    // Pago único, todavía con saldo.
+    if (s.late && s.mora > 0.009) {
+      msg += nl + 'Saldo pendiente: ' + fmtMoney_(s.baseOwed) + ' + mora por atraso ' + fmtMoney_(s.mora) + '.';
+      msg += nl + 'Te faltan ' + fmtMoney_(s.toClear) + ' para cancelarlo.';
+    } else {
+      msg += nl + 'Saldo pendiente: ' + fmtMoney_(s.baseOwed) + '. Te faltan ' + fmtMoney_(s.baseOwed) + ' para cancelarlo.';
+    }
+    if (fVenc) msg += nl + (s.late ? 'Venció el ' : 'Vence el ') + fVenc + '.';
+  }
+  return msg + nl + empresa;
+}
+
+/** Fórmula «=HYPERLINK» que abre WhatsApp al prestatario con el AVISO DE PAGO adecuado al estado del
+ *  préstamo (saldado → felicita + límite + enlace a nuevo préstamo; debe → saldo/mora/faltante; cuotas
+ *  → detalle por cuota; congelado / en plan → aviso correspondiente). '' si no hay teléfono válido.
+ *  @param status (opcional) loanWaStatus_(loan) ya calculado (para reusarlo por préstamo en lotes). */
+function paymentWaFormula_(loan, payDate, amount, status) {
+  const num = waNumberAR_(loan && loan.phone);
+  if (!num) return '';
+  const s = status || loanWaStatus_(loan);
+  const msg = paymentWaMsg_(loan, s, payDate, amount);
+  const label = s.paidOff ? '📲 Avisar saldado' : '📲 Avisar pago';
+  return '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","' + label + '")';
+}
+
+/** (Re)completa la columna "Avisar pago 📲" de TODA la hoja Pagos con el enlace de WhatsApp por fila
+ *  (según el pago y el saldo resultante). "sin teléfono" si el cliente no tiene número válido; vacío si
+ *  la fila no tiene préstamo + monto. Crea la columna si falta. Devuelve la cantidad de filas tratadas. */
+function fillPaymentWaLinks_(ss) {
+  ss = ss || getSS_();
+  const sh = ss.getSheetByName(CFG.SHEETS.PAYMENTS); if (!sh) return 0;
+  const waCol = clientesHeaderCol_(sh, 'Avisar pago 📲', true);
+  if (!waCol) return 0;
+  sh.getRange(1, waCol).setBackground('#38761d').setFontColor('#fff'); // iguala el encabezado de Pagos
+  const last = sh.getLastRow(); if (last < 2) { sh.setColumnWidth(waCol, 130); return 0; }
+  const vals = sh.getRange(2, 1, last - 1, PP.BALANCE).getValues(); // ID Pago..Saldo Posterior
+  const out = [], cache = {};
+  for (let i = 0; i < vals.length; i++) {
+    const id = String(vals[i][PP.LOAN_ID - 1] || '').trim();
+    const amt = Number(vals[i][PP.AMOUNT - 1]) || 0;
+    if (!id || !amt) { out.push(['']); continue; }
+    if (!(id in cache)) { const loan = findLoanById_(id); cache[id] = { loan: loan, status: loan ? loanWaStatus_(loan) : null }; }
+    const c = cache[id];
+    const f = c.loan ? paymentWaFormula_(c.loan, vals[i][PP.DATE - 1], amt, c.status) : '';
+    out.push([f || (c.loan ? 'sin teléfono' : '')]); // setValues trata "=…" como fórmula
+  }
+  sh.getRange(2, waCol, out.length, 1).setValues(out);
+  sh.setColumnWidth(waCol, 130);
+  return out.length;
 }
 
 /** Crea únicamente la hoja "Estudio de Recordatorios" sin tocar Prestatarios ni Pagos. */
@@ -1861,6 +2242,196 @@ function setupRejected_(ss) {
     sh.getRange(1, 1, 1, 6).setValues([['Fecha', 'Nombre completo', 'Correo', 'DNI', 'Teléfono', 'Motivo']])
       .setFontWeight('bold').setBackground('#990000').setFontColor('#fff');
   sh.setFrozenRows(1);
+}
+
+// "Solicitudes de Congelamiento": una fila por pedido de congelamiento (Parte 2). El cliente
+// la crea desde el formulario web (?page=congelar); el prestamista aprueba/rechaza con casillas.
+const FREEZE_REQ_HEADERS = ['Fecha de solicitud', 'ID Préstamo', 'ID Cliente', 'Nombre', 'DNI', 'Correo',
+  'Teléfono', 'Capital', 'Saldo con Mora (al pedir)', 'Recargo por Mora (al pedir)',
+  'Ya pagado (declarado)', 'Falta para el 50% (24 h)', 'Saldo restante (al pedir)', 'Vencimiento',
+  'Fecha de pago prometida', 'Motivo (cliente)', 'Ubicación', 'IP', 'Dispositivo',
+  'Aprobar ✔', 'Rechazar ✖', 'Motivo de rechazo', 'Estado', 'Fecha de aprobación',
+  'Enlace de firma', 'WhatsApp', 'Estado de Firma', 'Fecha de Firma', 'Contrato de Congelamiento (PDF)'];
+const FR_APPROVE_COL = 20, FR_DENY_COL = 21, FR_COVER_COL = 12; // casillas + columna viva "Falta para el 50%"
+
+function setupFreezeRequests_(ss) {
+  const sh = getOrCreate_(ss, CFG.SHEETS.FREEZE_REQ);
+  const head = sh.getLastRow() >= 1 ? sh.getRange(1, 1, 1, FREEZE_REQ_HEADERS.length).getValues()[0].map(h => String(h).trim()) : [];
+  if (head.join('|') !== FREEZE_REQ_HEADERS.join('|')) {
+    sh.getRange(1, 1, 1, FREEZE_REQ_HEADERS.length).setValues([FREEZE_REQ_HEADERS])
+      .setFontWeight('bold').setBackground('#0b5394').setFontColor('#fff').setWrap(true);
+  }
+  sh.setFrozenRows(1);
+  const cb = SpreadsheetApp.newDataValidation().requireCheckbox().build();
+  sh.getRange(2, FR_APPROVE_COL, CFG.MAX_ROWS, 1).setDataValidation(cb); // Aprobar ✔
+  sh.getRange(2, FR_DENY_COL, CFG.MAX_ROWS, 1).setDataValidation(cb);    // Rechazar ✖
+  sh.getRange(2, 1, CFG.MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd hh:mm');  // Fecha de solicitud
+  sh.getRange(2, 8, CFG.MAX_ROWS, 4).setNumberFormat(CFG.CURRENCY_FMT);    // Capital..Ya pagado (8..11)
+  sh.getRange(2, 13, CFG.MAX_ROWS, 1).setNumberFormat(CFG.CURRENCY_FMT);   // Saldo restante (al pedir)
+  sh.getRange(2, 14, CFG.MAX_ROWS, 2).setNumberFormat('yyyy-mm-dd');       // Vencimiento + Fecha prometida
+  sh.getRange(2, 24, CFG.MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd');       // Fecha de aprobación
+  sh.getRange(2, 28, CFG.MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd hh:mm'); // Fecha de Firma
+  // Columna VIVA "Falta para el 50% (24 h)": fórmula por fila que compara pagos registrados vs el % configurable.
+  for (let r = 2; r <= CFG.MAX_ROWS + 1; r++) sh.getRange(r, FR_COVER_COL).setFormula(freezeCoverFormula_(r));
+  [150, 100, 90, 170, 110, 200, 130, 110, 140, 150, 130, 160, 130, 110, 140, 220, 200, 120, 230, 90, 90, 220, 110, 130, 220, 160, 120, 150, 180]
+    .forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  // Franja por Estado (col 23).
+  const estL = colL_(23), rng = sh.getRange(2, 1, CFG.MAX_ROWS, FREEZE_REQ_HEADERS.length);
+  const byEstado = (val, bg, fg) => SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied('=$' + estL + '2="' + val + '"').setBackground(bg).setFontColor(fg).setRanges([rng]).build();
+  sh.setConditionalFormatRules([
+    byEstado('Pendiente', '#fff2cc', '#7f6000'),
+    byEstado('Aprobado', '#d0e0e3', '#0c343d'),
+    byEstado('Firmado', '#d9ead3', '#274e13'),
+    byEstado('Rechazado', '#f4cccc', '#990000'),
+  ]);
+  sh.getRange(1, FR_COVER_COL).setNote('VIVO: compara los pagos registrados contra el % configurable del total (Configuración ▸ "Porcentaje a pagar para congelar (%)"). Muestra "✅ cubierto" o "Falta $X". El 50% debe estar PAGADO antes de aprobar y de firmar.');
+  sh.getRange(1, FR_APPROVE_COL).setNote('Tildá para APROBAR: SOLO si "Falta para el 50%" muestra ✅ cubierto. Envía por correo y WhatsApp el enlace para firmar. El préstamo se congela recién al firmar.');
+  sh.getRange(1, FR_DENY_COL).setNote('Completá antes "Motivo de rechazo" y tildá para RECHAZAR: avisa al cliente por correo y arma el WhatsApp con el motivo.');
+  return sh;
+}
+
+// "Solicitudes de Plan de Pago": una fila por pedido de plan (Acuerdo Transaccional). El cliente la
+// crea desde el formulario web (?page=plan); el prestamista aprueba/rechaza con casillas.
+const PLAN_REQ_HEADERS = ['Fecha de solicitud', 'ID Préstamo', 'ID Cliente', 'Nombre', 'DNI', 'Correo',
+  'Teléfono', 'Capital', 'Total a Pagar', 'Saldo base (sin mora)', 'Mora suspendida', 'Opción (1/4/6)',
+  'Pago inicial (20%)', 'Falta para el 20% (24 h)', 'Vencimiento', 'Motivo (cliente)', 'Ubicación', 'IP', 'Dispositivo',
+  'Aprobar ✔', 'Rechazar ✖', 'Motivo de rechazo', 'Estado', 'Fecha de aprobación',
+  'Enlace de firma', 'WhatsApp', 'Estado de Firma', 'Fecha de Firma', 'Acuerdo (PDF)'];
+const PR_APPROVE_COL = 20, PR_DENY_COL = 21, PR_COVER_COL = 14; // casillas + columna viva "Falta para el 20%"
+
+function setupPlanRequests_(ss) {
+  const sh = getOrCreate_(ss, CFG.SHEETS.PLAN_REQ);
+  const head = sh.getLastRow() >= 1 ? sh.getRange(1, 1, 1, PLAN_REQ_HEADERS.length).getValues()[0].map(h => String(h).trim()) : [];
+  if (head.join('|') !== PLAN_REQ_HEADERS.join('|')) {
+    sh.getRange(1, 1, 1, PLAN_REQ_HEADERS.length).setValues([PLAN_REQ_HEADERS])
+      .setFontWeight('bold').setBackground('#674ea7').setFontColor('#fff').setWrap(true);
+  }
+  sh.setFrozenRows(1);
+  const cb = SpreadsheetApp.newDataValidation().requireCheckbox().build();
+  sh.getRange(2, PR_APPROVE_COL, CFG.MAX_ROWS, 1).setDataValidation(cb); // Aprobar ✔
+  sh.getRange(2, PR_DENY_COL, CFG.MAX_ROWS, 1).setDataValidation(cb);    // Rechazar ✖
+  sh.getRange(2, 1, CFG.MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd hh:mm');  // Fecha de solicitud
+  sh.getRange(2, 8, CFG.MAX_ROWS, 4).setNumberFormat(CFG.CURRENCY_FMT);    // Capital..Mora suspendida (8..11)
+  sh.getRange(2, 13, CFG.MAX_ROWS, 1).setNumberFormat(CFG.CURRENCY_FMT);   // Pago inicial (20%)
+  sh.getRange(2, 15, CFG.MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd');       // Vencimiento
+  sh.getRange(2, 24, CFG.MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd');       // Fecha de aprobación
+  sh.getRange(2, 28, CFG.MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd hh:mm'); // Fecha de Firma
+  for (let r = 2; r <= CFG.MAX_ROWS + 1; r++) sh.getRange(r, PR_COVER_COL).setFormula(planCoverFormula_(r));
+  [150, 100, 90, 170, 110, 200, 130, 110, 130, 140, 130, 90, 130, 160, 110, 220, 200, 120, 230, 90, 90, 220, 110, 130, 220, 160, 120, 150, 180]
+    .forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  const estL = colL_(23), rng = sh.getRange(2, 1, CFG.MAX_ROWS, PLAN_REQ_HEADERS.length);
+  const byEstado = (val, bg, fg) => SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied('=$' + estL + '2="' + val + '"').setBackground(bg).setFontColor(fg).setRanges([rng]).build();
+  sh.setConditionalFormatRules([
+    byEstado('Pendiente', '#fff2cc', '#7f6000'),
+    byEstado('Aprobado', '#d9d2e9', '#351c75'),
+    byEstado('Firmado', '#d9ead3', '#274e13'),
+    byEstado('Rechazado', '#f4cccc', '#990000'),
+  ]);
+  sh.getRange(1, PR_COVER_COL).setNote('VIVO: pagos registrados vs el % inicial del total (Configuración ▸ "Porcentaje inicial para plan de pago (%)"). "✅ cubierto" o "Falta $X". El 20% debe estar PAGADO antes de aprobar y de firmar.');
+  sh.getRange(1, PR_APPROVE_COL).setNote('Tildá para APROBAR: SOLO si "Falta para el 20%" muestra ✅ cubierto. Envía el enlace para firmar el Acuerdo. El plan se activa al firmar (reemplaza las cuotas).');
+  sh.getRange(1, PR_DENY_COL).setNote('Completá "Motivo de rechazo" y tildá para RECHAZAR: avisa al cliente.');
+  return sh;
+}
+
+/** Porcentaje (fracción 0–1) que debe estar PAGADO para poder congelar. Configurable; default 50%. */
+function freezeDownPct_() {
+  let v = Number(String(getSetting_('Porcentaje a pagar para congelar (%)') || '').replace('%', '').replace(',', '.').trim());
+  if (!isFinite(v) || v <= 0) v = 50;
+  return Math.min(1, v / 100);
+}
+
+/**
+ * Importes del plan de congelamiento. El requisito se mide sobre los PAGOS REGISTRADOS (hoja "Pagos").
+ * - total    = Total a Pagar (capital + interés).
+ * - recorded = pagos registrados del préstamo.
+ * - balance  = Saldo con Mora a hoy (capital+interés pendiente + mora).
+ * - required = porcentaje configurable × total (hito a cubrir ANTES de aprobar/congelar).
+ * - downShort= lo que falta pagar para alcanzar el hito = max(0, required − recorded). 0 ⇒ cubierto.
+ * - downMet  = el hito está cubierto (downShort ≈ 0).
+ * - remaining= saldo restante a abonar por la fecha elegida = max(0, balance − downShort).
+ * @param {number=} alreadyPaid  Monto que el cliente DECLARA haber pagado (informativo; no afecta el hito).
+ */
+function freezeAmounts_(loan, alreadyPaid) {
+  const P = Math.max(0, Number(alreadyPaid) || 0);
+  const pct = freezeDownPct_();
+  const recorded = round2_(loanPayments_(loan.loanId).reduce((s, p) => s + p.amount, 0));
+  const total = round2_(loan.totalDue);
+  const required = round2_(pct * total);
+  const base = Math.max(0, round2_(total - recorded));
+  const mora = accruedMora_(loan, new Date());
+  const balance = round2_(base + mora);
+  const downShort = Math.max(0, round2_(required - recorded));
+  const downMet = downShort <= 0.009;
+  const remaining = Math.max(0, round2_(balance - downShort));
+  return { P: P, pct: pct, pctInt: Math.round(pct * 100), total: total, base: base, mora: mora,
+    balance: balance, recorded: recorded, required: required, downShort: downShort, downMet: downMet, remaining: remaining };
+}
+
+/** Fórmula VIVA para la columna "Falta para el 50% (24 h)": compara pagos registrados contra el
+ *  porcentaje configurable del total; muestra "✅ cubierto" o "Falta $X". Se actualiza sola al registrar pagos. */
+function freezeCoverFormula_(r) {
+  const B = CFG.SHEETS.BORROWERS, S = CFG.SHEETS.SETTINGS;
+  const bs = getSS_().getSheetByName(B), H = bs ? headerIndex_(bs) : {};
+  const totN = colByAny_(H, ['Total a Pagar', 'Total a pagar']) || PB.TOTAL;
+  const paidN = colByAny_(H, ['Total Pagado']) || PB.PAID;
+  const totL = colL_(totN), paidL = colL_(paidN);
+  return `=IF($B${r}="","",IFERROR(LET(id,$B${r},` +
+    `pct,VLOOKUP("Porcentaje a pagar para congelar (%)",'${S}'!$A:$B,2,FALSE)/100,` +
+    `tot,VLOOKUP(id,'${B}'!$A:$${totL},${totN},FALSE),paid,VLOOKUP(id,'${B}'!$A:$${paidL},${paidN},FALSE),need,pct*tot,` +
+    `IF(paid>=need-0.009,"✅ cubierto","Falta "&TEXT(need-paid,"$#,##0.00"))),""))`;
+}
+
+/* ===================== PLAN DE PAGO (Acuerdo Transaccional) — helpers ===================== */
+/** ¿El préstamo llegó al 100% de mora (tope)? Elegibilidad para pedir plan de pago. */
+function isLoanAtMoraCap_(loan) {
+  if (!loan) return false;
+  const capMax = round2_((Number(loan.totalDue) || 0) * moraCapFrac_());
+  if (capMax <= 0) return false;
+  return accruedMora_(loan, new Date()) >= capMax - 0.009;
+}
+/** Porcentaje (fracción 0–1) a pagar para ACTIVAR el plan de pago. Configurable; default 20%. */
+function planDownPct_() {
+  let v = Number(String(getSetting_('Porcentaje inicial para plan de pago (%)') || '').replace('%', '').replace(',', '.').trim());
+  if (!isFinite(v) || v <= 0) v = 20;
+  return Math.min(1, v / 100);
+}
+/**
+ * Importes del plan de pago. El plan cubre el TOTAL A PAGAR (capital + interés, SIN mora); la mora
+ * se suspende al activar. El requisito inicial se mide sobre los PAGOS REGISTRADOS.
+ * - total=Total a Pagar · recorded=pagos registrados · required=pct×total (pago inicial)
+ * - base=saldo sin mora pendiente · mora=mora acumulada (se suspende) · downShort/downMet=hito del pago inicial.
+ */
+function planAmounts_(loan) {
+  const pct = planDownPct_();
+  const recorded = round2_(loanPayments_(loan.loanId).reduce((s, p) => s + p.amount, 0));
+  const total = round2_(loan.totalDue);
+  const required = round2_(pct * total);
+  const base = Math.max(0, round2_(total - recorded));
+  const mora = accruedMora_(loan, new Date());
+  const downShort = Math.max(0, round2_(required - recorded));
+  const downMet = downShort <= 0.009;
+  return { pct: pct, pctInt: Math.round(pct * 100), total: total, recorded: recorded, required: required,
+    base: base, mora: mora, downShort: downShort, downMet: downMet };
+}
+/** Fechas de vencimiento de las cuotas del plan: pago único → ~2 semanas; si no, mensuales. */
+function planCuotaDates_(signDate, n) {
+  const base = startOfDay_(signDate instanceof Date ? signDate : new Date());
+  if (n <= 1) return [addDays_(base, 14)];
+  const out = []; for (let k = 1; k <= n; k++) out.push(addMonths_(base, k)); return out;
+}
+/** Fórmula VIVA "Falta para el 20% (24 h)" en "Solicitudes de Plan de Pago": pagos registrados vs % del total. */
+function planCoverFormula_(r) {
+  const B = CFG.SHEETS.BORROWERS, S = CFG.SHEETS.SETTINGS;
+  const bs = getSS_().getSheetByName(B), H = bs ? headerIndex_(bs) : {};
+  const totN = colByAny_(H, ['Total a Pagar', 'Total a pagar']) || PB.TOTAL;
+  const paidN = colByAny_(H, ['Total Pagado']) || PB.PAID;
+  const totL = colL_(totN), paidL = colL_(paidN);
+  return `=IF($B${r}="","",IFERROR(LET(id,$B${r},` +
+    `pct,VLOOKUP("Porcentaje inicial para plan de pago (%)",'${S}'!$A:$B,2,FALSE)/100,` +
+    `tot,VLOOKUP(id,'${B}'!$A:$${totL},${totN},FALSE),paid,VLOOKUP(id,'${B}'!$A:$${paidL},${paidN},FALSE),need,pct*tot,` +
+    `IF(paid>=need-0.009,"✅ cubierto","Falta "&TEXT(need-paid,"$#,##0.00"))),""))`;
 }
 
 function setupErrors_(ss) {
@@ -2399,10 +2970,10 @@ function setupStats_(ss) {
 const LATE_HEADERS = ['ID Préstamo', 'Prestatario', 'DNI', 'Correo', 'Teléfono', 'Fecha de Vencimiento',
   'Días de Atraso', 'Total a Pagar', 'Recargo por Mora (acum.)', 'Total Pagado', 'Saldo Pendiente',
   'Enviar Aviso ✉', 'Último Aviso Enviado', 'Tope de mora', 'Plan de pago 📅 (3 cuotas)', 'Plan enviado',
-  'PDF de cuotas 🧾', 'PDF generado'];
+  'PDF de cuotas 🧾', 'PDF generado', 'Pedir congelamiento 📲', 'Pedir plan de pago 📋'];
 // Columnas (1-based) de control en "Pagos Atrasados".
 const LATE_SEND_COL = 12, LATE_SENT_COL = 13, LATE_CAP_COL = 14, LATE_PLAN_COL = 15, LATE_PLAN_SENT_COL = 16,
-  LATE_DOC_COL = 17, LATE_DOC_DONE_COL = 18;
+  LATE_DOC_COL = 17, LATE_DOC_DONE_COL = 18, LATE_FREEZE_COL = 19, LATE_PLANREQ_COL = 20;
 function setupLate_(ss) {
   const sh = getOrCreate_(ss, CFG.SHEETS.LATE); sh.clear();
   sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).clearDataValidations();
@@ -2505,31 +3076,65 @@ function rebuildLateSheet_(ss) {
   sh.getRange(2, LATE_PLAN_COL, clearH, 1).clearDataValidations();
   sh.getRange(2, LATE_DOC_COL, clearH, 1).clearDataValidations();
   if (last < 2) return;
-  const today = new Date(), feePct = lateFeeRate_(), grace = moraGraceDays_(), capFrac = moraCapFrac_(), rows = [];
-  for (let row = 2; row <= last; row++) {
-    const loan = readLoan_(bs, row);
-    if (!loan.loanId || !(loan.dueDate instanceof Date)) continue;
-    const days = daysLate_(loan.dueDate, today);
-    if (days <= 0) continue;
-    const pays = loanPayments_(loan.loanId);
+  const today = new Date(), capFrac = moraCapFrac_(), rows = [];
+  // --- LECTURA EN BLOQUE (una sola vez cada hoja) para reconstruir rápido ---
+  const H = headerIndex_(bs), col = (n, fb) => colByAny_(H, n) || fb;
+  const idC = col(['ID Préstamo', 'ID Prestamo'], PB.LOAN_ID), cliC = col(['ID Cliente'], PB.CLIENT_ID),
+    capC = col(['Capital'], PB.PRINCIPAL), plzC = col(['Plazo (días)', 'Plazo (dias)', 'Plazo (meses)', 'Plazo'], PB.TERM),
+    tasC = col(['Tasa'], PB.RATE), fecC = col(['Fecha del Préstamo', 'Fecha Préstamo', 'Fecha de Préstamo', 'Fecha Prestamo'], PB.LOAN_DATE),
+    venC = col(['Fecha de Vencimiento', 'Vencimiento'], PB.DUE), intC = col(['Interés', 'Interes'], PB.INTEREST),
+    totC = col(['Total a Pagar', 'Total a pagar'], PB.TOTAL), notC = col(['Último Aviso'], PB.NOTICE),
+    adjC = colByAny_(H, ['Mora (ajuste)']), sinceC = colByAny_(H, ['Congelado el']), daysAccC = colByAny_(H, ['Días congelados', 'Dias congelados']),
+    planSinceC = colByAny_(H, ['Plan desde']);
+  const maxCol = Math.max(idC, cliC, capC, plzC, tasC, fecC, venC, intC, totC, notC, adjC || 0, sinceC || 0, daysAccC || 0, planSinceC || 0);
+  const bdata = bs.getRange(2, 1, last - 1, maxCol).getValues();
+  const payMap = loanPaymentsAll_();   // todos los pagos en UNA lectura
+  for (let i = 0; i < bdata.length; i++) {
+    const v = bdata[i], g = c => v[c - 1];
+    const loanId = String(g(idC) || '').trim(); if (!loanId) continue;
+    const term = Number(g(plzC)) || 0;
+    const ld = g(fecC) instanceof Date ? g(fecC) : new Date(g(fecC));
+    const dueDate = g(venC) instanceof Date ? g(venC) : dueDateForTerm_(term || 1, ld);
+    if (!(dueDate instanceof Date) || isNaN(dueDate.getTime())) continue;
+    if (daysLate_(dueDate, today) <= 0) continue;  // seguimos listando los vencidos aunque estén congelados
+    if (planSinceC && g(planSinceC) instanceof Date) continue;  // EN PLAN (Acuerdo): va en "En Plan", no en Pagos Atrasados
+    const principal = Number(g(capC)) || 0;
+    let rate = Number(g(tasC)) || 0; if (!rate) rate = loanRateForTerm_(term);
+    let interest = Number(g(intC)) || 0; if (!interest) interest = round2_(principal * rate);
+    let totalDue = Number(g(totC)) || 0; if (!totalDue) totalDue = round2_(principal + interest);
+    const cli = getClienteById_(String(g(cliC) || '').trim()) || {};  // Clientes está cacheado
+    const loan = { loanId: loanId, clientId: String(g(cliC) || '').trim(), name: cli.name || '', email: cli.email || '',
+      phone: cli.phone || '', dni: cli.dni || '', principal: principal, term: term, rate: rate, loanDate: ld, dueDate: dueDate, interest: interest, totalDue: totalDue };
+    const pays = payMap[loanId] || [];
     const totalPaid = pays.reduce((s, p) => s + p.amount, 0);
-    const base = Math.max(0, round2_(loan.totalDue - totalPaid));       // capital + interés pendiente
-    // Recargo POR CUOTA, respetando el AJUSTE manual (condonar/cambiar) vía accruedMora_.
-    const feeAccum = accruedMora_(loan, today);
+    const base = Math.max(0, round2_(totalDue - totalPaid));            // capital + interés pendiente
+    // Ajuste manual de mora (columna "Mora (ajuste)") e info de congelamiento, LEÍDOS DEL BLOQUE.
+    const adjV = adjC ? g(adjC) : '';
+    const override = (typeof adjV === 'number' && isFinite(adjV)) ? Math.max(0, round2_(adjV)) : null;
+    const sinceV = sinceC ? g(sinceC) : '';
+    const frozen = { since: (sinceV instanceof Date) ? sinceV : null, daysAcc: daysAccC ? (Number(g(daysAccC)) || 0) : 0 };
+    const feeAccum = accruedMoraFast_(loan, today, pays, override, frozen);   // mora SIN leer hojas
     const out = round2_(base + feeAccum);                                // monto a pagar hoy = saldo + mora
     if (out <= 0) continue; // vencido pero saldado (y sin mora / mora condonada)
-    const lastNotice = bs.getRange(row, PB.NOTICE).getValue(); // "Último Aviso" del prestatario
+    const days = Math.max(0, daysLate_(dueDate, effMoraAsOf2_(frozen, today)));  // atraso congelado-aware
+    const lastNotice = notC ? g(notC) : '';
+    const isFrozen = frozen.since instanceof Date;
+    const nameShown = isFrozen ? '❄ ' + loan.name : loan.name; // marca de congelado
     // "Tope de mora": % del recargo acumulado respecto de su tope (total a devolver × tope configurado).
-    const capMax = round2_(loan.totalDue * capFrac);
+    const capMax = round2_(totalDue * capFrac);
     const pct = capMax > 0 ? Math.round(feeAccum / capMax * 100) : 0;
     const atCap = capMax > 0 && pct >= 100;
-    rows.push([loan.loanId, loan.name, loan.dni, loan.email, loan.phone, loan.dueDate, days,
-      loan.totalDue, feeAccum, totalPaid, out, false, (lastNotice instanceof Date) ? lastNotice : '',
-      atCap ? 'SÍ (100%)' : pct + '%', false, '', false, '']);
+    // Enlace WhatsApp al formulario de congelamiento (sólo si NO está ya congelado; filas vencidas).
+    const freezeWa = isFrozen ? '' : (freezeFormWaFormula_(loan) || '');
+    // Enlace al formulario de PLAN DE PAGO: sólo cuando llegó al 100% de mora (atCap) y no congelado.
+    const planWa = (atCap && !isFrozen) ? (planFormWaFormula_(loan) || '') : '';
+    rows.push([loan.loanId, nameShown, loan.dni, loan.email, loan.phone, dueDate, days,
+      totalDue, feeAccum, totalPaid, out, false, (lastNotice instanceof Date) ? lastNotice : '',
+      atCap ? 'SÍ (100%)' : pct + '%', false, '', false, '', freezeWa, planWa]);
   }
   rows.sort((a, b) => b[6] - a[6]); // más atrasados primero
   if (rows.length) {
-    sh.getRange(2, 1, rows.length, LATE_HEADERS.length).setValues(rows);
+    sh.getRange(2, 1, rows.length, LATE_HEADERS.length).setValues(rows);   // valores (la col freeze = fórmula por coerción)
     sh.getRange(2, 6, rows.length, 1).setNumberFormat('yyyy-mm-dd');
     sh.getRange(2, 8, rows.length, 1).setNumberFormat(CFG.CURRENCY_FMT);
     sh.getRange(2, 9, rows.length, 3).setNumberFormat(CFG.CURRENCY_FMT);
@@ -2540,11 +3145,11 @@ function rebuildLateSheet_(ss) {
     sh.getRange(2, LATE_PLAN_SENT_COL, rows.length, 1).setNumberFormat('yyyy-mm-dd');
     sh.getRange(2, LATE_DOC_COL, rows.length, 1).insertCheckboxes();
     sh.getRange(2, LATE_DOC_DONE_COL, rows.length, 1).setNumberFormat('yyyy-mm-dd');
-    // Resaltar los préstamos que llegaron al tope de mora (candidatos a plan de pago).
-    rows.forEach((r, i) => {
-      if (String(r[LATE_CAP_COL - 1]).indexOf('SÍ') === 0)
-        sh.getRange(i + 2, LATE_CAP_COL).setBackground('#f4cccc').setFontWeight('bold');
-    });
+    // Resaltado en BLOQUE (una llamada por columna): nombre congelado + tope de mora alcanzado.
+    const nameBg = rows.map(r => [String(r[1]).indexOf('❄') === 0 ? '#d0e0e3' : null]);
+    const capBg = rows.map(r => [String(r[LATE_CAP_COL - 1]).indexOf('SÍ') === 0 ? '#f4cccc' : null]);
+    sh.getRange(2, 2, rows.length, 1).setBackgrounds(nameBg).setFontWeights(nameBg.map(x => [x[0] ? 'bold' : null]));
+    sh.getRange(2, LATE_CAP_COL, rows.length, 1).setBackgrounds(capBg).setFontWeights(capBg.map(x => [x[0] ? 'bold' : null]));
   }
 }
 
@@ -2703,6 +3308,90 @@ function moraOverrideValue_(loanId) {
   return null;
 }
 /**
+ * Estado de CONGELAMIENTO de un préstamo (columnas "Congelado el" / "Días congelados" de
+ * "Prestatarios"). `since` es la fecha en que se detuvo el reloj de la mora (Date) o null si
+ * el préstamo NO está congelado; `daysAcc` son los días de atraso ya saltados por ciclos
+ * PREVIOS de descongelado (número ≥ 0). Se lee por ID, igual que moraOverrideValue_.
+ */
+function frozenInfo_(loanId) {
+  const out = { since: null, daysAcc: 0 };
+  const sh = getSS_().getSheetByName(CFG.SHEETS.BORROWERS), last = sh ? sh.getLastRow() : 0;
+  if (last < 2) return out;
+  const id = String(loanId).trim();
+  const H = headerIndex_(sh);
+  const idC = colByAny_(H, ['ID Préstamo', 'ID Prestamo']) || PB.LOAN_ID;
+  const sinceC = colByAny_(H, ['Congelado el']);
+  const daysC = colByAny_(H, ['Días congelados', 'Dias congelados']);
+  if (!sinceC && !daysC) return out;
+  const width = Math.max(idC, sinceC || 0, daysC || 0);
+  const data = sh.getRange(2, 1, last - 1, width).getValues();
+  for (let i = 0; i < data.length; i++) {
+    if (String(data[i][idC - 1]).trim() === id) {
+      if (sinceC) { const v = data[i][sinceC - 1]; if (v instanceof Date) out.since = v; }
+      if (daysC) { const n = Number(data[i][daysC - 1]); if (isFinite(n) && n > 0) out.daysAcc = Math.floor(n); }
+      return out;
+    }
+  }
+  return out;
+}
+/**
+ * Fecha EFECTIVA hasta la que debe correr la mora: si el préstamo está congelado, se recorta a
+ * la fecha de congelamiento; luego se le restan los días ya saltados en descongelados previos
+ * ("Días congelados"). Sólo afecta el DEVENGAMIENTO de la mora: los pagos se aplican igual
+ * (los motores pasan el corte de pagos en el año 9999). Sin congelar, devuelve `asOf` tal cual.
+ */
+function effectiveMoraAsOf_(loanId, asOf) {
+  asOf = (asOf instanceof Date) ? asOf : new Date();
+  const f = frozenInfo_(loanId);
+  let end = asOf;
+  if (f.since instanceof Date && f.since.getTime() < end.getTime()) end = f.since;
+  if (f.daysAcc > 0) end = new Date(end.getTime() - f.daysAcc * 86400000);
+  return end;
+}
+/**
+ * ¿Se puede CONGELAR este préstamo? Sólo los préstamos VENCIDOS (en mora) y con saldo base
+ * pendiente. Devuelve {ok, reason}. Usado por el menú (Parte 1) y por el formulario/aprobación/
+ * firma de la solicitud de congelamiento (Parte 2), para que la regla sea idéntica en todos lados.
+ */
+function loanFreezable_(loan, asOf) {
+  asOf = (asOf instanceof Date) ? asOf : new Date();
+  if (!loan || !(loan.dueDate instanceof Date)) return { ok: false, reason: 'El préstamo no tiene fecha de vencimiento.' };
+  if (daysLate_(loan.dueDate, asOf) <= 0) return { ok: false, reason: 'Solo se pueden congelar préstamos VENCIDOS (en mora).' };
+  const paid = loanPayments_(loan.loanId).reduce((s, p) => s + p.amount, 0);
+  if (round2_(loan.totalDue - paid) <= 0.009) return { ok: false, reason: 'El préstamo ya está saldado.' };
+  return { ok: true, reason: '' };
+}
+/** Fecha efectiva de corte de mora a partir de info de congelamiento EN MEMORIA (sin leer hoja). */
+function effMoraAsOf2_(frozen, asOf) {
+  let end = (asOf instanceof Date) ? asOf : new Date();
+  if (frozen && frozen.since instanceof Date && frozen.since.getTime() < end.getTime()) end = frozen.since;
+  if (frozen && frozen.daysAcc > 0) end = new Date(end.getTime() - frozen.daysAcc * 86400000);
+  return end;
+}
+/** Igual que accruedMora_ pero SIN leer la hoja: recibe los pagos, el ajuste manual (override) y la
+ *  info de congelamiento ya cargados en memoria. Para reconstrucciones masivas (Pagos Atrasados). */
+function accruedMoraFast_(loan, asOf, pays, override, frozen) {
+  if (override != null) return override;
+  const eff = effMoraAsOf2_(frozen, asOf);
+  const rate = loanRateForTerm_(loan.term);
+  const sched = loanSchedule_(loan), far = new Date(9999, 0, 1);
+  const withMora = computeOutstanding_(loan.principal, rate, loan.loanDate, pays, eff, far, undefined, undefined, undefined, sched);
+  const principalDue = computeOutstanding_(loan.principal, rate, loan.loanDate, pays, eff, far, 0, undefined, undefined, sched);
+  return Math.max(0, round2_(withMora - principalDue));
+}
+/** Todos los pagos agrupados por ID de préstamo, en UNA sola lectura de "Pagos". {id:[{date,amount}]}. */
+function loanPaymentsAll_() {
+  const sh = getSS_().getSheetByName(CFG.SHEETS.PAYMENTS), map = {};
+  if (!sh || sh.getLastRow() < 2) return map;
+  const data = sh.getRange(2, PP.LOAN_ID, sh.getLastRow() - 1, 3).getValues();
+  for (const r of data) {
+    const id = String(r[0]).trim(); if (!id) continue;
+    const amt = parseMoney_(r[2]); if (amt === 0) continue;
+    (map[id] = map[id] || []).push({ date: r[1] instanceof Date ? r[1] : new Date(), amount: amt });
+  }
+  return map;
+}
+/**
  * Mora acumulada (recargo) de un préstamo a la fecha `asOf`, consistente con el motor por
  * cuotas. Se deriva como (saldo con mora) − (capital+interés pendiente). Si hay un AJUSTE
  * manual ("Mora (ajuste)"), se usa ese en lugar del cálculo. Usado por "Pagos Atrasados",
@@ -2712,14 +3401,17 @@ function accruedMora_(loan, asOf) {
   const ov = moraOverrideValue_(loan.loanId);
   if (ov != null) return ov;                 // condonada (0) o fijada a mano
   asOf = (asOf instanceof Date) ? asOf : new Date();
+  // CONGELAMIENTO: la mora se devenga sólo hasta la fecha efectiva (congelado → se detiene el
+  // reloj; menos los días saltados en descongelados previos). Los pagos no se tocan (corte 9999).
+  const effAsOf = effectiveMoraAsOf_(loan.loanId, asOf);
   const rate = loanRateForTerm_(loan.term);
   const pays = loanPayments_(loan.loanId);
   const sched = loanSchedule_(loan), far = new Date(9999, 0, 1);
-  const withMora = computeOutstanding_(loan.principal, rate, loan.loanDate, pays, asOf, far, undefined, undefined, undefined, sched);
+  const withMora = computeOutstanding_(loan.principal, rate, loan.loanDate, pays, effAsOf, far, undefined, undefined, undefined, sched);
   // Capital+interés pendiente SIN mora: el MISMO motor con recargo diario 0. Robusto aunque
   // "Total a Pagar" venga vacío/erróneo en la fila (antes se restaba loan.totalDue y, si
   // faltaba, principalDue=0 y la mora absorbía el capital → duplicaba el "monto a pagar hoy").
-  const principalDue = computeOutstanding_(loan.principal, rate, loan.loanDate, pays, asOf, far, 0, undefined, undefined, sched);
+  const principalDue = computeOutstanding_(loan.principal, rate, loan.loanDate, pays, effAsOf, far, 0, undefined, undefined, sched);
   return Math.max(0, round2_(withMora - principalDue));
 }
 /**
@@ -2750,7 +3442,10 @@ function chargedMora_(loan, asOf) {
   // Fecha hasta la que corrió la mora: la del pago que cubrió el total base (capital+interés); si
   // nunca se cubrió, hoy. Los pagos POSTERIORES (que sólo cubren la mora) NO la corren: se congela
   // al saldarse el base (misma regla que applyPay, capital-primero).
-  const endDate = baseSettledDate_(loan, pays) || asOf;
+  let endDate = baseSettledDate_(loan, pays) || asOf;
+  // CONGELAMIENTO: si está congelado (o quedan días saltados), recorta el reloj a la fecha efectiva.
+  const effAsOf = effectiveMoraAsOf_(loan.loanId, asOf);
+  if (effAsOf.getTime() < endDate.getTime()) endDate = effAsOf;
   const effDays = Math.max(0, daysLate_(loan.dueDate, endDate) - moraGraceDays_());
   if (effDays <= 0) return 0;
   const base = round2_(loan.totalDue);
@@ -3742,6 +4437,75 @@ function fijarMoraFilaActiva() {
   setMoraAjusteFilaActiva_(round2_(n), 'fijada en ' + fmtMoney_(round2_(n)));
 }
 
+/**
+ * Menú: CONGELA el préstamo de la fila activa de "Prestatarios" — la mora deja de crecer desde
+ * la fecha elegida (por defecto hoy; se puede retro-fechar). Escribe esa fecha en "Congelado el";
+ * el Estado pasa a CONGELADO (con su color) y "Recargo por Mora"/"Saldo con Mora" se congelan solos.
+ */
+function congelarPrestamoFilaActiva() {
+  const ss = getSS_(), sh = ss.getActiveSheet(), ui = SpreadsheetApp.getUi();
+  if (sh.getName() !== CFG.SHEETS.BORROWERS) { ui.alert('Abrí la hoja "Prestatarios", seleccioná la fila del préstamo y volvé a usar esta opción.'); return; }
+  const row = sh.getActiveRange().getRow();
+  if (row < 2) { ui.alert('Seleccioná la fila de un préstamo.'); return; }
+  const H = headerIndex_(sh);
+  const sinceC = colByAny_(H, ['Congelado el']);
+  if (!sinceC) { ui.alert('Falta la columna "Congelado el". Ejecutá ① Configurar o 🆕 Aplicar novedades.'); return; }
+  const idC = colByAny_(H, ['ID Préstamo', 'ID Prestamo']) || PB.LOAN_ID;
+  const loanId = String(sh.getRange(row, idC).getValue()).trim();
+  if (!loanId) { ui.alert('La fila seleccionada no tiene un préstamo.'); return; }
+  // Solo se pueden congelar préstamos vencidos (en mora) y con saldo pendiente.
+  const fz = loanFreezable_(findLoanById_(loanId));
+  if (!fz.ok) { ui.alert(fz.reason); return; }
+  const hoy = new Date(); hoy.setHours(0, 0, 0, 0);
+  const resp = ui.prompt('Congelar préstamo ' + loanId,
+    'Fecha desde la que la mora deja de crecer (AAAA-MM-DD o DD/MM/AAAA). Dejá vacío para HOY (' + fmtDate_(hoy) + '):',
+    ui.ButtonSet.OK_CANCEL);
+  if (resp.getSelectedButton() !== ui.Button.OK) return;
+  const txt = String(resp.getResponseText()).trim();
+  let fecha = hoy;
+  if (txt) { const d = parseFreezeDate_(txt); if (!d) { ui.alert('Fecha inválida. Usá AAAA-MM-DD o DD/MM/AAAA (p. ej. ' + Utilities.formatDate(hoy, Session.getScriptTimeZone(), 'yyyy-MM-dd') + ').'); return; } fecha = d; }
+  sh.getRange(row, sinceC).setValue(fecha).setNumberFormat('yyyy-mm-dd');
+  try { ss.toast('Préstamo ' + loanId + ' CONGELADO desde ' + fmtDate_(fecha) + '. La mora dejó de crecer.', '❄ Congelado', 6); } catch (e) { }
+}
+/**
+ * Menú: DESCONGELA el préstamo de la fila activa. La mora vuelve a correr desde hoy, pero los
+ * días que estuvo congelado NO se cobran: se acumulan en "Días congelados" y se descuentan del
+ * atraso para siempre (ver effectiveMoraAsOf_). Vacía "Congelado el".
+ */
+function descongelarPrestamoFilaActiva() {
+  const ss = getSS_(), sh = ss.getActiveSheet(), ui = SpreadsheetApp.getUi();
+  if (sh.getName() !== CFG.SHEETS.BORROWERS) { ui.alert('Abrí la hoja "Prestatarios", seleccioná la fila del préstamo y volvé a usar esta opción.'); return; }
+  const row = sh.getActiveRange().getRow();
+  if (row < 2) { ui.alert('Seleccioná la fila de un préstamo.'); return; }
+  const H = headerIndex_(sh);
+  const sinceC = colByAny_(H, ['Congelado el']);
+  const daysC = colByAny_(H, ['Días congelados', 'Dias congelados']);
+  if (!sinceC || !daysC) { ui.alert('Faltan las columnas de congelamiento. Ejecutá ① Configurar o 🆕 Aplicar novedades.'); return; }
+  const idC = colByAny_(H, ['ID Préstamo', 'ID Prestamo']) || PB.LOAN_ID;
+  const loanId = String(sh.getRange(row, idC).getValue()).trim();
+  if (!loanId) { ui.alert('La fila seleccionada no tiene un préstamo.'); return; }
+  const since = sh.getRange(row, sinceC).getValue();
+  if (!(since instanceof Date)) { ui.alert('El préstamo ' + loanId + ' no está congelado.'); return; }
+  const loan = findLoanById_(loanId);
+  const hoy = new Date(); hoy.setHours(0, 0, 0, 0);
+  // Días de atraso saltados DURANTE el congelamiento (sólo los que habrían devengado mora).
+  const gap = loan ? Math.max(0, daysLate_(loan.dueDate, hoy) - daysLate_(loan.dueDate, since)) : Math.max(0, daysLate_(since, hoy));
+  const prev = Number(sh.getRange(row, daysC).getValue()) || 0;
+  sh.getRange(row, daysC).setValue(prev + gap);
+  sh.getRange(row, sinceC).clearContent();
+  try { ss.toast('Préstamo ' + loanId + ' DESCONGELADO. No se cobran ' + gap + ' día(s) de atraso del período congelado.', '☀ Descongelado', 6); } catch (e) { }
+}
+/** Parsea la fecha de congelamiento ingresada por el usuario: AAAA-MM-DD o DD/MM/AAAA (o con "-"). */
+function parseFreezeDate_(txt) {
+  txt = String(txt || '').trim();
+  let y, mo, da, m = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/.exec(txt);   // AAAA-MM-DD
+  if (m) { y = +m[1]; mo = +m[2]; da = +m[3]; }
+  else { m = /^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/.exec(txt); if (m) { da = +m[1]; mo = +m[2]; y = +m[3]; } } // DD/MM/AAAA
+  if (!m || mo < 1 || mo > 12 || da < 1 || da > 31) return null;
+  const d = new Date(y, mo - 1, da);
+  return (d.getFullYear() === y && d.getMonth() === mo - 1 && d.getDate() === da) ? d : null;
+}
+
 /** Datos derivados del estado de cuenta (compartidos por el PDF y el correo). */
 function statementData_(loan) {
   const pays = loanPayments_(loan.loanId).sort((a, b) => a.date - b.date);
@@ -3753,7 +4517,11 @@ function statementData_(loan) {
   // Mora COBRADA (histórica): respeta la Fecha de Pago y queda como constancia aunque el
   // préstamo esté saldado. Días de atraso = hasta el pago que cubrió el total base (capital+
   // interés), o hasta hoy si sigue impago. Espeja la hoja "Estudio de Estados" y chargedMora_.
-  const endDate = baseSettledDate_(loan, pays) || new Date();
+  let endDate = baseSettledDate_(loan, pays) || new Date();
+  // CONGELAMIENTO: corta los días de atraso en la fecha efectiva, igual que chargedMora_, para
+  // que los "días de atraso" mostrados coincidan con el recargo congelado.
+  const effAsOf = effectiveMoraAsOf_(loan.loanId, new Date());
+  if (effAsOf.getTime() < endDate.getTime()) endDate = effAsOf;
   const dLate = daysLate_(loan.dueDate, endDate);
   const feeAccum = chargedMora_(loan);
   const overdue = !paid && (loan.dueDate instanceof Date) && new Date().getTime() > loan.dueDate.getTime();
@@ -4020,8 +4788,16 @@ function doGet(e) {
   const page = e && e.parameter && e.parameter.page;
   if (page === 'saldo') return HtmlService.createHtmlOutput(balancePageHtml_()).setTitle('Consulta de Saldo')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+  if (page === 'firmar-congelamiento') return HtmlService.createHtmlOutput(freezeSigningPageHtml_(String((e.parameter.loan) || '').trim()))
+    .setTitle('Firmar Congelamiento').addMetaTag('viewport', 'width=device-width, initial-scale=1');
+  if (page === 'firmar-plan') return HtmlService.createHtmlOutput(planSigningPageHtml_(String((e.parameter.loan) || '').trim()))
+    .setTitle('Firmar Acuerdo de Plan de Pago').addMetaTag('viewport', 'width=device-width, initial-scale=1');
   if (page === 'firmar') return HtmlService.createHtmlOutput(signingPageHtml_(String((e.parameter.loan) || '').trim()))
     .setTitle('Firmar Contrato').addMetaTag('viewport', 'width=device-width, initial-scale=1');
+  if (page === 'congelar') return HtmlService.createHtmlOutput(freezeRequestFormHtml_(String((e.parameter.loan) || '').trim()))
+    .setTitle('Solicitud de congelamiento').addMetaTag('viewport', 'width=device-width, initial-scale=1');
+  if (page === 'plan') return HtmlService.createHtmlOutput(planRequestFormHtml_(String((e.parameter.loan) || '').trim()))
+    .setTitle('Solicitud de plan de pago').addMetaTag('viewport', 'width=device-width, initial-scale=1');
   // Formulario clásico disponible en ?page=clasico; por defecto se sirve el
   // formulario inteligente (detecta clientes existentes por Correo + DNI).
   if (page === 'clasico') return HtmlService.createHtmlOutput(acceptingApplications_() ? intakeHtml_() : closedHtml_())
@@ -4367,6 +5143,644 @@ function lookupBalance(loanId, dni) {
   });
 }
 
+/* ===================== SOLICITUD DE CONGELAMIENTO (formulario web) ===================== */
+/** Formulario público para pedir el congelamiento de un préstamo vencido (?page=congelar&loan=…).
+ *  Mismo tema e interacción que la página de firma (barra de progreso, pantalla de éxito). */
+function freezeRequestFormHtml_(loanId) {
+  const lid = esc_(String(loanId || '').trim());
+  const pctInt = Math.round(freezeDownPct_() * 100);
+  return `<!DOCTYPE html><html lang="es"><head><base target="_top"><meta charset="utf-8"><style>
+    body{font-family:Arial,sans-serif;background:#f4f6fa;margin:0;padding:24px;color:#222}
+    .card{max-width:560px;margin:0 auto;background:#fff;border-radius:10px;padding:24px 28px;box-shadow:0 2px 12px rgba(0,0,0,.08)}
+    h1{font-size:20px;color:#1c4587;margin:6px 0}
+    label{font-weight:bold;display:block;margin:12px 0 4px}
+    input[type=text],input[type=number],input[type=date],textarea{width:100%;box-sizing:border-box;padding:9px;border:1px solid #ccc;border-radius:6px;font-size:14px}
+    button{margin-top:10px;background:#1c4587;color:#fff;border:0;border-radius:6px;padding:12px 18px;font-weight:bold;cursor:pointer;width:100%}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    .terms{width:100%;border-collapse:collapse;margin:8px 0}
+    .terms td{padding:6px 8px;border:1px solid #ddd;font-size:14px}
+    .terms td.k{background:#f0f4fa;font-weight:bold;width:58%}
+    .terms td.big{font-size:15px;font-weight:bold;color:#0b2f52}
+    .warn{background:#fff2cc;border-left:4px solid #bf9000;padding:10px 12px;border-radius:6px;margin:12px 0;font-size:13px}
+    .consent{display:flex;gap:8px;align-items:flex-start;margin:10px 0;font-size:13px}
+    .consent input{transform:scale(1.25);margin-top:3px}
+    #gerr,#out{margin-top:12px;padding:12px;border-radius:6px;display:none}.err{background:#f4cccc}.ok{background:#e6f4ea}
+    #loadingView{text-align:center;padding:34px 12px}
+    .pbar-track{width:100%;height:24px;background:#e3e9f4;border-radius:12px;overflow:hidden;margin:14px 0 8px}
+    .pbar-fill{height:100%;width:0%;border-radius:12px;transition:width .45s ease;background-color:#1c4587;
+      background-image:linear-gradient(45deg,rgba(255,255,255,.30) 25%,transparent 25%,transparent 50%,rgba(255,255,255,.30) 50%,rgba(255,255,255,.30) 75%,transparent 75%,transparent);
+      background-size:28px 28px;animation:pbar-stripes 1s linear infinite}
+    @keyframes pbar-stripes{from{background-position:0 0}to{background-position:28px 0}}
+    .check{width:72px;height:72px;line-height:72px;margin:6px auto 10px;border-radius:50%;background:#38761d;color:#fff;font-size:40px;font-weight:bold;text-align:center}
+    .sub{color:#555;margin:0 0 8px;line-height:1.45}.hint{font-size:12px;color:#888}
+    .hide{display:none}</style></head><body>
+    <div class="card">${brandHeaderHtml_()}<h1>Solicitud de congelamiento</h1>
+
+    <div id="gate">
+      <p class="hint">Si tu préstamo está <b>vencido</b>, podés pedir <b>congelar la mora</b> (que deje de crecer) mientras acordás un pago. Ingresá tu DNI para ver tu préstamo.</p>
+      <label>ID Préstamo</label><input type="text" id="loan" value="${lid}" placeholder="L-0001">
+      <label>DNI</label><input type="text" id="dni" inputmode="numeric" placeholder="Tu DNI">
+      <button onclick="look()">Ver mi préstamo</button>
+      <div id="gerr"></div>
+    </div>
+
+    <div id="planview" class="hide">
+      <div id="det"></div>
+      <div class="warn">⚠ <b>Importante:</b> para congelar, primero debe estar <b>pagado el ${pctInt}%</b> del préstamo (dentro de las 24 h). Además, si congelás, es muy probable que un préstamo futuro, de otorgarse, sea por un <b>monto mucho menor</b>.</div>
+      <label>¿Ya pagaste algo y no figura? Indicá el monto (lo verificaremos)</label>
+      <input type="number" id="paid" min="0" step="0.01" value="0" placeholder="0">
+      <table class="terms">
+        <tr><td class="k">Pagado hasta ahora (registrado)</td><td id="paidRec">—</td></tr>
+        <tr><td class="k">A pagar dentro de 24 h (${pctInt}% del préstamo)</td><td class="big" id="due24">—</td></tr>
+        <tr><td class="k">Saldo restante (antes de la fecha que elijas)</td><td class="big" id="rem">—</td></tr>
+      </table>
+      <label>Fecha de pago del saldo restante (máximo 3 semanas)</label><input type="date" id="pay">
+      <label>Motivo (opcional)</label><textarea id="reason" rows="2" placeholder="Contanos brevemente tu situación"></textarea>
+      <label class="consent"><input type="checkbox" id="c1"><span>Me comprometo a pagar el <b>${pctInt}% dentro de las 24 horas</b> (antes de que se apruebe el congelamiento).</span></label>
+      <label class="consent"><input type="checkbox" id="c2"><span>Me comprometo a pagar el <b>saldo restante</b> antes de la fecha que elijo (máximo 3 semanas).</span></label>
+      <label class="consent"><input type="checkbox" id="c3"><span>Entiendo que un futuro préstamo, de haberlo, será por un <b>monto mucho menor</b>.</span></label>
+      <button id="btnSend" onclick="send()" disabled>Enviar solicitud</button>
+      <div id="out"></div>
+    </div>
+
+    <div id="loadingView" class="hide">
+      <p id="loadPhase" style="font-weight:bold;color:#1c4587;margin:0;font-size:16px">Enviando tu solicitud…</p>
+      <div class="pbar-track"><div class="pbar-fill" id="pbarFill"></div></div>
+      <p id="loadPct" style="color:#1c4587;font-weight:bold;margin:0;font-size:20px">0%</p>
+      <p class="hint" style="margin-top:6px">No cierres esta ventana.</p>
+    </div>
+
+    <div id="done" class="hide" style="text-align:center;padding:8px 0"></div>
+
+    <script>
+      var CLIENT_IP='', DEVICE={loc:{}}, PAGE_OPEN=Date.now(), LOANDATA=null;
+      function $(id){return document.getElementById(id);}
+      function money(n){ n=Math.round((Number(n)||0)*100)/100; try{return '$'+n.toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2});}catch(e){return '$'+n.toFixed(2);} }
+      function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+      (function(){ var t=new Date(); t.setHours(0,0,0,0); var mx=new Date(t.getTime()+21*864e5);
+        function iso(d){return d.getFullYear()+'-'+('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2);}
+        $('pay').min=iso(t); $('pay').max=iso(mx); })();
+      try{ fetch('https://api.ipify.org?format=json').then(function(r){return r.json();}).then(function(j){CLIENT_IP=(j&&j.ip)||'';}).catch(function(){});}catch(e){}
+      (function(){ try{ var n=navigator, d=DEVICE;
+        d.userAgent=n.userAgent||''; d.os=n.platform||''; d.langs=(n.languages&&n.languages.join)?n.languages.join(','):(n.language||'');
+        d.screen=(screen.width+'x'+screen.height); d.dpr=window.devicePixelRatio||''; d.color=screen.colorDepth||'';
+        d.touch=n.maxTouchPoints||0; d.cores=n.hardwareConcurrency||''; d.memory=n.deviceMemory||'';
+        try{d.tz=Intl.DateTimeFormat().resolvedOptions().timeZone||'';}catch(e){d.tz='';} d.tzOffset=(new Date()).getTimezoneOffset();
+        d.net=(n.connection&&n.connection.effectiveType)||''; d.webdriver=!!n.webdriver;
+      }catch(e){}
+        try{ fetch('https://ipwho.is/').then(function(r){return r.json();}).then(function(j){ if(j&&j.success!==false){ DEVICE.loc.ipText=[j.city,j.region,j.country].filter(Boolean).join(', '); if(!DEVICE.loc.source)DEVICE.loc.source='IP'; } }).catch(function(){}); }catch(e){}
+        try{ if(navigator.geolocation) navigator.geolocation.getCurrentPosition(function(p){ DEVICE.loc.gps=p.coords.latitude.toFixed(5)+','+p.coords.longitude.toFixed(5); DEVICE.loc.gpsAcc=Math.round(p.coords.accuracy); DEVICE.loc.source='GPS'; }, function(){}, {timeout:5000,maximumAge:600000}); }catch(e){}
+      })();
+      function gerr(m){ var g=$('gerr'); g.className='err'; g.textContent=m; g.style.display='block'; }
+      function out(m,err){ var o=$('out'); o.className=err?'err':'ok'; o.textContent=m; o.style.display='block'; }
+      ['c1','c2','c3'].forEach(function(id){ $(id).onchange=revalidate; });
+      $('pay').onchange=revalidate; $('paid').oninput=recalc;
+      function recalc(){
+        if(!LOANDATA) return;
+        var P=Math.max(0, Number($('paid').value)||0);
+        var due=Math.max(0, Math.round((LOANDATA.downShort - P)*100)/100);
+        $('paidRec').textContent=money(LOANDATA.recorded);
+        $('due24').textContent = due<=0 ? '✅ ya cubierto' : money(due);
+        $('rem').textContent=money(LOANDATA.remaining);
+      }
+      function revalidate(){ $('btnSend').disabled=!(LOANDATA && $('c1').checked && $('c2').checked && $('c3').checked && $('pay').value); }
+      function look(){
+        $('gerr').style.display='none';
+        if(!$('loan').value || !$('dni').value){ gerr('Ingresá el ID del préstamo y tu DNI.'); return; }
+        $('gate').classList.add('hide'); $('loadingView').classList.remove('hide');
+        startProgress([[25,'Verificando tu identidad…'],[65,'Calculando tu saldo y la mora…']]);
+        google.script.run.withSuccessHandler(function(r){
+          if(!r||!r.ok){ stopProgress(); $('loadingView').classList.add('hide'); $('gate').classList.remove('hide'); gerr((r&&r.reason)||'No se encontró el préstamo.'); return; }
+          LOANDATA=r;
+          $('det').innerHTML='<table class="terms">'+
+            '<tr><td class="k">Préstamo</td><td>'+esc(r.name)+' — '+esc(r.loanId)+'</td></tr>'+
+            '<tr><td class="k">Capital</td><td>'+money(r.principal)+'</td></tr>'+
+            '<tr><td class="k">Vencimiento</td><td>'+esc(r.dueDateFmt)+' ('+r.daysLate+' día(s) de atraso)</td></tr>'+
+            '<tr><td class="k">Recargo por mora</td><td>'+money(r.mora)+'</td></tr>'+
+            '<tr><td class="k">Saldo con mora (hoy)</td><td class="big">'+money(r.balance)+'</td></tr></table>';
+          finishProgress(function(){ $('loadingView').classList.add('hide'); $('planview').classList.remove('hide'); recalc(); revalidate(); });
+        }).withFailureHandler(function(e){ stopProgress(); $('loadingView').classList.add('hide'); $('gate').classList.remove('hide'); gerr((e&&e.message)||e); }).lookupFreezeLoan($('loan').value,$('dni').value);
+      }
+      /* Barra de progreso (idéntica a la firma del contrato). */
+      var progTimer=null, progVal=0;
+      function setProgress(p,ph){ progVal=Math.max(0,Math.min(100,Math.round(p))); var f=$('pbarFill'),pc=$('loadPct'),lp=$('loadPhase'); if(f)f.style.width=progVal+'%'; if(pc)pc.textContent=progVal+'%'; if(ph&&lp)lp.textContent=ph; }
+      function startProgress(ph){ ph = ph || [[12,'Validando tu préstamo…'],[48,'Registrando tu solicitud…'],[80,'Avisando al prestamista…']]; var i=1; setProgress(ph[0][0],ph[0][1]); clearInterval(progTimer);
+        progTimer=setInterval(function(){ if(i<ph.length){ setProgress(ph[i][0],ph[i][1]); i++; } else if(progVal<95){ setProgress(progVal+1); } },650); }
+      function stopProgress(){ clearInterval(progTimer); progTimer=null; }
+      function finishProgress(cb){ stopProgress(); setProgress(100,'¡Listo!'); setTimeout(cb,400); }
+      function showDone(m){ var d=$('done'); d.classList.remove('hide');
+        d.innerHTML='<div class="check">✓</div><h1 style="color:#38761d">¡Solicitud enviada!</h1>'+
+          '<p class="sub">'+esc(m||'Revisaremos tu pedido y te contactaremos.')+'</p>'+
+          '<p class="hint">Ya podés cerrar esta ventana.</p>'; }
+      function send(){
+        $('out').style.display='none'; $('btnSend').disabled=true;
+        $('planview').classList.add('hide'); $('loadingView').classList.remove('hide'); startProgress();
+        var payload={ loanId:$('loan').value, dni:$('dni').value, promisedDate:$('pay').value,
+          alreadyPaid:Number($('paid').value)||0, reason:$('reason').value, agree:true,
+          ip:CLIENT_IP, device:DEVICE, dwellMs:Date.now()-PAGE_OPEN };
+        google.script.run.withSuccessHandler(function(r){
+          if(r&&r.ok){ finishProgress(function(){ $('loadingView').classList.add('hide'); showDone(r.message); }); }
+          else { stopProgress(); $('loadingView').classList.add('hide'); $('planview').classList.remove('hide'); $('btnSend').disabled=false; out((r&&r.reason)||'No se pudo enviar.', true); }
+        }).withFailureHandler(function(e){ stopProgress(); $('loadingView').classList.add('hide'); $('planview').classList.remove('hide'); $('btnSend').disabled=false; out((e&&e.message)||e, true); }).submitFreezeRequest(payload);
+      }
+    </script></div></body></html>`;
+}
+
+/** Verifica identidad (ID + DNI) y que el préstamo sea congelable; devuelve sus datos NUMÉRICOS para el formulario. */
+function lookupFreezeLoan(loanId, dni) {
+  return guard_('lookupFreezeLoan', function () {
+    const loan = findLoanById_(String(loanId || '').trim());
+    if (!loan || String(loan.dni).replace(/\D/g, '') !== String(dni || '').replace(/\D/g, ''))
+      return { ok: false, reason: 'Datos no encontrados. Verificá el ID del préstamo y tu DNI.' };
+    const fz = loanFreezable_(loan);
+    if (!fz.ok) return { ok: false, reason: fz.reason };
+    const a = freezeAmounts_(loan, 0);
+    return {
+      ok: true, name: loan.name, loanId: loan.loanId, principal: round2_(loan.principal),
+      dueDateFmt: fmtDate_(loan.dueDate), daysLate: daysLate_(loan.dueDate, new Date()),
+      mora: a.mora, balance: a.balance, total: a.total, required: a.required,
+      recorded: a.recorded, downShort: a.downShort, remaining: a.remaining, pctInt: a.pctInt,
+    };
+  });
+}
+
+/** ¿Ya hay una solicitud de congelamiento Pendiente o Aprobada para este préstamo? (evita duplicados). */
+function hasPendingFreezeRequest_(sh, loanId) {
+  const last = sh.getLastRow(); if (last < 2) return false;
+  const H = headerMap_(sh), idC = H['ID Préstamo'] || 2, stC = H['Estado'] || 23;
+  const data = sh.getRange(2, 1, last - 1, Math.max(idC, stC)).getValues(), id = String(loanId).trim();
+  for (let i = 0; i < data.length; i++)
+    if (String(data[i][idC - 1]).trim() === id) { const st = String(data[i][stC - 1]).trim(); if (st === 'Pendiente' || st === 'Aprobado') return true; }
+  return false;
+}
+
+/** Recibe la solicitud del formulario: valida, guarda en "Solicitudes de Congelamiento" y avisa a ambas partes. */
+function submitFreezeRequest(p) {
+  return guard_('submitFreezeRequest', function () {
+    p = p || {};
+    const loan = findLoanById_(String(p.loanId || '').trim());
+    if (!loan || String(loan.dni).replace(/\D/g, '') !== String(p.dni || '').replace(/\D/g, ''))
+      return { ok: false, reason: 'Datos no encontrados. Verificá el ID del préstamo y tu DNI.' };
+    const fz = loanFreezable_(loan);
+    if (!fz.ok) return { ok: false, reason: fz.reason };
+    if (p.agree !== true) return { ok: false, reason: 'Debés aceptar las condiciones para continuar.' };
+    const promised = parseFreezeDate_(String(p.promisedDate || '').trim());
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const max = new Date(today.getTime() + 21 * 86400000);
+    if (!promised || promised.getTime() < today.getTime() || promised.getTime() > max.getTime())
+      return { ok: false, reason: 'Elegí una fecha de pago válida, dentro de las próximas 3 semanas.' };
+    const ss = getSS_();
+    const sh = ss.getSheetByName(CFG.SHEETS.FREEZE_REQ) || setupFreezeRequests_(ss);
+    if (hasPendingFreezeRequest_(sh, loan.loanId))
+      return { ok: false, reason: 'Ya hay una solicitud de congelamiento en curso para este préstamo.' };
+    const a = freezeAmounts_(loan, p.alreadyPaid);
+    const loc = (p.device && p.device.loc) || {};
+    const ubic = loc.gps ? ('GPS ' + loc.gps) : (loc.ipText || '');
+    // Orden EXACTO de FREEZE_REQ_HEADERS (29 col). La col 12 ("Falta para el 50%") es una FÓRMULA viva (se escribe aparte).
+    const rowVals = [new Date(), loan.loanId, loan.clientId, loan.name, loan.dni, loan.email, loan.phone,
+      loan.principal, a.balance, a.mora, a.P, '', a.remaining, loan.dueDate, promised,
+      String(p.reason || '').slice(0, 500), ubic, String(p.ip || ''), String((p.device && p.device.userAgent) || '').slice(0, 250),
+      false, false, '', 'Pendiente', '', '', '', 'PENDIENTE', '', ''];
+    const row = nbAppend_(sh, rowVals);
+    sh.getRange(row, 1).setNumberFormat('yyyy-mm-dd hh:mm');
+    sh.getRange(row, 8, 1, 4).setNumberFormat(CFG.CURRENCY_FMT);   // Capital..Ya pagado
+    sh.getRange(row, 13, 1, 1).setNumberFormat(CFG.CURRENCY_FMT);  // Saldo restante
+    sh.getRange(row, 14, 1, 2).setNumberFormat('yyyy-mm-dd');
+    sh.getRange(row, FR_COVER_COL).setFormula(freezeCoverFormula_(row)); // "Falta para el 50% (24 h)" viva
+    try { logDeviceInfo_(loan, loan.clientId, { device: p.device || {}, ip: p.ip || '', userAgent: (p.device && p.device.userAgent) || '', dwellMs: p.dwellMs, signedAt: new Date() }); } catch (e) { logError_('submitFreezeRequest:device', e); }
+    const lender = getSetting_('Correo del Prestamista');
+    const amtRows = '<tr><td><b>A pagar en 24 h (' + a.pctInt + '%)</b>&nbsp;</td><td>' + fmtMoney_(a.downShort) + '</td></tr>' +
+      '<tr><td><b>Saldo restante</b>&nbsp;</td><td>' + fmtMoney_(a.remaining) + '</td></tr>' +
+      (a.P > 0 ? '<tr><td><b>Ya pagado (declarado)</b>&nbsp;</td><td>' + fmtMoney_(a.P) + '</td></tr>' : '');
+    try {
+      if (loan.email) sendBrandedEmail_(loan.email, 'Recibimos tu solicitud de congelamiento — ' + loan.loanId,
+        'Hola ' + loan.name + ', recibimos tu solicitud de congelamiento del préstamo ' + loan.loanId + '. Te avisaremos cuando la revisemos.',
+        '<p>Hola ' + esc_(loan.name) + ',</p><p>Recibimos tu <b>solicitud de congelamiento</b> del préstamo <b>' + esc_(loan.loanId) + '</b>.</p>' +
+        '<table style="border-collapse:collapse">' +
+        '<tr><td><b>Saldo con mora</b>&nbsp;</td><td>' + fmtMoney_(a.balance) + '</td></tr>' + amtRows +
+        '<tr><td><b>Fecha de pago del saldo</b>&nbsp;</td><td>' + fmtDate_(promised) + '</td></tr></table>' +
+        '<p>Te avisaremos cuando la revisemos.</p>');
+      if (lender) sendBrandedEmail_(lender, 'Nueva solicitud de congelamiento — ' + loan.loanId,
+        'Nueva solicitud de congelamiento de ' + loan.name + ' (' + loan.loanId + '). Revisala en «Solicitudes de Congelamiento».',
+        '<p>Nueva <b>solicitud de congelamiento</b>:</p><table style="border-collapse:collapse">' +
+        '<tr><td><b>Préstamo</b>&nbsp;</td><td>' + esc_(loan.loanId) + '</td></tr>' +
+        '<tr><td><b>Cliente</b>&nbsp;</td><td>' + esc_(loan.name) + ' (DNI ' + esc_(loan.dni) + ')</td></tr>' +
+        '<tr><td><b>Saldo con mora</b>&nbsp;</td><td>' + fmtMoney_(a.balance) + '</td></tr>' + amtRows +
+        '<tr><td><b>Fecha de pago del saldo</b>&nbsp;</td><td>' + fmtDate_(promised) + '</td></tr></table>' +
+        '<p>Aprobala o rechazala en la hoja «Solicitudes de Congelamiento».</p>');
+    } catch (e) { logError_('submitFreezeRequest:email', e); }
+    return { ok: true, message: '¡Solicitud enviada! Revisaremos tu pedido y te contactaremos.' };
+  });
+}
+
+/* ===================== SOLICITUD DE PLAN DE PAGO (formulario web) ===================== */
+/** Formulario público para pedir un plan de pago (Acuerdo) de un préstamo al 100% de mora
+ *  (?page=plan&loan=…). Mismo tema/interacción que el formulario de congelamiento. */
+function planRequestFormHtml_(loanId) {
+  const lid = esc_(String(loanId || '').trim());
+  const pctInt = Math.round(planDownPct_() * 100);
+  return `<!DOCTYPE html><html lang="es"><head><base target="_top"><meta charset="utf-8"><style>
+    body{font-family:Arial,sans-serif;background:#f4f6fa;margin:0;padding:24px;color:#222}
+    .card{max-width:560px;margin:0 auto;background:#fff;border-radius:10px;padding:24px 28px;box-shadow:0 2px 12px rgba(0,0,0,.08)}
+    h1{font-size:20px;color:#674ea7;margin:6px 0}
+    label{font-weight:bold;display:block;margin:12px 0 4px}
+    input[type=text],input[type=number],textarea{width:100%;box-sizing:border-box;padding:9px;border:1px solid #ccc;border-radius:6px;font-size:14px}
+    button{margin-top:10px;background:#674ea7;color:#fff;border:0;border-radius:6px;padding:12px 18px;font-weight:bold;cursor:pointer;width:100%}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    .terms{width:100%;border-collapse:collapse;margin:8px 0}
+    .terms td{padding:6px 8px;border:1px solid #ddd;font-size:14px}
+    .terms td.k{background:#f3f0fa;font-weight:bold;width:58%}
+    .terms td.big{font-size:15px;font-weight:bold;color:#351c75}
+    .opt{display:flex;gap:8px;align-items:flex-start;margin:8px 0;font-weight:normal;font-size:14px;border:1px solid #d8d0ec;border-radius:6px;padding:8px 10px}
+    .opt input{transform:scale(1.2);margin-top:3px}
+    .warn{background:#fff2cc;border-left:4px solid #bf9000;padding:10px 12px;border-radius:6px;margin:12px 0;font-size:13px}
+    .consent{display:flex;gap:8px;align-items:flex-start;margin:10px 0;font-size:13px}
+    .consent input{transform:scale(1.25);margin-top:3px}
+    #gerr,#out{margin-top:12px;padding:12px;border-radius:6px;display:none}.err{background:#f4cccc}.ok{background:#e6f4ea}
+    #loadingView{text-align:center;padding:34px 12px}
+    .pbar-track{width:100%;height:24px;background:#ece7f6;border-radius:12px;overflow:hidden;margin:14px 0 8px}
+    .pbar-fill{height:100%;width:0%;border-radius:12px;transition:width .45s ease;background-color:#674ea7;
+      background-image:linear-gradient(45deg,rgba(255,255,255,.30) 25%,transparent 25%,transparent 50%,rgba(255,255,255,.30) 50%,rgba(255,255,255,.30) 75%,transparent 75%,transparent);
+      background-size:28px 28px;animation:pbar-stripes 1s linear infinite}
+    @keyframes pbar-stripes{from{background-position:0 0}to{background-position:28px 0}}
+    .check{width:72px;height:72px;line-height:72px;margin:6px auto 10px;border-radius:50%;background:#38761d;color:#fff;font-size:40px;font-weight:bold;text-align:center}
+    .sub{color:#555;margin:0 0 8px;line-height:1.45}.hint{font-size:12px;color:#888}
+    .hide{display:none}</style></head><body>
+    <div class="card">${brandHeaderHtml_()}<h1>Solicitud de plan de pago</h1>
+
+    <div id="gate">
+      <p class="hint">Si tu préstamo llegó al <b>tope de mora</b>, podés acordar un <b>plan de pago</b> (pago único, 4 o 6 cuotas) y frenar la mora. Ingresá tu DNI para ver tu préstamo.</p>
+      <label>ID Préstamo</label><input type="text" id="loan" value="${lid}" placeholder="L-0001">
+      <label>DNI</label><input type="text" id="dni" inputmode="numeric" placeholder="Tu DNI">
+      <button onclick="look()">Ver mi préstamo</button>
+      <div id="gerr"></div>
+    </div>
+
+    <div id="planview" class="hide">
+      <div id="det"></div>
+      <div class="warn">⚠ <b>Importante:</b> para activar el plan, primero debe estar <b>pagado el ${pctInt}%</b> del préstamo (dentro de las 24 h). La mora acumulada queda <b>suspendida</b> mientras cumplas el plan; si incumplís, se restablece.</div>
+      <label>Elegí una opción de pago</label>
+      <label class="opt"><input type="radio" name="opt" value="1" onchange="pickOpt()"><span><b>Pago único</b> — todo el saldo en un solo pago.</span></label>
+      <label class="opt"><input type="radio" name="opt" value="4" onchange="pickOpt()"><span><b>4 cuotas mensuales</b></span></label>
+      <label class="opt"><input type="radio" name="opt" value="6" onchange="pickOpt()"><span><b>6 cuotas mensuales</b></span></label>
+      <table class="terms" id="sched"></table>
+      <table class="terms">
+        <tr><td class="k">Pagado hasta ahora (registrado)</td><td id="paidRec">—</td></tr>
+        <tr><td class="k">A pagar dentro de 24 h (${pctInt}% del préstamo)</td><td class="big" id="due24">—</td></tr>
+      </table>
+      <label>Motivo (opcional)</label><textarea id="reason" rows="2" placeholder="Contanos brevemente tu situación"></textarea>
+      <label class="consent"><input type="checkbox" id="c1"><span>Me comprometo a pagar el <b>${pctInt}% dentro de las 24 horas</b> para activar el plan.</span></label>
+      <label class="consent"><input type="checkbox" id="c2"><span>Me comprometo a pagar las <b>cuotas en fecha</b>. Reconozco la deuda.</span></label>
+      <label class="consent"><input type="checkbox" id="c3"><span>Entiendo que si incumplo un pago, la <b>mora se restablece</b> y el saldo total se vuelve exigible.</span></label>
+      <button id="btnSend" onclick="send()" disabled>Enviar solicitud</button>
+      <div id="out"></div>
+    </div>
+
+    <div id="loadingView" class="hide">
+      <p id="loadPhase" style="font-weight:bold;color:#674ea7;margin:0;font-size:16px">Enviando tu solicitud…</p>
+      <div class="pbar-track"><div class="pbar-fill" id="pbarFill"></div></div>
+      <p id="loadPct" style="color:#674ea7;font-weight:bold;margin:0;font-size:20px">0%</p>
+      <p class="hint" style="margin-top:6px">No cierres esta ventana.</p>
+    </div>
+
+    <div id="done" class="hide" style="text-align:center;padding:8px 0"></div>
+
+    <script>
+      var CLIENT_IP='', DEVICE={loc:{}}, PAGE_OPEN=Date.now(), LOANDATA=null, OPT=0;
+      function $(id){return document.getElementById(id);}
+      function money(n){ n=Math.round((Number(n)||0)*100)/100; try{return '$'+n.toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2});}catch(e){return '$'+n.toFixed(2);} }
+      function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+      var MESES=['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+      function fmtD(d){ return d.getDate()+' '+MESES[d.getMonth()]+' '+d.getFullYear(); }
+      try{ fetch('https://api.ipify.org?format=json').then(function(r){return r.json();}).then(function(j){CLIENT_IP=(j&&j.ip)||'';}).catch(function(){});}catch(e){}
+      (function(){ try{ var n=navigator, d=DEVICE;
+        d.userAgent=n.userAgent||''; d.os=n.platform||''; d.langs=(n.languages&&n.languages.join)?n.languages.join(','):(n.language||'');
+        d.screen=(screen.width+'x'+screen.height); d.dpr=window.devicePixelRatio||''; d.color=screen.colorDepth||'';
+        d.touch=n.maxTouchPoints||0; d.cores=n.hardwareConcurrency||''; d.memory=n.deviceMemory||'';
+        try{d.tz=Intl.DateTimeFormat().resolvedOptions().timeZone||'';}catch(e){d.tz='';} d.tzOffset=(new Date()).getTimezoneOffset();
+        d.net=(n.connection&&n.connection.effectiveType)||''; d.webdriver=!!n.webdriver;
+      }catch(e){}
+        try{ fetch('https://ipwho.is/').then(function(r){return r.json();}).then(function(j){ if(j&&j.success!==false){ DEVICE.loc.ipText=[j.city,j.region,j.country].filter(Boolean).join(', '); if(!DEVICE.loc.source)DEVICE.loc.source='IP'; } }).catch(function(){}); }catch(e){}
+        try{ if(navigator.geolocation) navigator.geolocation.getCurrentPosition(function(p){ DEVICE.loc.gps=p.coords.latitude.toFixed(5)+','+p.coords.longitude.toFixed(5); DEVICE.loc.gpsAcc=Math.round(p.coords.accuracy); DEVICE.loc.source='GPS'; }, function(){}, {timeout:5000,maximumAge:600000}); }catch(e){}
+      })();
+      function gerr(m){ var g=$('gerr'); g.className='err'; g.textContent=m; g.style.display='block'; }
+      function out(m,err){ var o=$('out'); o.className=err?'err':'ok'; o.textContent=m; o.style.display='block'; }
+      ['c1','c2','c3'].forEach(function(id){ $(id).onchange=revalidate; });
+      function pickOpt(){ var r=document.querySelector('input[name=opt]:checked'); OPT=r?Number(r.value):0; drawSched(); revalidate(); }
+      function monthlyDates(n){ var today=new Date(); today.setHours(0,0,0,0); var out=[];
+        if(n<=1){ var d=new Date(today.getTime()+14*864e5); return [d]; }
+        for(var k=1;k<=n;k++){ var d=new Date(today.getFullYear(), today.getMonth()+k, today.getDate()); out.push(d); } return out; }
+      function drawSched(){
+        if(!LOANDATA || !OPT){ $('sched').innerHTML=''; return; }
+        var n=OPT, base=Math.round((LOANDATA.total/n)*100)/100, paid=LOANDATA.recorded, dates=monthlyDates(n);
+        var html='<tr><td class="k">Cuota</td><td class="k">Vencimiento (aprox.)</td><td class="k">Monto</td></tr>';
+        var left=paid;
+        for(var k=0;k<n;k++){
+          var monto=(k===n-1)?Math.round((LOANDATA.total-base*(n-1))*100)/100:base;
+          var ap=Math.min(left,monto); var neto=Math.round((monto-ap)*100)/100; left=Math.round((left-ap)*100)/100;
+          var et=(n===1)?'Pago único':(k+1)+' de '+n;
+          html+='<tr><td>'+et+'</td><td>'+fmtD(dates[k])+'</td><td>'+money(neto)+(ap>0?' <span style="color:#888">(−'+money(ap)+' ya pagado)</span>':'')+'</td></tr>';
+        }
+        $('sched').innerHTML=html;
+      }
+      function revalidate(){ $('btnSend').disabled=!(LOANDATA && OPT && $('c1').checked && $('c2').checked && $('c3').checked); }
+      function look(){
+        $('gerr').style.display='none';
+        if(!$('loan').value || !$('dni').value){ gerr('Ingresá el ID del préstamo y tu DNI.'); return; }
+        $('gate').classList.add('hide'); $('loadingView').classList.remove('hide');
+        startProgress([[25,'Verificando tu identidad…'],[65,'Calculando tu saldo y la mora…']]);
+        google.script.run.withSuccessHandler(function(r){
+          if(!r||!r.ok){ stopProgress(); $('loadingView').classList.add('hide'); $('gate').classList.remove('hide'); gerr((r&&r.reason)||'No se encontró el préstamo.'); return; }
+          LOANDATA=r;
+          $('det').innerHTML='<table class="terms">'+
+            '<tr><td class="k">Préstamo</td><td>'+esc(r.name)+' — '+esc(r.loanId)+'</td></tr>'+
+            '<tr><td class="k">Total a pagar (capital + interés)</td><td>'+money(r.total)+'</td></tr>'+
+            '<tr><td class="k">Mora acumulada (se suspende)</td><td>'+money(r.mora)+'</td></tr>'+
+            '<tr><td class="k">Saldo base pendiente (sin mora)</td><td class="big">'+money(r.base)+'</td></tr></table>';
+          $('paidRec').textContent=money(r.recorded);
+          var due=Math.max(0, Math.round((r.downShort)*100)/100);
+          $('due24').textContent = due<=0 ? '✅ ya cubierto' : money(due);
+          finishProgress(function(){ $('loadingView').classList.add('hide'); $('planview').classList.remove('hide'); revalidate(); });
+        }).withFailureHandler(function(e){ stopProgress(); $('loadingView').classList.add('hide'); $('gate').classList.remove('hide'); gerr((e&&e.message)||e); }).lookupPlanLoan($('loan').value,$('dni').value);
+      }
+      var progTimer=null, progVal=0;
+      function setProgress(p,ph){ progVal=Math.max(0,Math.min(100,Math.round(p))); var f=$('pbarFill'),pc=$('loadPct'),lp=$('loadPhase'); if(f)f.style.width=progVal+'%'; if(pc)pc.textContent=progVal+'%'; if(ph&&lp)lp.textContent=ph; }
+      function startProgress(ph){ ph = ph || [[12,'Validando…'],[48,'Registrando tu solicitud…'],[80,'Avisando al prestamista…']]; var i=1; setProgress(ph[0][0],ph[0][1]); clearInterval(progTimer);
+        progTimer=setInterval(function(){ if(i<ph.length){ setProgress(ph[i][0],ph[i][1]); i++; } else if(progVal<95){ setProgress(progVal+1); } },650); }
+      function stopProgress(){ clearInterval(progTimer); progTimer=null; }
+      function finishProgress(cb){ stopProgress(); setProgress(100,'¡Listo!'); setTimeout(cb,400); }
+      function showDone(m){ var d=$('done'); d.classList.remove('hide');
+        d.innerHTML='<div class="check">✓</div><h1 style="color:#38761d">¡Solicitud enviada!</h1>'+
+          '<p class="sub">'+esc(m||'Revisaremos tu pedido y te contactaremos.')+'</p>'+
+          '<p class="hint">Ya podés cerrar esta ventana.</p>'; }
+      function send(){
+        $('out').style.display='none'; $('btnSend').disabled=true;
+        $('planview').classList.add('hide'); $('loadingView').classList.remove('hide'); startProgress();
+        var payload={ loanId:$('loan').value, dni:$('dni').value, option:OPT, reason:$('reason').value, agree:true,
+          ip:CLIENT_IP, device:DEVICE, dwellMs:Date.now()-PAGE_OPEN };
+        google.script.run.withSuccessHandler(function(r){
+          if(r&&r.ok){ finishProgress(function(){ $('loadingView').classList.add('hide'); showDone(r.message); }); }
+          else { stopProgress(); $('loadingView').classList.add('hide'); $('planview').classList.remove('hide'); $('btnSend').disabled=false; out((r&&r.reason)||'No se pudo enviar.', true); }
+        }).withFailureHandler(function(e){ stopProgress(); $('loadingView').classList.add('hide'); $('planview').classList.remove('hide'); $('btnSend').disabled=false; out((e&&e.message)||e, true); }).submitPlanRequest(payload);
+      }
+    </script></div></body></html>`;
+}
+
+/** Verifica identidad (ID+DNI) y que el préstamo esté al 100% de mora; devuelve datos para el formulario de plan. */
+function lookupPlanLoan(loanId, dni) {
+  return guard_('lookupPlanLoan', function () {
+    const loan = findLoanById_(String(loanId || '').trim());
+    if (!loan || String(loan.dni).replace(/\D/g, '') !== String(dni || '').replace(/\D/g, ''))
+      return { ok: false, reason: 'Datos no encontrados. Verificá el ID del préstamo y tu DNI.' };
+    if (!isLoanAtMoraCap_(loan))
+      return { ok: false, reason: 'Este préstamo todavía no llegó al tope de mora. El plan de pago está disponible al 100% de mora.' };
+    const a = planAmounts_(loan);
+    return {
+      ok: true, name: loan.name, loanId: loan.loanId, principal: round2_(loan.principal),
+      dueDateFmt: fmtDate_(loan.dueDate), daysLate: daysLate_(loan.dueDate, new Date()),
+      total: a.total, base: a.base, mora: a.mora, recorded: a.recorded, required: a.required,
+      downShort: a.downShort, pctInt: a.pctInt,
+    };
+  });
+}
+
+/** ¿Ya hay una solicitud de plan Pendiente o Aprobada para este préstamo? (evita duplicados). */
+function hasPendingPlanRequest_(sh, loanId) {
+  const last = sh.getLastRow(); if (last < 2) return false;
+  const H = headerMap_(sh), idC = H['ID Préstamo'] || 2, stC = H['Estado'] || 23;
+  const data = sh.getRange(2, 1, last - 1, Math.max(idC, stC)).getValues(), id = String(loanId).trim();
+  for (let i = 0; i < data.length; i++)
+    if (String(data[i][idC - 1]).trim() === id) { const st = String(data[i][stC - 1]).trim(); if (st === 'Pendiente' || st === 'Aprobado') return true; }
+  return false;
+}
+
+/** Recibe la solicitud de plan del formulario: valida, guarda en "Solicitudes de Plan de Pago", avisa. */
+function submitPlanRequest(p) {
+  return guard_('submitPlanRequest', function () {
+    p = p || {};
+    const loan = findLoanById_(String(p.loanId || '').trim());
+    if (!loan || String(loan.dni).replace(/\D/g, '') !== String(p.dni || '').replace(/\D/g, ''))
+      return { ok: false, reason: 'Datos no encontrados. Verificá el ID del préstamo y tu DNI.' };
+    if (!isLoanAtMoraCap_(loan))
+      return { ok: false, reason: 'El plan de pago está disponible solo al 100% de mora.' };
+    const option = Math.floor(Number(p.option) || 0);
+    if ([1, 4, 6].indexOf(option) === -1) return { ok: false, reason: 'Elegí una opción de pago (único, 4 o 6 cuotas).' };
+    if (p.agree !== true) return { ok: false, reason: 'Debés aceptar las condiciones para continuar.' };
+    const ss = getSS_();
+    const sh = ss.getSheetByName(CFG.SHEETS.PLAN_REQ) || setupPlanRequests_(ss);
+    if (hasPendingPlanRequest_(sh, loan.loanId))
+      return { ok: false, reason: 'Ya hay una solicitud de plan de pago en curso para este préstamo.' };
+    const a = planAmounts_(loan);
+    const loc = (p.device && p.device.loc) || {};
+    const ubic = loc.gps ? ('GPS ' + loc.gps) : (loc.ipText || '');
+    // Orden EXACTO de PLAN_REQ_HEADERS (29 col). Col 14 ("Falta para el 20%") es FÓRMULA viva.
+    const rowVals = [new Date(), loan.loanId, loan.clientId, loan.name, loan.dni, loan.email, loan.phone,
+      loan.principal, a.total, a.base, a.mora, option, a.required, '', loan.dueDate,
+      String(p.reason || '').slice(0, 500), ubic, String(p.ip || ''), String((p.device && p.device.userAgent) || '').slice(0, 250),
+      false, false, '', 'Pendiente', '', '', '', 'PENDIENTE', '', ''];
+    const row = nbAppend_(sh, rowVals);
+    sh.getRange(row, 1).setNumberFormat('yyyy-mm-dd hh:mm');
+    sh.getRange(row, 8, 1, 4).setNumberFormat(CFG.CURRENCY_FMT);   // Capital..Mora suspendida
+    sh.getRange(row, 13, 1, 1).setNumberFormat(CFG.CURRENCY_FMT);  // Pago inicial (20%)
+    sh.getRange(row, 15, 1, 1).setNumberFormat('yyyy-mm-dd');      // Vencimiento
+    sh.getRange(row, PR_COVER_COL).setFormula(planCoverFormula_(row));
+    try { logDeviceInfo_(loan, loan.clientId, { device: p.device || {}, ip: p.ip || '', userAgent: (p.device && p.device.userAgent) || '', dwellMs: p.dwellMs, signedAt: new Date() }); } catch (e) { logError_('submitPlanRequest:device', e); }
+    const optTxt = option === 1 ? 'Pago único' : option + ' cuotas mensuales';
+    const lender = getSetting_('Correo del Prestamista');
+    try {
+      if (loan.email) sendBrandedEmail_(loan.email, 'Recibimos tu solicitud de plan de pago — ' + loan.loanId,
+        'Hola ' + loan.name + ', recibimos tu solicitud de plan de pago (' + optTxt + ') del préstamo ' + loan.loanId + '.',
+        '<p>Hola ' + esc_(loan.name) + ',</p><p>Recibimos tu <b>solicitud de plan de pago</b> (' + esc_(optTxt) + ') del préstamo <b>' + esc_(loan.loanId) + '</b>.</p>' +
+        '<table style="border-collapse:collapse"><tr><td><b>Total a pagar</b>&nbsp;</td><td>' + fmtMoney_(a.total) + '</td></tr>' +
+        '<tr><td><b>Pago inicial (' + a.pctInt + '%)</b>&nbsp;</td><td>' + fmtMoney_(a.required) + '</td></tr></table>' +
+        '<p>Pagá el ' + a.pctInt + '% dentro de las 24 h para activar el plan. Te avisaremos cuando lo revisemos.</p>');
+      if (lender) sendBrandedEmail_(lender, 'Nueva solicitud de plan de pago — ' + loan.loanId,
+        'Nueva solicitud de plan de ' + loan.name + ' (' + loan.loanId + ', ' + optTxt + '). Revisala en «Solicitudes de Plan de Pago».',
+        '<p>Nueva <b>solicitud de plan de pago</b>:</p><table style="border-collapse:collapse">' +
+        '<tr><td><b>Préstamo</b>&nbsp;</td><td>' + esc_(loan.loanId) + '</td></tr>' +
+        '<tr><td><b>Cliente</b>&nbsp;</td><td>' + esc_(loan.name) + ' (DNI ' + esc_(loan.dni) + ')</td></tr>' +
+        '<tr><td><b>Opción</b>&nbsp;</td><td>' + esc_(optTxt) + '</td></tr>' +
+        '<tr><td><b>Total a pagar</b>&nbsp;</td><td>' + fmtMoney_(a.total) + '</td></tr>' +
+        '<tr><td><b>Pago inicial (' + a.pctInt + '%)</b>&nbsp;</td><td>' + fmtMoney_(a.required) + '</td></tr></table>' +
+        '<p>Aprobala o rechazala en la hoja «Solicitudes de Plan de Pago».</p>');
+    } catch (e) { logError_('submitPlanRequest:email', e); }
+    return { ok: true, message: '¡Solicitud enviada! Revisaremos tu pedido y te contactaremos.' };
+  });
+}
+
+/** APRUEBA la solicitud de la fila: arma el enlace para firmar el nuevo contrato, el WhatsApp de
+ *  aviso y avisa por correo a ambas partes. NO congela todavía: el préstamo se congela al FIRMAR. */
+function approveFreezeRequest_(sh, row) {
+  const m = headerMap_(sh);
+  const g = h => m[h] ? sh.getRange(row, m[h]).getValue() : '';
+  const setv = (h, v) => { if (m[h]) sh.getRange(row, m[h]).setValue(v); };
+  const setf = (h, f) => { if (m[h]) sh.getRange(row, m[h]).setFormula(f); };
+  const loanId = String(g('ID Préstamo')).trim();
+  if (!loanId) return;
+  const loan = findLoanById_(loanId);
+  if (!loan) { setv('Estado', 'Rechazado'); setv('Motivo de rechazo', 'No se encontró el préstamo.'); return; }
+  const fz = loanFreezable_(loan);
+  if (!fz.ok) { getSS_().toast(loanId + ': ' + fz.reason + ' No se aprueba.', '⚠', 8); return; }
+  // GATE: el % configurable debe estar PAGADO (registrado) antes de aprobar.
+  const amt = freezeAmounts_(loan);
+  if (!amt.downMet) {
+    const msg = amt.pctInt + '% must be paid before approval can be done. Falta ' + fmtMoney_(amt.downShort) + ' (de ' + fmtMoney_(amt.required) + ').';
+    try { getSS_().toast(loanId + ': ' + msg, '⛔ Falta pagar el ' + amt.pctInt + '%', 10); } catch (e) { }
+    try { SpreadsheetApp.getUi().alert(msg); } catch (e) { }
+    return; // no se aprueba: queda Pendiente
+  }
+  const promised = g('Fecha de pago prometida');
+  setv('Estado', 'Aprobado');
+  if (m['Fecha de aprobación']) sh.getRange(row, m['Fecha de aprobación']).setValue(new Date()).setNumberFormat('yyyy-mm-dd');
+  setv('Estado de Firma', 'PENDIENTE');
+  const base = webAppBaseUrl_();
+  const url = base ? base + '?page=firmar-congelamiento&loan=' + encodeURIComponent(loanId) : '';
+  if (url) setf('Enlace de firma', '=HYPERLINK("' + url + '","✍ Firmar congelamiento")');
+  else setv('Enlace de firma', 'Publicá la app web (menú ⑥) para obtener el enlace.');
+  // Importes RECALCULADOS a la fecha de aprobación (no se leen de la hoja, para no depender de
+  // nombres de columna ni de valores viejos). `amt` ya se computó para el control del %.
+  const fechaTxt = (promised instanceof Date) ? fmtDate_(promised) : 'la fecha comprometida';
+  const num = waNumberAR_(loan.phone);
+  if (num && url) {
+    const msg = 'Hola ' + (loan.name || 'cliente') + ' 👋 Aprobamos tu congelamiento del préstamo ' + loanId +
+      '. El ' + amt.pctInt + '% requerido ya está cubierto. Resta pagar el saldo (' + fmtMoney_(amt.remaining) + ') antes del ' + fechaTxt +
+      '. Para que tenga efecto, firmá el nuevo contrato acá: ' + url + ' — ' + companyName_();
+    setf('WhatsApp', '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📲 Avisar aprobación")');
+  }
+  const lender = getSetting_('Correo del Prestamista');
+  const btn = url ? '<p><a href="' + url + '" style="background:#0b5394;color:#fff;padding:10px 16px;border-radius:6px;text-decoration:none;font-weight:bold">✍ Firmar el congelamiento</a></p>' : '';
+  const promTxt = (promised instanceof Date) ? (' con fecha de pago comprometida <b>' + fmtDate_(promised) + '</b>') : '';
+  const amtTable = '<table style="border-collapse:collapse;margin:6px 0">' +
+    '<tr><td><b>Saldo con mora</b>&nbsp;</td><td>' + fmtMoney_(amt.balance) + '</td></tr>' +
+    '<tr><td><b>Pago requerido (' + amt.pctInt + '%)</b>&nbsp;</td><td>' + fmtMoney_(amt.required) + '</td></tr>' +
+    '<tr><td><b>Pagado (registrado)</b>&nbsp;</td><td>' + fmtMoney_(amt.recorded) + '</td></tr>' +
+    '<tr><td><b>Saldo restante</b>&nbsp;</td><td>' + fmtMoney_(amt.remaining) + '</td></tr>' +
+    (promised instanceof Date ? '<tr><td><b>Fecha de pago del saldo</b>&nbsp;</td><td>' + fmtDate_(promised) + '</td></tr>' : '') + '</table>';
+  try {
+    if (loan.email) sendBrandedEmail_(loan.email, 'Tu congelamiento fue aprobado — ' + loanId,
+      'Hola ' + loan.name + ', aprobamos tu congelamiento del préstamo ' + loanId + '. Firmá el nuevo contrato: ' + (url || '(enlace pendiente)'),
+      '<p>Hola ' + esc_(loan.name) + ',</p><p>Aprobamos tu pedido de <b>congelamiento</b> del préstamo <b>' + esc_(loanId) + '</b>' + promTxt + '.</p>' +
+      amtTable +
+      '<p>El <b>' + amt.pctInt + '% requerido ya está cubierto</b>. Resta pagar el <b>saldo restante</b> antes de la fecha comprometida.</p>' +
+      '<p>Para que el congelamiento tenga efecto, <b>firmá el nuevo contrato</b> con los nuevos términos. El préstamo queda congelado al firmar.</p>' + btn);
+    if (lender) sendBrandedEmail_(lender, 'Congelamiento aprobado — ' + loanId,
+      'Aprobaste el congelamiento de ' + loan.name + ' (' + loanId + '). Se envió el enlace de firma al cliente.',
+      '<p>Aprobaste el congelamiento de <b>' + esc_(loan.name) + '</b> (' + esc_(loanId) + ').</p>' + amtTable +
+      '<p>Se envió el enlace de firma al cliente; el préstamo se congelará al firmar.</p>' + btn);
+  } catch (e) { logError_('approveFreezeRequest_:email', e); }
+  try { getSS_().toast(loanId + ': aprobado. Enlace de firma enviado al cliente.', '✔ Congelamiento aprobado', 6); } catch (e) { }
+}
+
+/** RECHAZA la solicitud de la fila: usa "Motivo de rechazo", avisa por correo a ambas partes y
+ *  arma el WhatsApp con el motivo. No toca el préstamo. */
+function denyFreezeRequest_(sh, row) {
+  const m = headerMap_(sh);
+  const g = h => m[h] ? sh.getRange(row, m[h]).getValue() : '';
+  const setv = (h, v) => { if (m[h]) sh.getRange(row, m[h]).setValue(v); };
+  const setf = (h, f) => { if (m[h]) sh.getRange(row, m[h]).setFormula(f); };
+  const loanId = String(g('ID Préstamo')).trim();
+  const name = String(g('Nombre')).trim(), email = g('Correo'), phone = g('Teléfono');
+  const reason = String(g('Motivo de rechazo')).trim() || 'No cumple las condiciones para el congelamiento en este momento.';
+  setv('Estado', 'Rechazado');
+  const num = waNumberAR_(phone);
+  if (num) {
+    const msg = 'Hola ' + (name || 'cliente') + ' 👋 Revisamos tu pedido de congelamiento del préstamo ' + loanId +
+      ' y, por ahora, no podemos aprobarlo. Motivo: ' + reason + '. — ' + companyName_();
+    setf('WhatsApp', '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📲 Avisar rechazo")');
+  }
+  const lender = getSetting_('Correo del Prestamista');
+  try {
+    if (email) sendBrandedEmail_(email, 'Sobre tu solicitud de congelamiento — ' + loanId,
+      'Hola ' + name + ', revisamos tu pedido de congelamiento del préstamo ' + loanId + ' y no podemos aprobarlo. Motivo: ' + reason,
+      '<p>Hola ' + esc_(name) + ',</p><p>Revisamos tu pedido de <b>congelamiento</b> del préstamo <b>' + esc_(loanId) + '</b> y, por ahora, <b>no podemos aprobarlo</b>.</p><p><b>Motivo:</b> ' + esc_(reason) + '</p><p>Comunicate con nosotros para regularizar tu situación.</p>');
+    if (lender) sendBrandedEmail_(lender, 'Congelamiento rechazado — ' + loanId,
+      'Rechazaste el congelamiento de ' + name + ' (' + loanId + '). Motivo: ' + reason,
+      '<p>Rechazaste el congelamiento de <b>' + esc_(name) + '</b> (' + esc_(loanId) + ').</p><p><b>Motivo:</b> ' + esc_(reason) + '</p>');
+  } catch (e) { logError_('denyFreezeRequest_:email', e); }
+  try { getSS_().toast(loanId + ': rechazado.', '✖ Congelamiento rechazado', 6); } catch (e) { }
+}
+
+/** APRUEBA la solicitud de PLAN DE PAGO de la fila: exige el % inicial pagado, arma el enlace para
+ *  firmar el Acuerdo + WhatsApp + correos. NO activa el plan todavía: se activa al FIRMAR. */
+function approvePlanRequest_(sh, row) {
+  const m = headerMap_(sh);
+  const g = h => m[h] ? sh.getRange(row, m[h]).getValue() : '';
+  const setv = (h, v) => { if (m[h]) sh.getRange(row, m[h]).setValue(v); };
+  const setf = (h, f) => { if (m[h]) sh.getRange(row, m[h]).setFormula(f); };
+  const loanId = String(g('ID Préstamo')).trim();
+  if (!loanId) return;
+  const loan = findLoanById_(loanId);
+  if (!loan) { setv('Estado', 'Rechazado'); setv('Motivo de rechazo', 'No se encontró el préstamo.'); return; }
+  // GATE: el % inicial configurable debe estar PAGADO (registrado) antes de aprobar.
+  const amt = planAmounts_(loan);
+  if (!amt.downMet) {
+    const msg = 'Debe pagarse el ' + amt.pctInt + '% antes de aprobar. Falta ' + fmtMoney_(amt.downShort) + ' (de ' + fmtMoney_(amt.required) + ').';
+    try { getSS_().toast(loanId + ': ' + msg, '⛔ Falta pagar el ' + amt.pctInt + '%', 10); } catch (e) { }
+    try { SpreadsheetApp.getUi().alert(msg); } catch (e) { }
+    return; // queda Pendiente
+  }
+  const option = Math.floor(Number(g('Opción (1/4/6)')) || 0);
+  const optTxt = option === 1 ? 'Pago único' : option + ' cuotas mensuales';
+  setv('Estado', 'Aprobado');
+  if (m['Fecha de aprobación']) sh.getRange(row, m['Fecha de aprobación']).setValue(new Date()).setNumberFormat('yyyy-mm-dd');
+  setv('Estado de Firma', 'PENDIENTE');
+  const base = webAppBaseUrl_();
+  const url = base ? base + '?page=firmar-plan&loan=' + encodeURIComponent(loanId) : '';
+  if (url) setf('Enlace de firma', '=HYPERLINK("' + url + '","✍ Firmar Acuerdo")');
+  else setv('Enlace de firma', 'Publicá la app web (menú ⑥) para obtener el enlace.');
+  const num = waNumberAR_(loan.phone);
+  if (num && url) {
+    const msg = 'Hola ' + (loan.name || 'cliente') + ' 👋 Aprobamos tu plan de pago (' + optTxt + ') del préstamo ' + loanId +
+      '. El ' + amt.pctInt + '% ya está cubierto. Para activarlo, firmá el Acuerdo acá: ' + url + ' — ' + companyName_();
+    setf('WhatsApp', '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📲 Avisar aprobación")');
+  }
+  const lender = getSetting_('Correo del Prestamista');
+  const btn = url ? '<p><a href="' + url + '" style="background:#674ea7;color:#fff;padding:10px 16px;border-radius:6px;text-decoration:none;font-weight:bold">✍ Firmar el Acuerdo</a></p>' : '';
+  const amtTable = '<table style="border-collapse:collapse;margin:6px 0">' +
+    '<tr><td><b>Opción</b>&nbsp;</td><td>' + esc_(optTxt) + '</td></tr>' +
+    '<tr><td><b>Total a pagar</b>&nbsp;</td><td>' + fmtMoney_(amt.total) + '</td></tr>' +
+    '<tr><td><b>Pago inicial (' + amt.pctInt + '%)</b>&nbsp;</td><td>' + fmtMoney_(amt.required) + ' — cubierto</td></tr></table>';
+  try {
+    if (loan.email) sendBrandedEmail_(loan.email, 'Tu plan de pago fue aprobado — ' + loanId,
+      'Hola ' + loan.name + ', aprobamos tu plan de pago del préstamo ' + loanId + '. Firmá el Acuerdo: ' + (url || '(enlace pendiente)'),
+      '<p>Hola ' + esc_(loan.name) + ',</p><p>Aprobamos tu <b>plan de pago</b> del préstamo <b>' + esc_(loanId) + '</b>.</p>' + amtTable +
+      '<p>El <b>' + amt.pctInt + '% ya está cubierto</b>. Para activar el plan (y suspender la mora), <b>firmá el Acuerdo</b>. Al firmar se reemplazan las cuotas.</p>' + btn);
+    if (lender) sendBrandedEmail_(lender, 'Plan de pago aprobado — ' + loanId,
+      'Aprobaste el plan de pago de ' + loan.name + ' (' + loanId + '). Se envió el enlace de firma.',
+      '<p>Aprobaste el plan de pago de <b>' + esc_(loan.name) + '</b> (' + esc_(loanId) + ').</p>' + amtTable +
+      '<p>Se envió el enlace de firma; el plan se activa al firmar (reemplaza las cuotas).</p>' + btn);
+  } catch (e) { logError_('approvePlanRequest_:email', e); }
+  try { getSS_().toast(loanId + ': plan aprobado. Enlace de firma enviado.', '✔ Plan aprobado', 6); } catch (e) { }
+}
+
+/** RECHAZA la solicitud de plan de la fila: usa "Motivo de rechazo", avisa por correo + WhatsApp. */
+function denyPlanRequest_(sh, row) {
+  const m = headerMap_(sh);
+  const g = h => m[h] ? sh.getRange(row, m[h]).getValue() : '';
+  const setv = (h, v) => { if (m[h]) sh.getRange(row, m[h]).setValue(v); };
+  const setf = (h, f) => { if (m[h]) sh.getRange(row, m[h]).setFormula(f); };
+  const loanId = String(g('ID Préstamo')).trim();
+  const name = String(g('Nombre')).trim(), email = g('Correo'), phone = g('Teléfono');
+  const reason = String(g('Motivo de rechazo')).trim() || 'No cumple las condiciones para el plan de pago en este momento.';
+  setv('Estado', 'Rechazado');
+  const num = waNumberAR_(phone);
+  if (num) {
+    const msg = 'Hola ' + (name || 'cliente') + ' 👋 Revisamos tu pedido de plan de pago del préstamo ' + loanId +
+      ' y, por ahora, no podemos aprobarlo. Motivo: ' + reason + '. — ' + companyName_();
+    setf('WhatsApp', '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📲 Avisar rechazo")');
+  }
+  const lender = getSetting_('Correo del Prestamista');
+  try {
+    if (email) sendBrandedEmail_(email, 'Sobre tu solicitud de plan de pago — ' + loanId,
+      'Hola ' + name + ', revisamos tu pedido de plan de pago del préstamo ' + loanId + ' y no podemos aprobarlo. Motivo: ' + reason,
+      '<p>Hola ' + esc_(name) + ',</p><p>Revisamos tu pedido de <b>plan de pago</b> del préstamo <b>' + esc_(loanId) + '</b> y, por ahora, <b>no podemos aprobarlo</b>.</p><p><b>Motivo:</b> ' + esc_(reason) + '</p>');
+    if (lender) sendBrandedEmail_(lender, 'Plan de pago rechazado — ' + loanId,
+      'Rechazaste el plan de pago de ' + name + ' (' + loanId + '). Motivo: ' + reason,
+      '<p>Rechazaste el plan de pago de <b>' + esc_(name) + '</b> (' + esc_(loanId) + ').</p><p><b>Motivo:</b> ' + esc_(reason) + '</p>');
+  } catch (e) { logError_('denyPlanRequest_:email', e); }
+  try { getSS_().toast(loanId + ': plan rechazado.', '✖ Plan rechazado', 6); } catch (e) { }
+}
+
 /* ===================== FIRMA VIRTUAL DEL CONTRATO ===================== */
 /** Ubica la fila de un préstamo en "Prestatarios". Devuelve {sh,row} o null. */
 function signStatusRow_(loanId) {
@@ -4492,6 +5906,205 @@ function submitSignature(loanId, dni, signatureDataUrl, agree, meta) {
   });
 }
 
+/* ===================== FIRMA DEL ACUERDO DE CONGELAMIENTO (Parte 2) ===================== */
+/** Página para firmar el acuerdo de congelamiento (reusa la de firma en modo 'freeze'). */
+function freezeSigningPageHtml_(loanId) { return signingPageHtml_(loanId, 'freeze'); }
+
+/** Ubica la solicitud de congelamiento por ID de préstamo y estado(s). Devuelve {sh,row,m} o null. */
+function findFreezeRequestRow_(loanId, states) {
+  const sh = getSS_().getSheetByName(CFG.SHEETS.FREEZE_REQ); if (!sh || sh.getLastRow() < 2) return null;
+  const m = headerMap_(sh), idC = m['ID Préstamo'] || 2, stC = m['Estado'] || 23;
+  const data = sh.getRange(2, 1, sh.getLastRow() - 1, Math.max(idC, stC)).getValues();
+  const id = String(loanId).trim(), set = states ? states.map(String) : null;
+  for (let i = data.length - 1; i >= 0; i--)   // la más reciente primero
+    if (String(data[i][idC - 1]).trim() === id && (!set || set.indexOf(String(data[i][stC - 1]).trim()) !== -1))
+      return { sh: sh, row: i + 2, m: m };
+  return null;
+}
+
+/** Verifica identidad + solicitud APROBADA; devuelve el acuerdo de congelamiento a firmar. */
+function getFreezeContractForSigning(loanId, dni) {
+  return guard_('getFreezeContractForSigning', function () {
+    loanId = String(loanId || '').trim();
+    const loan = findLoanById_(loanId);
+    if (!loan || String(loan.dni).replace(/\D/g, '') !== String(dni || '').replace(/\D/g, ''))
+      return { ok: false, msg: 'Datos no encontrados. Verificá el ID del préstamo y tu DNI.' };
+    const req = findFreezeRequestRow_(loanId, ['Aprobado', 'Firmado']);
+    if (!req) return { ok: false, msg: 'No hay una solicitud de congelamiento aprobada para este préstamo.' };
+    const g = h => req.m[h] ? req.sh.getRange(req.row, req.m[h]).getValue() : '';
+    if (String(g('Estado de Firma')).toUpperCase() === SIGN.SIGNED || String(g('Estado')).trim() === 'Firmado')
+      return { ok: true, signed: true, msg: 'El acuerdo de congelamiento ya fue firmado. Te enviamos una copia por correo.' };
+    const fz = loanFreezable_(loan);
+    if (!fz.ok) return { ok: false, msg: fz.reason };
+    return { ok: true, signed: false, name: loan.name, contractHtml: freezeAgreementHtml_(loan, { promised: g('Fecha de pago prometida'), alreadyPaid: g('Ya pagado (declarado)') }), captureLocation: locationFlag_() };
+  });
+}
+
+/** Recibe la firma del acuerdo: CONGELA el préstamo (hoy), guarda el PDF, registra auditoría,
+ *  marca la solicitud como Firmada y suma el congelamiento al historial del cliente. */
+function submitFreezeSignature(loanId, dni, signatureDataUrl, agree, meta) {
+  return guard_('submitFreezeSignature', function () {
+    loanId = String(loanId || '').trim();
+    const loan = findLoanById_(loanId);
+    if (!loan || String(loan.dni).replace(/\D/g, '') !== String(dni || '').replace(/\D/g, ''))
+      throw new Error('Datos no encontrados. Verificá el ID del préstamo y tu DNI.');
+    if (agree !== true) throw new Error('Debés aceptar los términos para firmar.');
+    const req = findFreezeRequestRow_(loanId, ['Aprobado', 'Firmado']);
+    if (!req) throw new Error('No hay una solicitud de congelamiento aprobada para este préstamo.');
+    const g = h => req.m[h] ? req.sh.getRange(req.row, req.m[h]).getValue() : '';
+    const setv = (h, v) => { if (req.m[h]) req.sh.getRange(req.row, req.m[h]).setValue(v); };
+    const setf = (h, f) => { if (req.m[h]) req.sh.getRange(req.row, req.m[h]).setFormula(f); };
+    if (String(g('Estado de Firma')).toUpperCase() === SIGN.SIGNED)
+      return { ok: true, message: 'El acuerdo ya estaba firmado. Te enviamos una copia por correo.' };
+    const m = /^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i.exec(String(signatureDataUrl || ''));
+    if (!m) throw new Error('Falta la firma. Dibujá tu firma o cargá una imagen.');
+    const fz = loanFreezable_(loan);
+    if (!fz.ok) throw new Error(fz.reason);
+    // GATE: el % configurable debe estar PAGADO (registrado) antes de congelar.
+    const amtGate = freezeAmounts_(loan);
+    if (!amtGate.downMet) throw new Error('Para congelar, primero debe estar pagado el ' + amtGate.pctInt + '% del préstamo. Falta ' + fmtMoney_(amtGate.downShort) + '.');
+
+    const now = new Date();
+    const mime = m[1], ext = mime.split('/')[1].replace('+xml', '').replace('jpeg', 'jpg').replace('svg', 'png');
+    const bytes = Utilities.base64Decode(m[2]);
+    const method = (meta && meta.method === 'upload') ? 'upload' : 'draw';
+    const ip = String((meta && meta.ip) || '').slice(0, 60);
+    const devInfo = (meta && meta.device) || {};
+    const deviceFp = deviceFingerprint_(devInfo);
+    const folder = borrowerFolder_(borrowerFolderName_(loan.name, loan.dni));
+    folder.createFile(Utilities.newBlob(bytes, mime, 'Firma Congelamiento ' + loanId + '.' + ext));
+
+    // CONGELA el préstamo: "Congelado el" = hoy en "Prestatarios" (reutiliza la columna de la Parte 1).
+    const loc = signStatusRow_(loanId);
+    if (loc) { const sinceC = colByAny_(headerIndex_(loc.sh), ['Congelado el']);
+      if (sinceC) loc.sh.getRange(loc.row, sinceC).setValue(now).setNumberFormat('yyyy-mm-dd'); }
+
+    const promised = g('Fecha de pago prometida');
+    const sig = { dataUrl: signatureDataUrl, signedAt: now, method: method, userAgent: (meta && meta.userAgent) || '', ip: ip, hash: '', device: devInfo, deviceFp: deviceFp };
+    const signedFile = savePdfToBorrower_(freezeAgreementHtml_(loan, { promised: promised, alreadyPaid: g('Ya pagado (declarado)') }, sig), 'Acuerdo de Congelamiento ' + loanId + ' - ' + loan.name + '.pdf', loan);
+    let hashHex = ''; try { hashHex = hexDigest_(signedFile.getAs('application/pdf').getBytes()); } catch (e) { logError_('submitFreezeSignature:hash', e); }
+
+    try { setupFirmas_(getSS_()).appendRow([now, loanId, loan.name, loan.dni, loan.email, 'Congelamiento (' + (method === 'upload' ? 'imagen' : 'dibujada') + ')',
+      String((meta && meta.userAgent) || '').slice(0, 250), signedFile.getUrl(), ip || 'N/D', hashHex, loan.cuil || '', loan.direccion || '']); } catch (e) { logError_('submitFreezeSignature:firmas', e); }
+    try { logDeviceInfo_(loan, loan.clientId, { device: devInfo, deviceFp: deviceFp, ip: ip, userAgent: (meta && meta.userAgent) || '', method: 'congelamiento', signedAt: now, dwellMs: meta && meta.dwellMs, strokes: meta && meta.strokes, drawMs: meta && meta.drawMs }); } catch (e) { logError_('submitFreezeSignature:dispositivos', e); }
+
+    setv('Estado', 'Firmado'); setv('Estado de Firma', SIGN.SIGNED);
+    if (req.m['Fecha de Firma']) req.sh.getRange(req.row, req.m['Fecha de Firma']).setValue(now).setNumberFormat('yyyy-mm-dd hh:mm');
+    setf('Contrato de Congelamiento (PDF)', '=HYPERLINK("' + signedFile.getUrl() + '","Ver acuerdo firmado")');
+
+    try { incrementClienteFreezeCount_(loan.clientId); } catch (e) { logError_('submitFreezeSignature:clienteFlag', e); }
+
+    const lender = getSetting_('Correo del Prestamista');
+    let emailOk = true;
+    try {
+      const att = signedFile.getAs('application/pdf');
+      if (loan.email) sendBrandedEmail_(loan.email, 'Acuerdo de congelamiento firmado — ' + loanId,
+        'Hola ' + loan.name + ', tu acuerdo de congelamiento del préstamo ' + loanId + ' quedó firmado. La mora dejó de crecer.',
+        '<p>Hola ' + esc_(loan.name) + ',</p><p>Tu <b>acuerdo de congelamiento</b> del préstamo <b>' + esc_(loanId) + '</b> quedó firmado. A partir de hoy <b>la mora deja de crecer</b>' + (promised instanceof Date ? (' y te comprometiste a pagar antes del <b>' + fmtDate_(promised) + '</b>') : '') + '. Adjuntamos tu copia.</p>',
+        { attachments: [att] });
+      if (lender) sendBrandedEmail_(lender, 'Congelamiento firmado — ' + loanId,
+        loan.name + ' firmó el acuerdo de congelamiento del préstamo ' + loanId + '. El préstamo quedó congelado.',
+        '<p><b>' + esc_(loan.name) + '</b> firmó el acuerdo de congelamiento del préstamo <b>' + esc_(loanId) + '</b>. El préstamo quedó <b>CONGELADO</b> desde hoy.</p>',
+        { attachments: [att] });
+    } catch (e) { emailOk = false; logError_('submitFreezeSignature:email', e); }
+    try { getSS_().toast(loanId + ': congelamiento firmado y aplicado.', '❄ Congelado', 6); } catch (e) { }
+    return { ok: true, message: emailOk ? '¡Acuerdo firmado! La mora dejó de crecer. Te enviamos una copia por correo.' : '¡Acuerdo firmado! La mora dejó de crecer. (No pudimos enviar la copia por correo.)' };
+  });
+}
+
+/** Suma 1 al contador "Congelamientos" del cliente (crea la columna si falta). Historial durable. */
+function incrementClienteFreezeCount_(clientId) {
+  clientId = String(clientId || '').trim(); if (!clientId) return;
+  const cs = getSS_().getSheetByName(CFG.SHEETS.CLIENTS); if (!cs || cs.getLastRow() < 2) return;
+  const m = headerMap_(cs), idC = m['ID Cliente'] || PC.CLIENT_ID;
+  let col = m['Congelamientos']; if (!col) col = clientesHeaderCol_(cs, 'Congelamientos', true);
+  const ids = cs.getRange(2, idC, cs.getLastRow() - 1, 1).getValues();
+  for (let i = 0; i < ids.length; i++) if (String(ids[i][0]).trim() === clientId) {
+    const cell = cs.getRange(i + 2, col); cell.setValue((Number(cell.getValue()) || 0) + 1); return;
+  }
+}
+
+/** HTML del ACUERDO DE CONGELAMIENTO (nuevos términos) — breve, con firma del prestatario + titulares y auditoría. */
+function freezeAgreementHtml_(loan, req, sig) {
+  const lender = companyName_(), footer = getSetting_('Pie del Contrato');
+  const signatories = ownerSignatories_();
+  const a = freezeAmounts_(loan, req && req.alreadyPaid);
+  const promised = (req && req.promised instanceof Date) ? req.promised : null;
+  const signedAt = (sig && sig.signedAt instanceof Date) ? sig.signedAt : new Date();
+  const deadline24 = new Date(signedAt.getTime() + 24 * 3600 * 1000);
+  const kv = (k, v) => `<tr><td class="k">${k}</td><td>${v}</td></tr>`;
+  const borrowerSig = (sig && sig.dataUrl) ? sig.dataUrl : '';
+  const sigCell = (img, name, role) =>
+    `<td>${img ? `<img src="${img}" alt="firma" style="max-height:44px;max-width:88%;display:block;margin:0 auto 1px">` : '<div style="height:40px"></div>'}` +
+    `<div style="border-top:1px solid #333;padding-top:3px">${esc_(name)}<br><span style="font-size:8pt;color:#555">${esc_(role)}</span></div></td>`;
+  const locSummary = s => { const d = (s && s.device) || {}, l = d.loc || {};
+    if (l.source === 'GPS' && l.gps && l.gps.indexOf('GPS:') !== 0) return l.gps + (l.gpsAcc != null ? ' (±' + l.gpsAcc + ' m)' : '') + ' · GPS';
+    if (l.ipText) return l.ipText + ' · IP'; if (l.source === 'desactivada') return 'No capturada'; return d.tz ? ('Zona horaria: ' + d.tz) : '—'; };
+  const fill = v => (v && String(v).trim()) ? esc_(v) : '<span style="color:#9aa4ad">—</span>';
+  const mono = '<span style="font-family:monospace;font-size:8.5pt;word-break:break-all">';
+  // Constancia de firma electrónica COMPLETA — mismos campos que el contrato de préstamo.
+  const auditPanel = (sig && sig.dataUrl) ? `
+    <h2>Constancia de firma electrónica</h2>
+    <table>
+      ${kv('Firmó', esc_(loan.name) + ' · DNI ' + esc_(loan.dni || '—'))}
+      ${kv('Correo confirmado', esc_(loan.email || '—'))}
+      ${kv('Identidad verificada con', 'DNI ' + esc_(loan.dni || '—') + ' y correo registrado; foto del DNI (frente y dorso, Anexo I)')}
+      ${kv('Documento', 'Foto del DNI, frente y dorso — Anexo I')}
+      ${kv('Fecha y hora', fmtDateTime_(sig.signedAt || new Date()))}
+      ${kv('Cómo se firmó', sig.method === 'upload' ? 'Imagen de firma cargada' : 'Firma dibujada en pantalla')}
+      ${kv('Dirección IP', fill(sig.ip))}
+      ${kv('Ubicación', esc_(locSummary(sig)))}
+      ${kv('Equipo / SO', fill((sig.device && sig.device.os) || ''))}
+      ${kv('Navegador', fill((sig.device && sig.device.browser) || ''))}
+      ${kv('Pantalla', fill((sig.device && sig.device.screen) ? (sig.device.screen + (sig.device.dpr ? (' · DPR ' + sig.device.dpr) : '')) : ''))}
+      ${kv('Automatización detectada', (sig.device && sig.device.webdriver) ? 'Sí (revisar)' : 'No (firmante humano)')}
+      ${kv('Dispositivo (completo)', esc_(String(sig.userAgent || '').slice(0, 200)))}
+      ${kv('Huella de dispositivo (SHA-256)', sig.deviceFp ? (mono + esc_(sig.deviceFp) + '</span>') : '<span style="color:#9aa4ad">No disponible</span>')}
+      ${kv('Huella del documento (SHA-256)', sig.hash ? (mono + esc_(sig.hash) + '</span>') : '<span style="color:#9aa4ad">Se registra en la hoja «Firmas».</span>')}
+    </table>` : '';
+  return `<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><style>
+    @page{size:A4;margin:14mm 14mm}
+    body{font-family:"Carlito","Calibri",Arial,sans-serif;color:#1d2630;margin:0;line-height:1.35;font-size:10pt}
+    h1{text-align:center;font-size:15pt;border-bottom:2px solid #0b5394;padding-bottom:4px;color:#0b2f52;margin:2px 0 6px}
+    h2{font-size:10.5pt;color:#0b5394;margin:12px 0 3px;border-bottom:1px solid #cfe0f0;padding-bottom:2px;text-transform:uppercase;letter-spacing:.4px}
+    p{margin:0 0 5px} table{width:100%;border-collapse:collapse;margin:5px 0;font-size:9.2pt} td,th{padding:4px 7px;border:1px solid #d8dee3;vertical-align:top}
+    td.k{background:#eef4fb;font-weight:bold;width:46%}
+    .box{border:1px solid #0b5394;border-left:4px solid #0b5394;background:#eef4fb;padding:7px 11px;margin:7px 0}
+    .sign{margin-top:16px;width:100%} .sign td{border:none;text-align:center;padding:6px 10px;width:33%;vertical-align:bottom}
+    .foot{margin-top:16px;padding-top:6px;border-top:1px solid #dfe4e8;font-size:8.6pt;color:#5c6871;font-style:italic}</style></head><body>
+    ${brandHeaderHtml_()}
+    <h1>ACUERDO DE CONGELAMIENTO DE PRÉSTAMO</h1>
+    <p style="text-align:center;color:#3d4952">Celebrado el <b>${fmtDate_(new Date())}</b> entre ${esc_(signatories[0].name)} y ${esc_(signatories[1].name)}, que operan como «${esc_(lender)}» (el Prestamista), y <b>${esc_(loan.name)}</b> (el Prestatario), respecto del préstamo <b>${esc_(loan.loanId)}</b>.</p>
+    <h2>1. Antecedente</h2>
+    <p>El préstamo <b>${esc_(loan.loanId)}</b>, con vencimiento original el <b>${fmtDate_(loan.dueDate)}</b>, se encuentra vencido. El Prestatario solicitó, y el Prestamista aceptó, <b>congelar la mora</b> (detener el recargo diario) bajo las condiciones de abajo.</p>
+    <h2>2. Saldo y plan de pago</h2>
+    <div class="box"><table style="margin:0">
+      ${kv('Préstamo', esc_(loan.loanId))}
+      ${kv('Total del préstamo (capital + interés)', fmtMoney_(a.total))}
+      ${kv('Recargo por mora acumulado a la fecha', fmtMoney_(a.mora))}
+      ${kv('Saldo al congelar (capital + interés + mora)', '<b>' + fmtMoney_(a.balance) + '</b>')}
+      ${kv('Pago mínimo requerido (' + a.pctInt + '% del préstamo, en 24 h)', '<b>' + fmtMoney_(a.required) + '</b>')}
+      ${kv('Pagado a la fecha (registrado)', fmtMoney_(a.recorded))}
+      ${a.downShort > 0 ? kv('Falta para el ' + a.pctInt + '%', '<b style="color:#900">' + fmtMoney_(a.downShort) + '</b>') : ''}
+      ${kv('Saldo restante (a abonar por la fecha pactada)', '<b>' + fmtMoney_(a.remaining) + '</b>' + (promised ? (' — antes del ' + fmtDate_(promised)) : ''))}
+    </table></div>
+    <h2>3. Condiciones (aceptadas por el Prestatario)</h2>
+    <p><b>a)</b> La mora queda <b>CONGELADA</b> desde la firma (${fmtDate_(signedAt)}): el recargo diario deja de crecer mientras rija este acuerdo.</p>
+    <p><b>b)</b> Como condición del congelamiento, el Prestatario debe tener pagado el <b>${a.pctInt}% del préstamo (${fmtMoney_(a.required)})</b> dentro de las <b>24 horas</b> (antes de la aprobación). ${a.downMet ? 'Este requisito se encuentra <b>cumplido</b>.' : 'Pendiente: falta <b>' + fmtMoney_(a.downShort) + '</b>.'}</p>
+    <p><b>c)</b> El Prestatario pagará el <b>saldo restante (${fmtMoney_(a.remaining)})</b> ${promised ? ('antes del <b>' + fmtDate_(promised) + '</b>') : 'antes de la fecha comprometida'} (plazo máximo de 3 semanas desde la firma).</p>
+    <p><b>d)</b> Si el Prestatario no cumple con alguno de estos pagos en término, el Prestamista podrá <b>descongelar</b> el préstamo: la mora volverá a correr desde ese momento (los días transcurridos durante el congelamiento no se cobran) y podrá exigir el total adeudado.</p>
+    <p><b>e)</b> El Prestatario entiende y acepta que, habiendo congelado este préstamo, es muy probable que un futuro préstamo, de otorgarse, sea por un <b>monto considerablemente menor</b>.</p>
+    <p>Las demás cláusulas del contrato original del préstamo ${esc_(loan.loanId)} siguen vigentes en todo lo que no se oponga a este acuerdo.</p>
+    <table class="sign"><tr>
+      ${sigCell(borrowerSig, loan.name, 'Prestatario · DNI ' + (loan.dni || ''))}
+      ${sigCell(signatories[0].sig, signatories[0].name, 'Prestamista')}
+      ${sigCell(signatories[1].sig, signatories[1].name, 'Prestamista')}
+    </tr></table>
+    ${auditPanel}
+    <p class="foot">${esc_(footer || '')}</p>
+  </body></html>`;
+}
+
 /** Enlace personal de firma para un préstamo. */
 /**
  * URL base de la app web para los enlaces que se envían a clientes.
@@ -4585,7 +6198,220 @@ function resendSigningLink_() {
 }
 
 /** Página web independiente para firmar el contrato (?page=firmar&loan=L-0001). */
-function signingPageHtml_(loanId) {
+/* ===================== FIRMA DEL ACUERDO DE PLAN DE PAGO ===================== */
+/** Página para firmar el Acuerdo de plan de pago (reusa la página de firma en modo 'plan'). */
+function planSigningPageHtml_(loanId) { return signingPageHtml_(loanId, 'plan'); }
+
+/** Ubica la solicitud de plan por ID de préstamo y estado(s). Devuelve {sh,row,m} o null. */
+function findPlanRequestRow_(loanId, states) {
+  const sh = getSS_().getSheetByName(CFG.SHEETS.PLAN_REQ); if (!sh || sh.getLastRow() < 2) return null;
+  const m = headerMap_(sh), idC = m['ID Préstamo'] || 2, stC = m['Estado'] || 23;
+  const data = sh.getRange(2, 1, sh.getLastRow() - 1, Math.max(idC, stC)).getValues();
+  const id = String(loanId).trim(), set = states ? states.map(String) : null;
+  for (let i = data.length - 1; i >= 0; i--)
+    if (String(data[i][idC - 1]).trim() === id && (!set || set.indexOf(String(data[i][stC - 1]).trim()) !== -1))
+      return { sh: sh, row: i + 2, m: m };
+  return null;
+}
+
+/** Verifica identidad + solicitud APROBADA; devuelve el Acuerdo de plan de pago a firmar. */
+function getPlanContractForSigning(loanId, dni) {
+  return guard_('getPlanContractForSigning', function () {
+    loanId = String(loanId || '').trim();
+    const loan = findLoanById_(loanId);
+    if (!loan || String(loan.dni).replace(/\D/g, '') !== String(dni || '').replace(/\D/g, ''))
+      return { ok: false, msg: 'Datos no encontrados. Verificá el ID del préstamo y tu DNI.' };
+    const req = findPlanRequestRow_(loanId, ['Aprobado', 'Firmado']);
+    if (!req) return { ok: false, msg: 'No hay una solicitud de plan de pago aprobada para este préstamo.' };
+    const g = h => req.m[h] ? req.sh.getRange(req.row, req.m[h]).getValue() : '';
+    if (String(g('Estado de Firma')).toUpperCase() === SIGN.SIGNED || String(g('Estado')).trim() === 'Firmado')
+      return { ok: true, signed: true, msg: 'El Acuerdo ya fue firmado. Te enviamos una copia por correo.' };
+    const option = Math.floor(Number(g('Opción (1/4/6)')) || 4);
+    return { ok: true, signed: false, name: loan.name, contractHtml: planAgreementHtml_(loan, { option: option }), captureLocation: locationFlag_() };
+  });
+}
+
+/** Recibe la firma del Acuerdo: ACTIVA el plan (suspende mora, reemplaza cuotas, marca "Plan desde"),
+ *  guarda el PDF, registra auditoría (Firmas/Dispositivos) y marca la solicitud como Firmada. */
+function submitPlanSignature(loanId, dni, signatureDataUrl, agree, meta) {
+  return guard_('submitPlanSignature', function () {
+    loanId = String(loanId || '').trim();
+    const loan = findLoanById_(loanId);
+    if (!loan || String(loan.dni).replace(/\D/g, '') !== String(dni || '').replace(/\D/g, ''))
+      throw new Error('Datos no encontrados. Verificá el ID del préstamo y tu DNI.');
+    if (agree !== true) throw new Error('Debés aceptar los términos para firmar.');
+    const req = findPlanRequestRow_(loanId, ['Aprobado', 'Firmado']);
+    if (!req) throw new Error('No hay una solicitud de plan de pago aprobada para este préstamo.');
+    const g = h => req.m[h] ? req.sh.getRange(req.row, req.m[h]).getValue() : '';
+    const setv = (h, v) => { if (req.m[h]) req.sh.getRange(req.row, req.m[h]).setValue(v); };
+    const setf = (h, f) => { if (req.m[h]) req.sh.getRange(req.row, req.m[h]).setFormula(f); };
+    if (String(g('Estado de Firma')).toUpperCase() === SIGN.SIGNED)
+      return { ok: true, message: 'El Acuerdo ya estaba firmado. Te enviamos una copia por correo.' };
+    const m = /^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i.exec(String(signatureDataUrl || ''));
+    if (!m) throw new Error('Falta la firma. Dibujá tu firma o cargá una imagen.');
+    // GATE: el % inicial debe estar PAGADO (registrado) antes de activar el plan.
+    const amtGate = planAmounts_(loan);
+    if (!amtGate.downMet) throw new Error('Para activar el plan, primero debe estar pagado el ' + amtGate.pctInt + '%. Falta ' + fmtMoney_(amtGate.downShort) + '.');
+
+    const now = new Date();
+    const mime = m[1], ext = mime.split('/')[1].replace('+xml', '').replace('jpeg', 'jpg').replace('svg', 'png');
+    const bytes = Utilities.base64Decode(m[2]);
+    const method = (meta && meta.method === 'upload') ? 'upload' : 'draw';
+    const ip = String((meta && meta.ip) || '').slice(0, 60);
+    const devInfo = (meta && meta.device) || {};
+    const deviceFp = deviceFingerprint_(devInfo);
+    const folder = borrowerFolder_(borrowerFolderName_(loan.name, loan.dni));
+    folder.createFile(Utilities.newBlob(bytes, mime, 'Firma Acuerdo ' + loanId + '.' + ext));
+
+    const option = Math.floor(Number(g('Opción (1/4/6)')) || 4);
+    // ACTIVA el plan: suspende mora, reemplaza cuotas, marca "Plan desde".
+    activarPlanPago_(loan, option, now);
+
+    const sig = { dataUrl: signatureDataUrl, signedAt: now, method: method, userAgent: (meta && meta.userAgent) || '', ip: ip, hash: '', device: devInfo, deviceFp: deviceFp };
+    const signedFile = savePdfToBorrower_(planAgreementHtml_(loan, { option: option }, sig), 'Acuerdo de Plan de Pago ' + loanId + ' - ' + loan.name + '.pdf', loan);
+    let hashHex = ''; try { hashHex = hexDigest_(signedFile.getAs('application/pdf').getBytes()); } catch (e) { logError_('submitPlanSignature:hash', e); }
+
+    try { setupFirmas_(getSS_()).appendRow([now, loanId, loan.name, loan.dni, loan.email, 'Plan de Pago (' + (method === 'upload' ? 'imagen' : 'dibujada') + ')',
+      String((meta && meta.userAgent) || '').slice(0, 250), signedFile.getUrl(), ip || 'N/D', hashHex, loan.cuil || '', loan.direccion || '']); } catch (e) { logError_('submitPlanSignature:firmas', e); }
+    try { logDeviceInfo_(loan, loan.clientId, { device: devInfo, deviceFp: deviceFp, ip: ip, userAgent: (meta && meta.userAgent) || '', method: 'plan de pago', signedAt: now, dwellMs: meta && meta.dwellMs, strokes: meta && meta.strokes, drawMs: meta && meta.drawMs }); } catch (e) { logError_('submitPlanSignature:dispositivos', e); }
+
+    setv('Estado', 'Firmado'); setv('Estado de Firma', SIGN.SIGNED);
+    if (req.m['Fecha de Firma']) req.sh.getRange(req.row, req.m['Fecha de Firma']).setValue(now).setNumberFormat('yyyy-mm-dd hh:mm');
+    setf('Acuerdo (PDF)', '=HYPERLINK("' + signedFile.getUrl() + '","Ver acuerdo firmado")');
+
+    const optTxt = option === 1 ? 'Pago único' : option + ' cuotas mensuales';
+    const lender = getSetting_('Correo del Prestamista');
+    let emailOk = true;
+    try {
+      const att = signedFile.getAs('application/pdf');
+      if (loan.email) sendBrandedEmail_(loan.email, 'Acuerdo de plan de pago firmado — ' + loanId,
+        'Hola ' + loan.name + ', tu Acuerdo de plan de pago (' + optTxt + ') del préstamo ' + loanId + ' quedó firmado.',
+        '<p>Hola ' + esc_(loan.name) + ',</p><p>Tu <b>Acuerdo de plan de pago</b> (' + esc_(optTxt) + ') del préstamo <b>' + esc_(loanId) + '</b> quedó firmado y <b>activo</b>. La mora quedó suspendida mientras cumplas el plan. Adjuntamos tu copia con el cronograma de cuotas.</p>',
+        { attachments: [att] });
+      if (lender) sendBrandedEmail_(lender, 'Plan de pago firmado — ' + loanId,
+        loan.name + ' firmó el Acuerdo del préstamo ' + loanId + '. El plan quedó activo (cuotas reemplazadas).',
+        '<p><b>' + esc_(loan.name) + '</b> firmó el Acuerdo del préstamo <b>' + esc_(loanId) + '</b> (' + esc_(optTxt) + '). El plan quedó <b>EN PLAN</b>: la mora se suspendió y se reemplazaron las cuotas.</p>',
+        { attachments: [att] });
+    } catch (e) { emailOk = false; logError_('submitPlanSignature:email', e); }
+    try { getSS_().toast(loanId + ': plan firmado y activado.', '📋 Plan activo', 6); } catch (e) { }
+    return { ok: true, message: emailOk ? '¡Acuerdo firmado! Tu plan está activo y la mora quedó suspendida. Te enviamos una copia por correo.' : '¡Acuerdo firmado! Tu plan está activo. (No pudimos enviar la copia por correo.)' };
+  });
+}
+
+/** ACTIVA el plan: suspende la mora (Mora (ajuste)=0), reemplaza las cuotas por el plan elegido
+ *  (sobre el Total a Pagar, SIN mora) y marca "Plan desde" (→ estado EN PLAN). */
+function activarPlanPago_(loan, option, signDate) {
+  const ss = getSS_();
+  const n = (option === 1) ? 1 : (option === 6 ? 6 : 4);
+  const loc = signStatusRow_(loan.loanId);
+  if (loc) {
+    const H = headerIndex_(loc.sh);
+    const adjC = colByAny_(H, ['Mora (ajuste)']) || PB.MORA_ADJ;
+    loc.sh.getRange(loc.row, adjC).setValue(0);  // suspende la mora mientras rija el plan
+    const planC = colByAny_(H, ['Plan desde']) || PB.PLAN_SINCE;
+    loc.sh.getRange(loc.row, planC).setValue(signDate).setNumberFormat('yyyy-mm-dd');
+  }
+  // Reemplaza las cuotas: el plan cubre el TOTAL A PAGAR (sin mora). Los pagos registrados (incluido
+  // el pago inicial) se imputan a la cuota más antigua por la fórmula por cuota de cuotasForLoan_.
+  const cs = ss.getSheetByName(CFG.SHEETS.INSTALLMENTS) || setupCuotas_(ss);
+  deleteCuotasRowsForLoan_(cs, loan.loanId);
+  cuotasForLoan_(cs, loan.loanId, loan.loanDate, round2_(loan.totalDue), n, null, { dates: planCuotaDates_(signDate, n) });
+}
+
+/** HTML del ACUERDO TRANSACCIONAL — Reconocimiento de deuda y plan de pagos (modelo del PDF de ejemplo). */
+function planAgreementHtml_(loan, req, sig) {
+  const lender = companyName_(), footer = getSetting_('Pie del Contrato');
+  const signatories = ownerSignatories_();
+  const option = (req && req.option) ? Math.floor(req.option) : 4;
+  const n = (option === 1) ? 1 : (option === 6 ? 6 : 4);
+  const a = planAmounts_(loan);
+  const signedAt = (sig && sig.signedAt instanceof Date) ? sig.signedAt : new Date();
+  const dates = planCuotaDates_(signedAt, n);
+  const baseCuota = round2_(a.total / n);
+  let left = a.recorded; const cuotaRows = [];
+  for (let k = 0; k < n; k++) {
+    const monto = (k === n - 1) ? round2_(a.total - baseCuota * (n - 1)) : baseCuota;
+    const ap = Math.min(left, monto); const neto = round2_(monto - ap); left = round2_(left - ap);
+    cuotaRows.push({ n: k + 1, due: dates[k], monto: monto, neto: neto, ap: ap });
+  }
+  const optTxt = n === 1 ? 'Pago único' : n + ' cuotas mensuales';
+  const kv = (k, v) => `<tr><td class="k">${k}</td><td>${v}</td></tr>`;
+  const fill = v => (v && String(v).trim()) ? esc_(v) : '<span style="color:#9aa4ad">—</span>';
+  const mono = '<span style="font-family:monospace;font-size:8.5pt;word-break:break-all">';
+  const borrowerSig = (sig && sig.dataUrl) ? sig.dataUrl : '';
+  const sigCell = (img, name, role) =>
+    `<td>${img ? `<img src="${img}" alt="firma" style="max-height:44px;max-width:88%;display:block;margin:0 auto 1px">` : '<div style="height:40px"></div>'}` +
+    `<div style="border-top:1px solid #333;padding-top:3px">${esc_(name)}<br><span style="font-size:8pt;color:#555">${esc_(role)}</span></div></td>`;
+  const locSummary = s => { const d = (s && s.device) || {}, l = d.loc || {};
+    if (l.source === 'GPS' && l.gps && l.gps.indexOf('GPS:') !== 0) return l.gps + (l.gpsAcc != null ? ' (±' + l.gpsAcc + ' m)' : '') + ' · GPS';
+    if (l.ipText) return l.ipText + ' · IP'; if (l.source === 'desactivada') return 'No capturada'; return d.tz ? ('Zona horaria: ' + d.tz) : '—'; };
+  const auditPanel = (sig && sig.dataUrl) ? `
+    <h2>Constancia de firma electrónica</h2>
+    <table>
+      ${kv('Firmó', esc_(loan.name) + ' · DNI ' + esc_(loan.dni || '—'))}
+      ${kv('Correo confirmado', esc_(loan.email || '—'))}
+      ${kv('Identidad verificada con', 'DNI ' + esc_(loan.dni || '—') + ' y correo registrado; foto del DNI (frente y dorso, Anexo II)')}
+      ${kv('Documento', 'Foto del DNI, frente y dorso — Anexo II')}
+      ${kv('Fecha y hora', fmtDateTime_(sig.signedAt || new Date()))}
+      ${kv('Cómo se firmó', sig.method === 'upload' ? 'Imagen de firma cargada' : 'Firma dibujada en pantalla')}
+      ${kv('Dirección IP', fill(sig.ip))}
+      ${kv('Ubicación', esc_(locSummary(sig)))}
+      ${kv('Equipo / SO', fill((sig.device && sig.device.os) || ''))}
+      ${kv('Navegador', fill((sig.device && sig.device.browser) || ''))}
+      ${kv('Pantalla', fill((sig.device && sig.device.screen) ? (sig.device.screen + (sig.device.dpr ? (' · DPR ' + sig.device.dpr) : '')) : ''))}
+      ${kv('Automatización detectada', (sig.device && sig.device.webdriver) ? 'Sí (revisar)' : 'No (firmante humano)')}
+      ${kv('Dispositivo (completo)', esc_(String(sig.userAgent || '').slice(0, 200)))}
+      ${kv('Huella de dispositivo (SHA-256)', sig.deviceFp ? (mono + esc_(sig.deviceFp) + '</span>') : '<span style="color:#9aa4ad">No disponible</span>')}
+      ${kv('Huella del documento (SHA-256)', sig.hash ? (mono + esc_(sig.hash) + '</span>') : '<span style="color:#9aa4ad">Se registra en la hoja «Firmas».</span>')}
+    </table>` : '';
+  const cuotaTable = `<table><tr><th>Cuota</th><th>Vencimiento</th><th style="text-align:right">Monto</th></tr>` +
+    cuotaRows.map(c => `<tr><td>${n === 1 ? 'Pago único' : (c.n + ' de ' + n)}</td><td>${fmtDate_(c.due)}</td><td style="text-align:right">${fmtMoney_(c.neto)}${c.ap > 0 ? ' <span style="color:#777">(−' + fmtMoney_(c.ap) + ' ya pagado)</span>' : ''}</td></tr>`).join('') + `</table>`;
+  return `<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><style>
+    @page{size:A4;margin:14mm 14mm}
+    body{font-family:"Carlito","Calibri",Arial,sans-serif;color:#1d2630;margin:0;line-height:1.35;font-size:10pt}
+    h1{text-align:center;font-size:15pt;border-bottom:2px solid #674ea7;padding-bottom:4px;color:#351c75;margin:2px 0 6px}
+    h2{font-size:10.5pt;color:#674ea7;margin:12px 0 3px;border-bottom:1px solid #d8d0ec;padding-bottom:2px;text-transform:uppercase;letter-spacing:.4px}
+    p{margin:0 0 5px} ol{margin:3px 0 5px 18px} table{width:100%;border-collapse:collapse;margin:5px 0;font-size:9.2pt} td,th{padding:4px 7px;border:1px solid #d8dee3;vertical-align:top}
+    th{background:#f3f0fa;text-align:left} td.k{background:#f3f0fa;font-weight:bold;width:46%}
+    .box{border:1px solid #674ea7;border-left:4px solid #674ea7;background:#f3f0fa;padding:7px 11px;margin:7px 0}
+    .sign{margin-top:16px;width:100%} .sign td{border:none;text-align:center;padding:6px 10px;width:33%;vertical-align:bottom}
+    .foot{margin-top:16px;padding-top:6px;border-top:1px solid #dfe4e8;font-size:8.6pt;color:#5c6871;font-style:italic}</style></head><body>
+    ${brandHeaderHtml_()}
+    <h1>ACUERDO TRANSACCIONAL — RECONOCIMIENTO DE DEUDA Y PLAN DE PAGOS</h1>
+    <p style="text-align:center;color:#3d4952">Celebrado el <b>${fmtDate_(signedAt)}</b> entre ${esc_(signatories[0].name)} y ${esc_(signatories[1].name)}, que operan como «${esc_(lender)}» (el Prestamista), y <b>${esc_(loan.name)}</b> — DNI ${esc_(loan.dni || '—')}${loan.cuil ? (' · CUIL ' + esc_(loan.cuil)) : ''} (la Deudora/el Deudor), respecto del préstamo <b>${esc_(loan.loanId)}</b>.</p>
+    <h2>1. Reconocimiento de deuda</h2>
+    <p>La parte deudora reconoce, libremente y sin reservas, que recibió el préstamo <b>${esc_(loan.loanId)}</b> por un capital de <b>${fmtMoney_(loan.principal)}</b> y que adeuda el total pactado (capital + interés) de <b>${fmtMoney_(a.total)}</b>, del cual ya pagó <b>${fmtMoney_(a.recorded)}</b>. Este reconocimiento no constituye un nuevo préstamo (art. 733 CCyCN).</p>
+    <h2>2. Qué se adeuda y a qué renuncia el Prestamista</h2>
+    <p>El préstamo venció impago y la parte deudora se encuentra en mora. El cargo punitorio alcanzó su tope contractual (<b>${fmtMoney_(a.mora)}</b>) y <b>dejó de devengarse</b>.</p>
+    <p>El Prestamista acepta <b>SUSPENDER</b> el cargo punitorio de ${fmtMoney_(a.mora)} mientras este acuerdo se cumpla. La suspensión es <b>condicional y no implica condonación</b>: el punitorio no se extingue, queda en suspenso, y la cláusula 4 establece qué ocurre si se incumple. El monto bajo este acuerdo es, por lo tanto, de <b>${fmtMoney_(a.total)}</b> (capital + interés), sin gastos ni comisiones.</p>
+    <h2>3. Cómo pagará — opción elegida: ${esc_(optTxt)}</h2>
+    <div class="box">
+      ${kv('Total del acuerdo', '<b>' + fmtMoney_(a.total) + '</b>')}
+      ${kv('Pago inicial requerido (' + a.pctInt + '%)', fmtMoney_(a.required) + ' — pagado antes de activar el acuerdo')}
+    </div>
+    ${cuotaTable}
+    <p>El vencimiento es la fecha pactada, aunque caiga fin de semana o feriado. La parte deudora puede pagar anticipadamente, total o parcialmente, sin penalidad. Los pagos se imputan primero a la cuota impaga más antigua.</p>
+    <h2>4. Si se incumple un pago</h2>
+    <p>La suspensión del cargo punitorio (cláusula 2) depende del cumplimiento. Si cualquier pago no se realiza íntegramente en su fecha: <b>(a)</b> la suspensión cesa automáticamente, sin necesidad de notificación; <b>(b)</b> el cargo punitorio de ${fmtMoney_(a.mora)} se restablece en forma íntegra y retroactiva; <b>(c)</b> la totalidad del saldo impago se torna exigible de inmediato. Este acuerdo no se renegocia por segunda vez.</p>
+    <h2>5. Pagos y comunicación</h2>
+    <p>Todo pago se realiza a la cuenta que el Prestamista indique; el pago a cualquier otra persona no cancela la deuda. La parte deudora envía el comprobante dentro de las 24 h y responde los mensajes del Prestamista dentro de las 48 h. Las partes se comunican por correo, WhatsApp o SMS, válidos también para notificaciones formales.</p>
+    <h2>6. Firma y ley aplicable</h2>
+    <p>Las partes firman electrónicamente y aceptan su validez. La parte deudora adopta como propia la firma de abajo y acepta el registro de firma del Prestamista —fecha y hora, IP, dispositivo y hash— como prueba. Este acuerdo se rige por la ley argentina.</p>
+    <table class="sign"><tr>
+      ${sigCell(borrowerSig, loan.name, 'Deudor/a · DNI ' + (loan.dni || ''))}
+      ${sigCell(signatories[0].sig, signatories[0].name, 'Prestamista')}
+      ${sigCell(signatories[1].sig, signatories[1].name, 'Prestamista')}
+    </tr></table>
+    ${auditPanel}
+    <p class="foot">${esc_(footer || '')} Este acuerdo tiene efecto desde que se firma. La parte deudora confirma que lo leyó, lo acepta y lo firma electrónicamente.</p>
+  </body></html>`;
+}
+
+function signingPageHtml_(loanId, mode) {
+  const freeze = (mode === 'freeze'), plan = (mode === 'plan');
+  const TITLE = plan ? 'Firmar Acuerdo de Plan de Pago' : (freeze ? 'Firmar Congelamiento' : 'Firmar Contrato');
+  const FN_GET = plan ? 'getPlanContractForSigning' : (freeze ? 'getFreezeContractForSigning' : 'getContractForSigning');
+  const FN_SUB = plan ? 'submitPlanSignature' : (freeze ? 'submitFreezeSignature' : 'submitSignature');
   return `<!DOCTYPE html><html lang="es"><head><base target="_top"><meta charset="utf-8"><style>
     body{font-family:Arial,sans-serif;background:#f4f6fa;margin:0;padding:24px;color:#222}
     .card{max-width:560px;margin:0 auto;background:#fff;border-radius:10px;padding:24px 28px;box-shadow:0 2px 12px rgba(0,0,0,.08)}
@@ -4612,7 +6438,7 @@ function signingPageHtml_(loanId) {
     .check{width:72px;height:72px;line-height:72px;margin:6px auto 10px;border-radius:50%;background:#38761d;color:#fff;font-size:40px;font-weight:bold;text-align:center}
     .sub{color:#555;margin:0 0 8px;line-height:1.45}
     .hide{display:none}</style></head><body>
-    <div class="card">${brandHeaderHtml_()}<h1>Firmar Contrato</h1>
+    <div class="card">${brandHeaderHtml_()}<h1>${TITLE}</h1>
 
     <div id="gate">
       <p class="hint">Ingrese su DNI para ver y firmar el contrato <b>${esc_(loanId)}</b>.</p>
@@ -4668,7 +6494,7 @@ function signingPageHtml_(loanId) {
           CAPTURE_LOC = (r.captureLocation !== false);
           $('terms').srcdoc = r.contractHtml; PAGE_OPEN = Date.now();
           $('gate').classList.add('hide'); $('signview').classList.remove('hide'); setupCanvas();
-        }).withFailureHandler(function(e){ gerr(e.message||e); }).getContractForSigning($('loan').value, DNI);
+        }).withFailureHandler(function(e){ gerr(e.message||e); }).${FN_GET}($('loan').value, DNI);
       }
       function gerr(m){ var g=$('gerr'); g.textContent=m; g.style.display='block'; }
       function showTab(t){ TAB=t;
@@ -4786,7 +6612,7 @@ function signingPageHtml_(loanId) {
             else { stopProgress(); $('loadingView').classList.add('hide'); $('signview').classList.remove('hide'); $('go').disabled=false; msg((r&&r.message)||'No se pudo firmar.', true); }
           }).withFailureHandler(function(e){
             stopProgress(); $('loadingView').classList.add('hide'); $('signview').classList.remove('hide'); $('go').disabled=false; msg(e.message||e, true);
-          }).submitSignature(LOAN_ID, DNI, data, true, meta);
+          }).${FN_SUB}(LOAN_ID, DNI, data, true, meta);
         });
       }
       function msg(m, isErr){ var o=$('out'); o.className=isErr?'err':'ok'; o.textContent=m; o.style.display='block'; }
@@ -4840,6 +6666,21 @@ function onEditInstallable(e) {
         // Un pago puede saldar el capital pero dejar mora pendiente: reconstruir "Pagos Atrasados"
         // para que "Recargo por Mora (acum.)" / "Saldo con Mora" (VLOOKUP) y el Estado queden al día.
         if (touched.length) { try { rebuildLateSheet_(getSS_()); } catch (err) { logError_('onEdit:PAGOS:rebuildLate', err); } }
+        // Aviso de pago por WhatsApp: arma el enlace por fila (confirma el pago, el saldo resultante
+        // y el vencimiento). Se calcula tras recalcular el "Saldo Posterior" de la(s) fila(s).
+        try {
+          SpreadsheetApp.flush();
+          const waCol = headerMap_(sh)['Avisar pago 📲'] || PP.WA_PAYMENT;
+          for (let row = r0; row <= rN; row++) {
+            const id = String(sh.getRange(row, PP.LOAN_ID).getValue()).trim();
+            const amt = Number(sh.getRange(row, PP.AMOUNT).getValue()) || 0;
+            const cell = sh.getRange(row, waCol);
+            if (!id || !amt) { cell.clearContent(); continue; }
+            const loan = findLoanById_(id);
+            const f = loan ? paymentWaFormula_(loan, sh.getRange(row, PP.DATE).getValue(), amt) : '';
+            if (f) cell.setFormula(f); else cell.setValue(loan ? 'sin teléfono' : '');
+          }
+        } catch (err) { logError_('onEdit:PAGOS:waPago', err); }
       }
       // Casilla "Enviar recibo": envía/reenvía el recibo de pago de esa fila.
       // Se resuelve por NOMBRE de encabezado (funciona en el layout migrado o nuevo).
@@ -4962,6 +6803,30 @@ function onEditInstallable(e) {
           sh.getRange(row, LATE_DOC_COL).setValue(false);
           try { docCuotasDesdeAtrasos_(sh, row); }
           catch (err) { logError_('onEdit:LATE:docCuotas', err); getSS_().toast(err.message || String(err), '⚠ No se pudo generar el PDF', 8); }
+        }
+      }
+    } else if (name === CFG.SHEETS.FREEZE_REQ) {
+      // Casillas "Aprobar ✔" / "Rechazar ✖" de una solicitud de congelamiento.
+      const mF = headerMap_(sh), appC = mF['Aprobar ✔'] || FR_APPROVE_COL, denC = mF['Rechazar ✖'] || FR_DENY_COL;
+      for (let row = rN; row >= Math.max(r0, 2); row--) {
+        if (appC >= c0 && appC <= cN && sh.getRange(row, appC).getValue() === true) {
+          sh.getRange(row, appC).setValue(false);
+          try { approveFreezeRequest_(sh, row); } catch (err) { logError_('onEdit:FREEZE:approve', err); getSS_().toast(err.message || String(err), '⚠ No se pudo aprobar', 8); }
+        } else if (denC >= c0 && denC <= cN && sh.getRange(row, denC).getValue() === true) {
+          sh.getRange(row, denC).setValue(false);
+          try { denyFreezeRequest_(sh, row); } catch (err) { logError_('onEdit:FREEZE:deny', err); getSS_().toast(err.message || String(err), '⚠ No se pudo rechazar', 8); }
+        }
+      }
+    } else if (name === CFG.SHEETS.PLAN_REQ) {
+      // Casillas "Aprobar ✔" / "Rechazar ✖" de una solicitud de plan de pago.
+      const mP = headerMap_(sh), appC = mP['Aprobar ✔'] || PR_APPROVE_COL, denC = mP['Rechazar ✖'] || PR_DENY_COL;
+      for (let row = rN; row >= Math.max(r0, 2); row--) {
+        if (appC >= c0 && appC <= cN && sh.getRange(row, appC).getValue() === true) {
+          sh.getRange(row, appC).setValue(false);
+          try { approvePlanRequest_(sh, row); } catch (err) { logError_('onEdit:PLAN_REQ:approve', err); getSS_().toast(err.message || String(err), '⚠ No se pudo aprobar', 8); }
+        } else if (denC >= c0 && denC <= cN && sh.getRange(row, denC).getValue() === true) {
+          sh.getRange(row, denC).setValue(false);
+          try { denyPlanRequest_(sh, row); } catch (err) { logError_('onEdit:PLAN_REQ:deny', err); getSS_().toast(err.message || String(err), '⚠ No se pudo rechazar', 8); }
         }
       }
     } else if (name === CFG.SHEETS.PLAN) {
@@ -5366,7 +7231,8 @@ function dailyTasks() {
     for (let row = 2; row <= last; row++) {
       const loan = readLoan_(bs, row); if (!loan.loanId || !loan.email) continue;
       const status = bs.getRange(row, PB.STATE).getValue(), outstanding = Number(bs.getRange(row, PB.BALANCE).getValue()) || 0;
-      if (status === ST.PAID || outstanding <= 0) continue;
+      // Congelados: la mora está detenida → no enviamos recordatorios ni avisos de mora.
+      if (status === ST.PAID || status === ST.FROZEN || outstanding <= 0) continue;
       const due = loan.dueDate instanceof Date ? loan.dueDate : null; if (!due) continue;
       const dd = new Date(due); dd.setHours(0, 0, 0, 0);
       const days = Math.round((dd - today) / 86400000);
@@ -5436,7 +7302,8 @@ function actualizarSaldoPosteriorPagos() {
     const ss = getSS_();
     const n = writePaymentBalanceFormulas_(ss);
     SpreadsheetApp.flush();
-    try { ss.toast(n + ' fila(s): «Saldo Posterior» (con mora) actualizado en «Pagos».', '💳 Pagos · saldo', 6); } catch (e) {}
+    let nWa = 0; try { nWa = fillPaymentWaLinks_(ss); } catch (e) { logError_('actualizarSaldoPosteriorPagos:wa', e); }
+    try { ss.toast(n + ' fila(s): «Saldo Posterior» (con mora) + «Avisar pago 📲» (' + nWa + ') actualizados en «Pagos».', '💳 Pagos · saldo', 6); } catch (e) {}
   });
 }
 /** Próximo número de ID Pago (máx. existente + 1), leyendo la columna "ID Pago". */
@@ -5894,12 +7761,22 @@ function firstEmptyBorrowerRow_(bs) {
   for (let i = 0; i < vals.length; i++) if (String(vals[i][0]).trim() === '') return i + 2;
   return bs.getLastRow() + 1;
 }
+// Caché por ejecución de toda la hoja "Configuración" (clave→valor; gana la primera aparición,
+// igual que antes). getSetting_ se llama muchísimo (p. ej. graduationLevelFor_ por cada cliente en
+// "Niveles de Clientes"); leer la hoja una sola vez acelera mucho esas listas. Los que ESCRIBEN
+// ajustes (setSetting_, setSettingValue_, setupSettings_) invalidan el caché.
+let _settingsCache = null;
+function invalidateSettingsCache_() { _settingsCache = null; }
 function getSetting_(key) {
-  const sh = getSS_().getSheetByName(CFG.SHEETS.SETTINGS);
-  if (!sh || sh.getLastRow() < 2) return '';
-  const data = sh.getRange(2, 1, sh.getLastRow() - 1, 2).getValues();
-  for (const r of data) if (String(r[0]).trim() === key) return r[1];
-  return '';
+  if (!_settingsCache) {
+    _settingsCache = {};
+    const sh = getSS_().getSheetByName(CFG.SHEETS.SETTINGS);
+    if (sh && sh.getLastRow() >= 2) {
+      const data = sh.getRange(2, 1, sh.getLastRow() - 1, 2).getValues();
+      for (const r of data) { const k = String(r[0]).trim(); if (k && !(k in _settingsCache)) _settingsCache[k] = r[1]; }
+    }
+  }
+  return (key in _settingsCache) ? _settingsCache[key] : '';
 }
 function spreadsheetParentFolder_() {
   const p = DriveApp.getFileById(getSS_().getId()).getParents();
@@ -6350,6 +8227,11 @@ function sendOverdueNotice_(loanId) {
     const loan = findLoanById_(loanId);
     if (!loan) throw new Error('No se encontró el préstamo ' + loanId + '.');
     if (!loan.email) throw new Error('El préstamo ' + loanId + ' no tiene correo cargado.');
+    // Congelado: la mora está detenida → no corresponde avisar. No es error (se puede tildar
+    // la casilla en "Pagos Atrasados" sin querer): devolvemos un mensaje y no enviamos nada.
+    if (frozenInfo_(loanId).since instanceof Date) {
+      return { date: '', message: 'Préstamo ' + loanId + ' CONGELADO — no se envía aviso de mora.' };
+    }
     const today = new Date();
     const rate = termRate_(loan.term);
     const pays = loanPayments_(loanId);
@@ -6508,4 +8390,323 @@ function showAllSheets() {
     });
     ss.toast(shown + ' hoja(s) mostrada(s). Todas las pestañas están visibles.', 'Pestañas', 6);
   });
+}
+
+/**
+ * PRUEBA — crea en "Prestatarios" un préstamo que YA está al TOPE DE MORA (100%),
+ * para probar el flujo de PLAN DE PAGO sin esperar ~20 días de atraso. Retrodata la
+ * "Fecha Préstamo" lo necesario para que la mora llegue al tope, arma las cuotas y
+ * resuelve Nombre/DNI del cliente (default C-0028 = Denis Bell). El préstamo queda
+ * FIRMADO (activo) y VENCIDO. Corré esto desde el editor de Apps Script (Ejecutar ▸
+ * crearPrestamoPruebaMora100) — todos los argumentos tienen valor por defecto.
+ *
+ * Cada corrida crea UN préstamo nuevo (L-#### siguiente). Para limpiar: borrá su fila
+ * en "Prestatarios" y sus cuotas en "Cuotas" (se reconoce por la nota 🧪 en el ID).
+ *
+ * @param {string} [clienteId='C-0028'] ID del cliente en "Clientes".
+ * @param {number} [capital=200000]     Capital del préstamo (ARS).
+ * @param {number} [plazoDias=30]       Plazo elegido (15/30/60/90); se ajusta al tramo.
+ * @return {string} ID del préstamo creado.
+ */
+function crearPrestamoPruebaMora100(clienteId, capital, plazoDias) {
+  return guard_('crearPrestamoPruebaMora100', function () {
+    clienteId = String(clienteId || 'C-0028').trim();
+    capital = Number(capital) || 200000;
+    plazoDias = Number(plazoDias) || 30;
+
+    const ss = getSS_();
+    const bs = ss.getSheetByName(CFG.SHEETS.BORROWERS);
+    if (!bs) throw new Error('Falta la hoja "' + CFG.SHEETS.BORROWERS + '".');
+
+    // El cliente debe existir (Nombre/DNI se resuelven de "Clientes" por ID Cliente).
+    const cl = ss.getSheetByName(CFG.SHEETS.CLIENTS);
+    let cliName = '';
+    if (cl && cl.getLastRow() >= 2) {
+      const cv = cl.getRange(2, PC.CLIENT_ID, cl.getLastRow() - 1, PC.NAME).getValues();
+      for (let i = 0; i < cv.length; i++) if (String(cv[i][PC.CLIENT_ID - 1]).trim() === clienteId) { cliName = String(cv[i][PC.NAME - 1]); break; }
+    }
+    if (cl && cl.getLastRow() >= 2 && !cliName) throw new Error('No encontré el cliente ' + clienteId + ' en "' + CFG.SHEETS.CLIENTS + '". Verificá el ID.');
+
+    // Tasa/cuotas/plazo reales según el monto (misma fuente que una aprobación normal).
+    const ti = resolveTerm_(capital, plazoDias);
+    const total = round2_(capital * (1 + ti.rate));
+    // Para llegar al tope (100% al 5%/día) hacen falta ~20 días de atraso. Dejamos un
+    // margen extra para quedar holgadamente en el tope. Vencimiento = Fecha + plazo.
+    const overdueDays = Math.ceil(moraCapFrac_() / 0.05) + 5;
+    const loanDate = addDays_(startOfDay_(new Date()), -(Number(ti.days) + overdueDays));
+
+    // Alta de la fila (mismo patrón de columnas que approveApplicantV2_).
+    const H = headerIndex_(bs);
+    const idCol = colByAny_(H, ['ID Préstamo', 'ID Prestamo']) || PB.LOAN_ID;
+    const cliCol = colByAny_(H, ['ID Cliente']) || PB.CLIENT_ID;
+    const capCol = colByAny_(H, ['Capital']) || PB.PRINCIPAL;
+    const plzCol = colByAny_(H, ['Plazo (días)', 'Plazo (dias)', 'Plazo']) || PB.TERM;
+    const fecCol = colByAny_(H, ['Fecha Préstamo', 'Fecha de Préstamo', 'Fecha Prestamo']) || PB.LOAN_DATE;
+    const firmaCol = colByAny_(H, ['Estado de Firma']) || PB.SIGN_STATUS;
+    const nameCol = colByAny_(H, ['Nombre']);
+    const dniCol = colByAny_(H, ['DNI']);
+
+    const loanId = nextLoanId_();
+    const tRow = insertBorrowerRow_(bs, idCol);
+    bs.getRange(tRow, idCol).setValue(loanId)
+      .setNote('🧪 Préstamo de PRUEBA (mora 100%) creado el ' + fmtDate_(new Date()) + '. Borralo (fila + cuotas) cuando termines de probar.');
+    bs.getRange(tRow, cliCol).setValue(clienteId);
+    bs.getRange(tRow, capCol).setValue(capital);
+    bs.getRange(tRow, plzCol).setValue(ti.days);
+    bs.getRange(tRow, fecCol).setValue(loanDate).setNumberFormat('yyyy-mm-dd');
+    if (firmaCol) bs.getRange(tRow, firmaCol).setValue(SIGN.SIGNED); // préstamo activo (ya firmado)
+
+    // Fórmulas calculadas de la fila (Tasa/Venc/Interés/Total/Pagado/Saldo/Mora/Estado/Enlace…).
+    writeBorrowerRowFormulas_(bs, tRow);
+    // Estado con reconocimiento de CONGELADO/EN PLAN si ya existen esas columnas
+    // (las agrega «🆕 Aplicar novedades»): así el estado vira a EN PLAN al activar el plan.
+    if (colByAny_(H, ['Plan desde']) && colByAny_(H, ['Congelado el'])) {
+      bs.getRange(tRow, colByAny_(H, ['Estado']) || PB.STATE).setFormula(borrowerStateFormula_(tRow));
+    }
+    // Nombre/DNI resueltos de "Clientes" por ID Cliente (modelo normalizado).
+    if ((nameCol || dniCol) && cl) {
+      const CH = headerIndex_(cl), cliL = a1col_(cliCol), CSN = CFG.SHEETS.CLIENTS;
+      const cIdL = a1col_(colByAny_(CH, ['ID Cliente']) || 1);
+      if (nameCol) { const cNameL = a1col_(colByAny_(CH, ['Nombre']) || 2);
+        bs.getRange(tRow, nameCol).setFormula(`=IFERROR(INDEX('${CSN}'!$${cNameL}:$${cNameL},MATCH($${cliL}${tRow},'${CSN}'!$${cIdL}:$${cIdL},0)),"")`); }
+      if (dniCol) { const cDniL = a1col_(colByAny_(CH, ['DNI']) || 4);
+        bs.getRange(tRow, dniCol).setFormula(`=IFERROR(INDEX('${CSN}'!$${cDniL}:$${cDniL},MATCH($${cliL}${tRow},'${CSN}'!$${cIdL}:$${cIdL},0)),"")`); }
+    }
+
+    // Cronograma de cuotas (misma lógica que una aprobación): 1 cuota (tramo chico) o 3.
+    // Se usa la Fecha Préstamo retrodatada → la(s) cuota(s) también quedan VENCIDAS.
+    const cs = ss.getSheetByName(CFG.SHEETS.INSTALLMENTS) || (typeof setupCuotas_ === 'function' ? setupCuotas_(ss) : null);
+    if (cs) {
+      const dueDays = ti.cuotas === 3 ? [30, 60, 90] : [ti.days];
+      cuotasForLoan_(cs, loanId, loanDate, total, ti.cuotas, dueDays);
+    }
+    SpreadsheetApp.flush();
+
+    // Refrescá "Pagos Atrasados" para que la mora aparezca en "Prestatarios" y el
+    // préstamo quede listo con su enlace «Pedir plan de pago 📋».
+    try { if (typeof rebuildLateSheet_ === 'function') rebuildLateSheet_(); } catch (e) { logError_('crearPrestamoPruebaMora100:late', e); }
+
+    const mora = round2_(total * moraCapFrac_()); // al tope
+    const msg = '🧪 Préstamo de PRUEBA ' + loanId + ' creado para ' + (cliName || clienteId) +
+      ' — Capital ' + fmtMoney_(capital) + ', Total ' + fmtMoney_(total) +
+      ', atraso ~' + overdueDays + ' días, mora ' + fmtMoney_(mora) + ' (tope ' + Math.round(moraCapFrac_() * 100) + '%). ' +
+      'Ya califica para PLAN DE PAGO (y para congelamiento).';
+    try { ss.toast(msg, '🧪 Préstamo de prueba', 12); } catch (e) {}
+    Logger.log(msg);
+    return loanId;
+  });
+}
+
+/* ============================================================================
+ * PRUEBA — ESCENARIOS DE PAGO Y ESTADOS DE PRÉSTAMO (para probar "Avisar pago 📲")
+ * Crea clientes + préstamos de prueba que cubren TODOS los estados: SALDADO, debe al
+ * día, debe atrasado (con mora), en CUOTAS (una paga / otra parcial / resto pendiente),
+ * CONGELADO y EN PLAN (mora suspendida). Menú ▸ ⚙ Configuración y mantenimiento ▸
+ * 🧪 Datos de prueba. Idempotente: borra los de prueba anteriores antes de recrearlos.
+ * ==========================================================================*/
+const SCENARIO_TEST_PREFIX = '🧪 PRUEBA — ';
+
+/** Menú: confirma y crea los préstamos de prueba de todos los escenarios de pago. */
+function seedPaymentScenariosConfirm() {
+  return guard_('seedPaymentScenariosConfirm', function () {
+    const ui = SpreadsheetApp.getUi();
+    const r = ui.alert('Crear escenarios de pago de prueba',
+      'Se crearán 6 clientes y préstamos de prueba (prefijo «' + SCENARIO_TEST_PREFIX + '») que cubren todos los estados:\n' +
+      '• SALDADO  • Debe (al día)  • Debe (atrasado + mora)\n• En cuotas  • CONGELADO  • EN PLAN (mora suspendida)\n\n' +
+      'Primero se eliminan los de prueba anteriores (si los hay). ¿Continuar?',
+      ui.ButtonSet.OK_CANCEL);
+    if (r !== ui.Button.OK) return;
+    const res = seedPaymentScenarios_();
+    ui.alert('Escenarios de prueba creados',
+      res.resumen + '\n\nAbrí la hoja «Pagos» y mirá la columna «Avisar pago 📲» de cada fila.',
+      ui.ButtonSet.OK);
+  });
+}
+
+/** Crea (idempotente) los préstamos de prueba de todos los escenarios. Devuelve {loans, resumen}. */
+function seedPaymentScenarios_() {
+  const ss = getSS_();
+  const bs = ss.getSheetByName(CFG.SHEETS.BORROWERS);
+  const ps = ss.getSheetByName(CFG.SHEETS.PAYMENTS);
+  if (!bs || !ps) throw new Error('Faltan las hojas «Prestatarios» y/o «Pagos».');
+  const BH = headerIndex_(bs);
+  if (!colByAny_(BH, ['Congelado el']) || !colByAny_(BH, ['Plan desde']))
+    throw new Error('Faltan las columnas de congelamiento/plan en «Prestatarios». Ejecutá primero 🆕 Aplicar novedades.');
+
+  removePaymentScenarios_(); // limpia los de prueba anteriores para no duplicar
+
+  const P = SCENARIO_TEST_PREFIX, today = startOfDay_(new Date());
+  const scenarios = [
+    { estado: 'SALDADO', cliente: { name: P + 'Saldado', email: 'prueba.saldado@example.com', dni: '90000001', phone: '1150000001' },
+      capital: 100000, plazoDias: 30, fechaOffsetDays: -20, cuotas: { n: 1 }, pagos: [{ offsetDays: -1, monto: 150000 }] },
+    { estado: 'Debe (al día)', cliente: { name: P + 'Debe al dia', email: 'prueba.aldia@example.com', dni: '90000002', phone: '1150000002' },
+      capital: 200000, plazoDias: 30, fechaOffsetDays: -5, cuotas: { n: 1 }, pagos: [{ offsetDays: -1, monto: 100000 }] },
+    { estado: 'Debe (atrasado + mora)', cliente: { name: P + 'Debe atrasado', email: 'prueba.atraso@example.com', dni: '90000003', phone: '1150000003' },
+      capital: 200000, plazoDias: 30, fechaOffsetDays: -35, cuotas: { n: 1 }, pagos: [{ offsetDays: -20, monto: 50000 }] },
+    { estado: 'En cuotas', cliente: { name: P + 'En cuotas', email: 'prueba.cuotas@example.com', dni: '90000004', phone: '1150000004' },
+      capital: 400000, plazoDias: 90, rate: 1.0, fechaOffsetDays: -20, cuotas: { n: 4, dueDays: [30, 60, 90, 120] }, pagos: [{ offsetDays: -2, monto: 300000 }] },
+    { estado: 'CONGELADO', cliente: { name: P + 'Congelado', email: 'prueba.congelado@example.com', dni: '90000005', phone: '1150000005' },
+      capital: 250000, plazoDias: 30, fechaOffsetDays: -36, congeladoOffset: 0, cuotas: { n: 1 }, pagos: [{ offsetDays: -1, monto: 187500 }] },
+    { estado: 'EN PLAN (mora suspendida)', cliente: { name: P + 'En plan', email: 'prueba.plan@example.com', dni: '90000006', phone: '1150000006' },
+      capital: 200000, plazoDias: 30, fechaOffsetDays: -40, planOffset: 0, moraAjuste: 0,
+      cuotas: { n: 3, dates: [addDays_(today, 30), addDays_(today, 60), addDays_(today, 90)] }, pagos: [{ offsetDays: -1, monto: 60000 }] },
+  ];
+
+  const loans = [];
+  scenarios.forEach(function (sc) { const r = seedScenarioLoan_(ss, sc); loans.push(sc.estado + ' → ' + r.loanId); });
+
+  SpreadsheetApp.flush();
+  try { rebuildLateSheet_(ss); } catch (e) { logError_('seedPaymentScenarios_:late', e); }
+  try { fillPaymentWaLinks_(ss); } catch (e) { logError_('seedPaymentScenarios_:wa', e); }
+  try { if (typeof buildClientLevels === 'function') buildClientLevels({ silent: true }); } catch (e) {}
+
+  const resumen = loans.length + ' escenario(s) creados:\n• ' + loans.join('\n• ');
+  try { ss.toast(loans.length + ' escenarios de prueba creados.', '🧪 Escenarios de pago', 8); } catch (e) {}
+  Logger.log(resumen);
+  return { loans: loans, resumen: resumen };
+}
+
+/** Crea UN préstamo de prueba (+ cuotas + pagos) según opts. Devuelve {loanId, clienteId, total}. */
+function seedScenarioLoan_(ss, opts) {
+  const bs = ss.getSheetByName(CFG.SHEETS.BORROWERS);
+  const cs = ss.getSheetByName(CFG.SHEETS.INSTALLMENTS) || (typeof setupCuotas_ === 'function' ? setupCuotas_(ss) : null);
+  const ps = ss.getSheetByName(CFG.SHEETS.PAYMENTS);
+  const cl = ss.getSheetByName(CFG.SHEETS.CLIENTS);
+  const today = startOfDay_(new Date());
+
+  // Cliente (reusa/crea) + invalida cachés para que las fórmulas Nombre/DNI lo resuelvan.
+  const c = opts.cliente;
+  const clienteId = getOrCreateClienteV2_(c.name, c.email, normDni_(c.dni), c.phone, {});
+  if (typeof invalidateClientesCache_ === 'function') invalidateClientesCache_();
+  if (typeof invalidateClientesRows_ === 'function') invalidateClientesRows_();
+  if (typeof invalidateClientesHdrCache_ === 'function') invalidateClientesHdrCache_();
+
+  const rate = (opts.rate != null) ? opts.rate : (termRateDays_(opts.plazoDias) || 0.5);
+  const total = round2_(opts.capital * (1 + rate));
+  const loanDate = addDays_(today, opts.fechaOffsetDays || 0);
+
+  const H = headerIndex_(bs);
+  const idCol = colByAny_(H, ['ID Préstamo', 'ID Prestamo']) || PB.LOAN_ID;
+  const cliCol = colByAny_(H, ['ID Cliente']) || PB.CLIENT_ID;
+  const capCol = colByAny_(H, ['Capital']) || PB.PRINCIPAL;
+  const plzCol = colByAny_(H, ['Plazo (días)', 'Plazo (dias)', 'Plazo']) || PB.TERM;
+  const fecCol = colByAny_(H, ['Fecha Préstamo', 'Fecha de Préstamo', 'Fecha Prestamo']) || PB.LOAN_DATE;
+  const firmaCol = colByAny_(H, ['Estado de Firma']) || PB.SIGN_STATUS;
+  const nameCol = colByAny_(H, ['Nombre']);
+  const dniCol = colByAny_(H, ['DNI']);
+  const congCol = colByAny_(H, ['Congelado el']);
+  const planCol = colByAny_(H, ['Plan desde']);
+  const adjCol = colByAny_(H, ['Mora (ajuste)']);
+
+  const loanId = nextLoanId_();
+  const tRow = insertBorrowerRow_(bs, idCol);
+  bs.getRange(tRow, idCol).setValue(loanId).setNote('🧪 Préstamo de PRUEBA (' + (opts.estado || '') + '). Borralo con «Eliminar escenarios de pago».');
+  bs.getRange(tRow, cliCol).setValue(clienteId);
+  bs.getRange(tRow, capCol).setValue(opts.capital);
+  bs.getRange(tRow, plzCol).setValue(opts.plazoDias);
+  bs.getRange(tRow, fecCol).setValue(loanDate).setNumberFormat('yyyy-mm-dd');
+  if (firmaCol) bs.getRange(tRow, firmaCol).setValue(SIGN.SIGNED);
+  if (opts.congeladoOffset != null && congCol) bs.getRange(tRow, congCol).setValue(addDays_(today, opts.congeladoOffset)).setNumberFormat('yyyy-mm-dd');
+  if (opts.planOffset != null && planCol) bs.getRange(tRow, planCol).setValue(addDays_(today, opts.planOffset)).setNumberFormat('yyyy-mm-dd');
+  if (opts.moraAjuste != null && adjCol) bs.getRange(tRow, adjCol).setValue(opts.moraAjuste);
+
+  writeBorrowerRowFormulas_(bs, tRow);
+  if (congCol && planCol) bs.getRange(tRow, colByAny_(H, ['Estado']) || PB.STATE).setFormula(borrowerStateFormula_(tRow));
+
+  if ((nameCol || dniCol) && cl) {
+    const CH = headerIndex_(cl), cliL = a1col_(cliCol), CSN = CFG.SHEETS.CLIENTS;
+    const cIdL = a1col_(colByAny_(CH, ['ID Cliente']) || 1);
+    if (nameCol) { const cNameL = a1col_(colByAny_(CH, ['Nombre']) || 2);
+      bs.getRange(tRow, nameCol).setFormula(`=IFERROR(INDEX('${CSN}'!$${cNameL}:$${cNameL},MATCH($${cliL}${tRow},'${CSN}'!$${cIdL}:$${cIdL},0)),"")`); }
+    if (dniCol) { const cDniL = a1col_(colByAny_(CH, ['DNI']) || 4);
+      bs.getRange(tRow, dniCol).setFormula(`=IFERROR(INDEX('${CSN}'!$${cDniL}:$${cDniL},MATCH($${cliL}${tRow},'${CSN}'!$${cIdL}:$${cIdL},0)),"")`); }
+  }
+
+  // Cuotas: fechas explícitas (plan) o por offsets sobre la Fecha Préstamo.
+  const cuo = opts.cuotas || { n: 1 }, n = cuo.n || 1;
+  if (cuo.dates && cuo.dates.length) cuotasForLoan_(cs, loanId, loanDate, total, n, null, { dates: cuo.dates });
+  else cuotasForLoan_(cs, loanId, loanDate, total, n, cuo.dueDays || [opts.plazoDias]);
+
+  // Pagos.
+  let seq = nextPaymentSeq_(ps);
+  (opts.pagos || []).forEach(function (p) { addTestPayment_(ps, seq++, loanId, c.name, c.dni, addDays_(today, p.offsetDays), p.monto); });
+
+  return { loanId: loanId, clienteId: clienteId, total: total };
+}
+
+/** Agrega una fila de pago de prueba a «Pagos» (con su «Saldo Posterior» vivo). */
+function addTestPayment_(ps, seq, loanId, name, dni, date, monto) {
+  const row = ps.getLastRow() + 1;
+  ps.getRange(row, PP.PAY_ID).setValue('P-' + String(seq).padStart(4, '0'));
+  ps.getRange(row, PP.LOAN_ID).setValue(loanId);
+  ps.getRange(row, PP.DATE).setValue(date).setNumberFormat('yyyy-mm-dd');
+  ps.getRange(row, PP.AMOUNT).setValue(monto).setNumberFormat(CFG.CURRENCY_FMT);
+  ps.getRange(row, PP.NAME).setValue(name);
+  ps.getRange(row, PP.DNI).setValue(normDni_(dni));
+  ps.getRange(row, PP.BALANCE).setFormula(paymentBalanceFormula_(row));
+  SpreadsheetApp.flush();
+}
+
+/** Menú: confirma y elimina los clientes/préstamos/pagos/cuotas de los escenarios de prueba. */
+function removePaymentScenariosConfirm() {
+  return guard_('removePaymentScenariosConfirm', function () {
+    const ui = SpreadsheetApp.getUi();
+    const r = ui.alert('Eliminar escenarios de pago de prueba',
+      'Se eliminarán los clientes de prueba (prefijo «' + SCENARIO_TEST_PREFIX + '») y TODOS sus préstamos, pagos y cuotas. ¿Continuar?',
+      ui.ButtonSet.OK_CANCEL);
+    if (r !== ui.Button.OK) return;
+    const n = removePaymentScenarios_();
+    ui.alert('Listo', n.loans + ' préstamo(s) y ' + n.clientes + ' cliente(s) de prueba eliminados.', ui.ButtonSet.OK);
+  });
+}
+
+/** Elimina clientes de prueba (por prefijo) + sus préstamos/pagos/cuotas. Devuelve {clientes, loans}. */
+function removePaymentScenarios_() {
+  const ss = getSS_();
+  const cl = ss.getSheetByName(CFG.SHEETS.CLIENTS);
+  const bs = ss.getSheetByName(CFG.SHEETS.BORROWERS);
+  const ps = ss.getSheetByName(CFG.SHEETS.PAYMENTS);
+  const cs = ss.getSheetByName(CFG.SHEETS.INSTALLMENTS);
+  if (!cl || !bs) return { clientes: 0, loans: 0 };
+
+  // 1) Clientes de prueba (por prefijo en Nombre).
+  const CH = headerIndex_(cl);
+  const cIdC = colByAny_(CH, ['ID Cliente']) || 1, cNameC = colByAny_(CH, ['Nombre']) || 2;
+  const clientRows = [], clientIds = {};
+  if (cl.getLastRow() >= 2) {
+    const cv = cl.getRange(2, 1, cl.getLastRow() - 1, Math.max(cIdC, cNameC)).getValues();
+    for (let i = 0; i < cv.length; i++) if (String(cv[i][cNameC - 1] || '').indexOf(SCENARIO_TEST_PREFIX) === 0) {
+      clientRows.push(i + 2); clientIds[String(cv[i][cIdC - 1]).trim()] = true;
+    }
+  }
+  // 2) Préstamos de esos clientes.
+  const BH = headerIndex_(bs);
+  const bIdC = colByAny_(BH, ['ID Préstamo', 'ID Prestamo']) || PB.LOAN_ID;
+  const bCliC = colByAny_(BH, ['ID Cliente']) || PB.CLIENT_ID;
+  const loanRows = [], loanIds = {};
+  if (bs.getLastRow() >= 2) {
+    const bv = bs.getRange(2, 1, bs.getLastRow() - 1, Math.max(bIdC, bCliC)).getValues();
+    for (let i = 0; i < bv.length; i++) if (clientIds[String(bv[i][bCliC - 1]).trim()]) {
+      loanRows.push(i + 2); loanIds[String(bv[i][bIdC - 1]).trim()] = true;
+    }
+  }
+  // 3) Cuotas de esos préstamos.
+  if (cs) Object.keys(loanIds).forEach(function (id) { try { deleteCuotasRowsForLoan_(cs, id); } catch (e) {} });
+  // 4) Pagos de esos préstamos (de abajo hacia arriba).
+  if (ps && ps.getLastRow() >= 2) {
+    const pIdC = colByAny_(headerIndex_(ps), ['ID Préstamo', 'ID Prestamo']) || PP.LOAN_ID;
+    const pv = ps.getRange(2, pIdC, ps.getLastRow() - 1, 1).getValues();
+    for (let i = pv.length - 1; i >= 0; i--) if (loanIds[String(pv[i][0]).trim()]) ps.deleteRow(i + 2);
+  }
+  // 5) Préstamos y 6) Clientes (de abajo hacia arriba).
+  loanRows.sort(function (a, b) { return b - a; }).forEach(function (r) { bs.deleteRow(r); });
+  clientRows.sort(function (a, b) { return b - a; }).forEach(function (r) { cl.deleteRow(r); });
+
+  if (typeof invalidateClientesCache_ === 'function') invalidateClientesCache_();
+  if (typeof invalidateClientesRows_ === 'function') invalidateClientesRows_();
+  if (typeof invalidateClientesHdrCache_ === 'function') invalidateClientesHdrCache_();
+  SpreadsheetApp.flush();
+  try { rebuildLateSheet_(ss); } catch (e) {}
+  try { fillPaymentWaLinks_(ss); } catch (e) {}
+  return { clientes: clientRows.length, loans: loanRows.length };
 }

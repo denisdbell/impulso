@@ -486,6 +486,13 @@ function lookupClienteForIntake(email, dni) {
     res.maxLevelNum = g.maxN;
     res.nextMax = Math.min(g.cap, g.max + g.step); // techo del próximo nivel (= actual si ya es el máximo)
     const cByDni = clienteByDni_(dnV.norm);
+    // Congelamiento previo: el límite mostrado se reduce al tope para estos casos.
+    if (cByDni && clientFreezeCount_(cByDni.id) > 0) {
+      const topeFz = settingMoney_('Tope de préstamo tras congelamiento', 20000);
+      res.frozenHistory = true;
+      res.maxAmount = Math.min(res.maxAmount, topeFz);
+      res.maxAmountFmt = fmtMoney_(res.maxAmount);
+    }
     if (cByDni && normEmail_(cByDni.email) === emV.norm) {
       res.found = true;                   // mismo cliente (DNI + correo)
       res.client = { clientId: cByDni.id, name: cByDni.name, phone: cByDni.phone, email: cByDni.email, cuil: cByDni.cuil || '', address: cByDni.address || '',
@@ -811,27 +818,95 @@ function clientLoanCount_(clientId) {
  */
 function repaymentHistory_(dni) {
   const dniN = normDni_(dni);
-  const res = { settledCount: 0, onTimeCount: 0, lateCount: 0, everDefaulted: false, onTimeMaxPrincipal: 0, demotionSteps: 0, levelReset: false };
-  if (!dniN) return res;
-  const ss = getSS_();
+  if (!dniN) return { settledCount: 0, onTimeCount: 0, lateCount: 0, everDefaulted: false, onTimeMaxPrincipal: 0, demotionSteps: 0, levelReset: false };
   const cli = clienteByDni_(dniN);
-  const clientId = cli ? cli.id : '';
+  return computeRepaymentHistory_(repaymentContext_(getSS_()), cli ? cli.id : '', dniN);
+}
 
-  // Último pago (máx. Fecha de Pago) por ID Préstamo, desde "Pagos".
+/**
+ * Lee UNA sola vez las hojas que alimentan el historial (Pagos, Prestatarios, Saldados) y los
+ * umbrales de la escalera (Configuración), agrupando préstamos por «ID Cliente» y por DNI. Permite
+ * calcular el historial de MUCHOS clientes sin releer las hojas por cada uno: "Niveles de Clientes"
+ * lo llama una vez y reutiliza el contexto para toda la cartera (antes releía 3 hojas × cliente).
+ * Solo lectura.
+ */
+function repaymentContext_(ss) {
+  ss = ss || getSS_();
+  // Pagos → último pago (máx. Fecha de Pago) por ID Préstamo.
   const lastPayByLoan = {};
   const pg = ss.getSheetByName(CFG.SHEETS.PAYMENTS);
   if (pg && pg.getLastRow() >= 2) {
     const PH = headerIndex_(pg);
     const lC = colByAny_(PH, ['ID Préstamo', 'ID Prestamo']) || PP.LOAN_ID;
     const dC = colByAny_(PH, ['Fecha de Pago', 'Fecha']) || PP.DATE;
-    const rows = pg.getRange(2, 1, pg.getLastRow() - 1, Math.max(lC, dC)).getValues();
-    rows.forEach(r => {
+    pg.getRange(2, 1, pg.getLastRow() - 1, Math.max(lC, dC)).getValues().forEach(r => {
       const id = String(r[lC - 1] || '').trim(); if (!id) return;
       const d = r[dC - 1], t = (d instanceof Date) ? d.getTime() : Date.parse(d);
       if (!isFinite(t)) return;
       if (!(id in lastPayByLoan) || t > lastPayByLoan[id]) lastPayByLoan[id] = t;
     });
   }
+  // Prestatarios → préstamos por «ID Cliente» (cualquier estado). overdue = mora vigente.
+  const borrowersByClient = {};
+  const bs = ss.getSheetByName(CFG.SHEETS.BORROWERS);
+  if (bs && bs.getLastRow() >= 2) {
+    const H = headerIndex_(bs);
+    const idC = colByAny_(H, ['ID Préstamo', 'ID Prestamo']) || PB.LOAN_ID;
+    const cliC = colByAny_(H, ['ID Cliente']) || PB.CLIENT_ID;
+    const dueC = colByAny_(H, ['Fecha de Vencimiento', 'Vencimiento']) || PB.DUE;
+    const stC = colByAny_(H, ['Estado']) || PB.STATE;
+    const capC = colByAny_(H, ['Capital']) || PB.PRINCIPAL;
+    bs.getRange(2, 1, bs.getLastRow() - 1, Math.max(idC, cliC, dueC, stC, capC)).getValues().forEach(r => {
+      const clientId = String(r[cliC - 1] || '').trim(); if (!clientId) return;
+      const st = String(r[stC - 1] || '').trim().toUpperCase();
+      (borrowersByClient[clientId] = borrowersByClient[clientId] || []).push(
+        { loanId: r[idC - 1], due: r[dueC - 1], paid: st === ST.PAID, overdue: st === ST.OVERDUE, principal: r[capC - 1] });
+    });
+  }
+  // Saldados → préstamos archivados por DNI normalizado. "Fecha de Saldado" = respaldo de fecha.
+  const saldadosByDni = {};
+  const cs = ss.getSheetByName(CFG.SHEETS.CLEARED);
+  if (cs && cs.getLastRow() >= 2) {
+    const H = headerIndex_(cs);
+    const idC = colByAny_(H, ['ID Préstamo', 'ID Prestamo']) || 1;
+    const dniC = colByAny_(H, ['DNI']) || 3;
+    const capC = colByAny_(H, ['Capital']) || 6;
+    const dueC = colByAny_(H, ['Fecha de Vencimiento', 'Vencimiento']) || 12;
+    const setC = colByAny_(H, ['Fecha de Saldado']) || 13;
+    cs.getRange(2, 1, cs.getLastRow() - 1, Math.max(idC, dniC, capC, dueC, setC)).getValues().forEach(r => {
+      const dn = normDni_(r[dniC - 1]); if (!dn) return;
+      (saldadosByDni[dn] = saldadosByDni[dn] || []).push(
+        { loanId: r[idC - 1], due: r[dueC - 1], principal: r[capC - 1], fallbackSettle: r[setC - 1] });
+    });
+  }
+  // Umbrales de la escalera graduada (Configuración; por defecto 3 y 15). SEVERE nunca < MINOR.
+  const MINOR = settingDays_('Atraso que congela el nivel (días)', 3);
+  let SEVERE = settingDays_('Atraso que reinicia el nivel (días)', 15);
+  if (SEVERE < MINOR) SEVERE = MINOR;
+  return { lastPayByLoan: lastPayByLoan, borrowersByClient: borrowersByClient, saldadosByDni: saldadosByDni, MINOR: MINOR, SEVERE: SEVERE };
+}
+
+/**
+ * Computa el historial de repago de UN cliente a partir de un contexto ya leído (repaymentContext_),
+ * sin tocar hojas. Misma lógica que antes: escalera GRADUADA con penalización autorreparable.
+ * Devuelve { settledCount, onTimeCount, lateCount, everDefaulted, onTimeMaxPrincipal, demotionSteps, levelReset }.
+ */
+function computeRepaymentHistory_(ctx, clientId, dniN) {
+  const res = { settledCount: 0, onTimeCount: 0, lateCount: 0, everDefaulted: false, onTimeMaxPrincipal: 0, demotionSteps: 0, levelReset: false };
+  const lastPayByLoan = ctx.lastPayByLoan, MINOR = ctx.MINOR, SEVERE = ctx.SEVERE;
+  const borrowerLoans = (clientId && ctx.borrowersByClient[clientId]) || [];
+  const saldadoLoans = (dniN && ctx.saldadosByDni[dniN]) || [];
+
+  // Acumula los préstamos del cliente (deduplicados por ID: un préstamo puede figurar en ambas
+  // hojas a mitad de un archivado) para evaluarlos en dos pasadas.
+  const loans = [], seen = {};
+  const addLoan_ = (loanId, dueDate, settled, fallbackSettle, principal) => {
+    const id = String(loanId || '').trim();
+    if (!id || seen[id]) return; seen[id] = true;
+    loans.push({ id: id, due: dueDate, settled: !!settled, fallbackSettle: fallbackSettle || null, principal: Number(principal) || 0 });
+  };
+  borrowerLoans.forEach(L => { if (L.overdue) res.everDefaulted = true; addLoan_(L.loanId, L.due, L.paid, null, L.principal); });
+  saldadoLoans.forEach(L => addLoan_(L.loanId, L.due, true, L.fallbackSettle, L.principal));
 
   const dueAsDate_ = d => (d instanceof Date) ? d : (d ? new Date(d) : null);
   // Días completos de atraso del préstamo (0 si a tiempo o sin pago registrado): entre su
@@ -842,53 +917,6 @@ function repaymentHistory_(dni) {
     if (pay == null || !due || !isFinite(due.getTime())) return 0;
     return daysLate_(due, new Date(pay));
   };
-  // Acumula los préstamos del cliente (deduplicados por ID: un préstamo puede figurar
-  // en ambas hojas a mitad de un archivado) para evaluarlos en dos pasadas.
-  const loans = [], seen = {};
-  const addLoan_ = (loanId, dueDate, settled, fallbackSettle, principal) => {
-    const id = String(loanId || '').trim();
-    if (!id || seen[id]) return; seen[id] = true;
-    loans.push({ id: id, due: dueDate, settled: !!settled, fallbackSettle: fallbackSettle || null, principal: Number(principal) || 0 });
-  };
-
-  // 1) "Prestatarios": TODOS los préstamos del cliente (por ID Cliente, cualquier estado).
-  const bs = ss.getSheetByName(CFG.SHEETS.BORROWERS);
-  if (clientId && bs && bs.getLastRow() >= 2) {
-    const H = headerIndex_(bs);
-    const idC = colByAny_(H, ['ID Préstamo', 'ID Prestamo']) || PB.LOAN_ID;
-    const cliC = colByAny_(H, ['ID Cliente']) || PB.CLIENT_ID;
-    const dueC = colByAny_(H, ['Fecha de Vencimiento', 'Vencimiento']) || PB.DUE;
-    const stC = colByAny_(H, ['Estado']) || PB.STATE;
-    const capC = colByAny_(H, ['Capital']) || PB.PRINCIPAL;
-    const data = bs.getRange(2, 1, bs.getLastRow() - 1, Math.max(idC, cliC, dueC, stC, capC)).getValues();
-    data.forEach(r => {
-      if (String(r[cliC - 1] || '').trim() !== clientId) return;
-      const st = String(r[stC - 1] || '').trim().toUpperCase();
-      if (st === ST.OVERDUE) res.everDefaulted = true;   // mora vigente
-      // Detecta un pago tardío en cualquier estado (activo/vencido/pagado); cuenta on-time sólo si PAGADO.
-      addLoan_(r[idC - 1], r[dueC - 1], st === ST.PAID, null, r[capC - 1]);
-    });
-  }
-
-  // 2) "Saldados": préstamos archivados (todos saldados), por DNI. "Fecha de Saldado"
-  //    sirve de respaldo cuando el préstamo no tiene filas en "Pagos" (datos migrados).
-  const cs = ss.getSheetByName(CFG.SHEETS.CLEARED);
-  if (cs && cs.getLastRow() >= 2) {
-    const H = headerIndex_(cs);
-    const idC = colByAny_(H, ['ID Préstamo', 'ID Prestamo']) || 1;
-    const dniC = colByAny_(H, ['DNI']) || 3;
-    const capC = colByAny_(H, ['Capital']) || 6;
-    const dueC = colByAny_(H, ['Fecha de Vencimiento', 'Vencimiento']) || 12;
-    const setC = colByAny_(H, ['Fecha de Saldado']) || 13;
-    const data = cs.getRange(2, 1, cs.getLastRow() - 1, Math.max(idC, dniC, capC, dueC, setC)).getValues();
-    data.forEach(r => { if (normDni_(r[dniC - 1]) === dniN) addLoan_(r[idC - 1], r[dueC - 1], true, r[setC - 1], r[capC - 1]); });
-  }
-
-  // Umbrales de la escalera graduada (Configuración; por defecto 3 y 15). SEVERE nunca < MINOR.
-  const MINOR = settingDays_('Atraso que congela el nivel (días)', 3);
-  let SEVERE = settingDays_('Atraso que reinicia el nivel (días)', 15);
-  if (SEVERE < MINOR) SEVERE = MINOR;
-
   const toTime_ = v => { const t = (v instanceof Date) ? v.getTime() : Date.parse(v); return isFinite(t) ? t : null; };
   // Momento de saldado (para ordenar cronológicamente): último pago; si falta, "Fecha de
   // Saldado"; en última instancia el vencimiento (solo para ordenar datos migrados sin pagos).
@@ -1009,8 +1037,11 @@ function buildClientLevels(opts) {
   // Un cálculo de historial por cliente; nivel y límite se derivan con graduationLevelFor_
   // (única fuente de verdad, idéntica a la que usa la aprobación V-32 y el formulario web).
   // Orden: mayor nivel primero; la mora vigente baja al final.
+  // Rendimiento: se leen Pagos/Prestatarios/Saldados UNA sola vez (repaymentContext_) y se
+  // computa cada cliente en memoria (antes se releían las 3 hojas por cada cliente).
+  const ctx = repaymentContext_(ss);
   const rows = clientesRows_().map(c => {
-    const h = repaymentHistory_(c.dniNorm);
+    const h = computeRepaymentHistory_(ctx, c.id, c.dniNorm);
     const g = graduationLevelFor_(h);
     return { c: c, h: h, level: g.level, max: g.max,
       estado: h.everDefaulted ? 'Mora vigente' : ((Number(h.demotionSteps) || 0) > 0 ? 'Nivel reducido por atraso' : 'Al día'),
@@ -1068,6 +1099,12 @@ function validateApprovalV2_(clientId, amount, override, dni, ident) {
   const amt = Number(amount) || 0;
   const fs = fundStats_(), avail = fs.available; // avail (acotado ≥ 0) para los topes; fs.net para mostrar el sobregiro
   if (!override) {
+    // Congelamiento previo: un cliente que congeló un préstamo tiene un tope muy bajo para futuros
+    // préstamos (decisión de negocio). Se anula sólo con «Anular límites».
+    if (clientFreezeCount_(clientId) > 0) {
+      const topeFz = settingMoney_('Tope de préstamo tras congelamiento', 20000);
+      if (amt > topeFz) return { ok: false, code: 'V-CONGELADO', msg: 'El cliente tiene un congelamiento en su historial; el monto (' + fmtMoney_(amt) + ') supera el tope para estos casos (' + fmtMoney_(topeFz) + '). Reducí el monto o usá «Anular límites».' };
+    }
     // Tope de 2 préstamos por prestatario.
     if (clientLoanCount_(clientId) >= MAX_LOANS_PER_CLIENT)
       return { ok: false, code: 'V-25', msg: 'El prestatario ya tiene ' + MAX_LOANS_PER_CLIENT + ' préstamos (máximo permitido).' };
@@ -1096,6 +1133,17 @@ function validateApprovalV2_(clientId, amount, override, dni, ident) {
     }
   }
   return { ok: true, msg: '' };
+}
+
+/** Cantidad de congelamientos firmados del cliente (columna "Congelamientos" de "Clientes"); 0 si no hay. */
+function clientFreezeCount_(clientId) {
+  clientId = String(clientId || '').trim(); if (!clientId) return 0;
+  const sh = getSS_().getSheetByName(CFG.SHEETS.CLIENTS); if (!sh || sh.getLastRow() < 2) return 0;
+  const m = headerMap_(sh), idC = m['ID Cliente'] || 1, fcC = m['Congelamientos'];
+  if (!fcC) return 0;
+  const data = sh.getRange(2, 1, sh.getLastRow() - 1, Math.max(idC, fcC)).getValues();
+  for (let i = 0; i < data.length; i++) if (String(data[i][idC - 1]).trim() === clientId) return Number(data[i][fcC - 1]) || 0;
+  return 0;
 }
 
 /** V-20 — verifica que un ID Cliente exista en "Clientes". */

@@ -183,6 +183,22 @@ function ensureSigningLinkColumn_(bs) {
   insertEndColumnSafe_(bs, 'Enlace de Firma', 160);
 }
 
+/** Inserta (una sola vez) las columnas de CONGELAMIENTO en "Prestatarios", al FINAL y a salvo del
+ *  banner: "Congelado el" (fecha desde la que se detiene la mora) y "Días congelados" (acumulador
+ *  de días saltados por descongelados; lo gestiona el menú). Idempotente. */
+function ensureFrozenColumns_(bs) {
+  if (!colByAny_(headerIndex_(bs), ['Congelado el'])) {
+    const c = insertEndColumnSafe_(bs, 'Congelado el', 110);
+    bs.getRange(2, c, CFG.MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd').setDataValidation(datePicker_());
+    bs.getRange(1, c).setNote('CONGELAMIENTO. Fecha desde la que la mora deja de crecer. Vacío = NO congelado. Usá el menú ▸ ❄ Congelar / ☀ Descongelar. Con fecha, el Estado pasa a CONGELADO.');
+  }
+  if (!colByAny_(headerIndex_(bs), ['Días congelados', 'Dias congelados'])) {
+    const c = insertEndColumnSafe_(bs, 'Días congelados', 110);
+    bs.getRange(2, c, CFG.MAX_ROWS, 1).setNumberFormat('0');
+    bs.getRange(1, c).setNote('Días de atraso ya saltados por descongelados previos (lo gestiona el menú ☀ Descongelar). No editar a mano.');
+  }
+}
+
 /** Inserta (una sola vez) la casilla "Generar enlace 🔗" en "Prestatarios" y le pone checkboxes
  *  a las filas de datos. Al tildarla, el onEdit genera/escribe el enlace de firma de ESE préstamo
  *  en la columna "Enlace de Firma" y lo muestra para copiar. Idempotente; resuelve por NOMBRE. */
@@ -427,7 +443,11 @@ function reactivateSettings_(ss) {
 function setSettingValue_(sh, key, val) {
   const last = sh.getLastRow(); if (last < 1) return false;
   const rows = sh.getRange(1, 1, last, 1).getValues();
-  for (let i = 0; i < rows.length; i++) if (hkey_(rows[i][0]) === hkey_(key)) { sh.getRange(i + 1, 2).setValue(val); return true; }
+  for (let i = 0; i < rows.length; i++) if (hkey_(rows[i][0]) === hkey_(key)) {
+    sh.getRange(i + 1, 2).setValue(val);
+    if (typeof invalidateSettingsCache_ === 'function') invalidateSettingsCache_();
+    return true;
+  }
   return false;
 }
 
@@ -439,6 +459,7 @@ function reactivateBorrowers_(ss) {
   ensurePlanColumn_(sh);  // "Suma de cuotas" = total del plan (tras "Saldo con Mora")
   ensureSigningLinkColumn_(sh); // "Enlace de Firma" = enlace clicable al contrato (al final de la hoja)
   ensureSigningLinkCheckboxColumn_(sh); // casilla "Generar enlace 🔗" (genera el enlace de ese préstamo al tildar)
+  ensureFrozenColumns_(sh); // "Congelado el" / "Días congelados" — congelamiento de la mora
   const H = headerIndex_(sh);
   const idC = colByAny_(H, ['ID Préstamo', 'ID Prestamo']);
   const cliC = colByAny_(H, ['ID Cliente']);
@@ -458,6 +479,8 @@ function reactivateBorrowers_(ss) {
   const linkC = colByAny_(H, ['Enlace de Firma']);
   const estC = colByAny_(H, ['Estado']);
   const firmaC = colByAny_(H, ['Estado de Firma']);
+  const congC = colByAny_(H, ['Congelado el']); // fecha de congelamiento (entrada manual; NO se sobrescribe)
+  const planSinceC = colByAny_(H, ['Plan desde']); // fecha del Acuerdo (plan de pago; NO se sobrescribe)
   if (!idC) return 'falta ID Préstamo';
   const b = dataBlock_(sh, idC); if (!b.count) return 'sin datos';
 
@@ -468,6 +491,8 @@ function reactivateBorrowers_(ss) {
   const ADJ = adjC ? a1col_(adjC) : '';
   const BM = bmC ? a1col_(bmC) : K; // Estado cae al saldo base si aún no existe "Saldo con Mora"
   const PLAN = planC ? a1col_(planC) : ''; // "Suma de cuotas" (detecta préstamos EN PLAN)
+  const FS = congC ? a1col_(congC) : '';   // "Congelado el" (detecta préstamos CONGELADOS)
+  const PS = planSinceC ? a1col_(planSinceC) : ''; // "Plan desde" (detecta préstamos EN PLAN por acuerdo)
   // Columnas de "Pagos" (para SUMIF de Total Pagado, V-17).
   let payLoanL = 'B', payAmtL = 'D';
   if (pg) { const PH = headerIndex_(pg); payLoanL = a1col_(colByAny_(PH, ['ID Préstamo', 'ID Prestamo']) || 2); payAmtL = a1col_(colByAny_(PH, ['Monto Pagado']) || 4); }
@@ -506,7 +531,13 @@ function reactivateBorrowers_(ss) {
   // (la "Suma de cuotas" supera el "Total a Pagar" por la mora congelada) → se distingue del ACTIVO.
   if (estC) setColFormulas_(sh, estC, b.first, b.count, r => {
     const planExpr = PLAN ? `N($${PLAN}${r})>N($${I}${r})+0.009` : 'FALSE';
-    return `=IF($${A}${r}="","",IF($${BM}${r}<=0,"${ST.PAID}",IF(OR(${cuotaVencidaExpr_('$' + A + r)},TODAY()>$${G}${r}),"${ST.OVERDUE}",IF(${planExpr},"${ST.PLAN}","${ST.ACTIVE}"))))`;
+    // CONGELADO: "Congelado el" con fecha y no saldado → prevalece sobre VENCIDO/ACTIVO.
+    const frozenExpr = FS ? `IF($${FS}${r}<>"","${ST.FROZEN}",` : '';
+    const frozenClose = FS ? ')' : '';
+    // EN PLAN: "Plan desde" con fecha y no saldado → plan de pago (Acuerdo) vigente.
+    const planFlagExpr = PS ? `IF($${PS}${r}<>"","${ST.PLAN}",` : '';
+    const planFlagClose = PS ? ')' : '';
+    return `=IF($${A}${r}="","",IF($${BM}${r}<=0,"${ST.PAID}",${frozenExpr}${planFlagExpr}IF(OR(${cuotaVencidaExpr_('$' + A + r)},TODAY()>$${G}${r}),"${ST.OVERDUE}",IF(${planExpr},"${ST.PLAN}","${ST.ACTIVE}"))${planFlagClose}${frozenClose}))`;
   });
 
   // Nombre/DNI (si "Prestatarios" los muestra como columnas): se resuelven del cliente por
@@ -535,6 +566,8 @@ function reactivateBorrowers_(ss) {
   fmtCol_(sh, tasC, b.first, b.count, '0%');
   fmtCol_(sh, fecC, b.first, b.count, 'yyyy-mm-dd');
   fmtCol_(sh, venC, b.first, b.count, 'yyyy-mm-dd');
+  if (congC) fmtCol_(sh, congC, b.first, b.count, 'yyyy-mm-dd'); // "Congelado el" (entrada manual)
+  if (planSinceC) fmtCol_(sh, planSinceC, b.first, b.count, 'yyyy-mm-dd'); // "Plan desde" (flujo de firma)
 
   // Validaciones de datos: Plazo (V-13) y Estado de Firma.
   if (plzC) sh.getRange(2, plzC, CFG.MAX_ROWS, 1).setDataValidation(
@@ -649,9 +682,13 @@ function reactivatePayments_(ss) {
   if (reciboC) sh.getRange(2, reciboC, CFG.MAX_ROWS, 1).setDataValidation(
     SpreadsheetApp.newDataValidation().requireValueInList(['SÍ', 'NO'], true).setAllowInvalid(true).build());
 
+  // Columna "Avisar pago 📲": enlaces de WhatsApp de aviso de pago (confirmación + saldo + vencimiento).
+  SpreadsheetApp.flush(); // que el "Saldo Posterior" ya esté calculado antes de leerlo
+  let nWa = 0; if (typeof fillPaymentWaLinks_ === 'function') { try { nWa = fillPaymentWaLinks_(ss); } catch (e) { logError_('reactivatePayments_:wa', e); } }
+
   clearReactivarProtections_(sh);
   protectFormulaCols_(sh, [saldoC], b.first, b.count);
-  return b.count + ' pagos · Saldo Posterior + validaciones + formato';
+  return b.count + ' pagos · Saldo Posterior + validaciones + formato' + (nWa ? (' + ' + nWa + ' WhatsApp de aviso de pago') : '');
 }
 
 /* =========================== CLIENTES =========================== */
