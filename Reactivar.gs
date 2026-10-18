@@ -1102,7 +1102,7 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
     const cs = ss.getSheetByName(CFG.SHEETS.INSTALLMENTS) || (typeof setupCuotas_ === 'function' ? setupCuotas_(ss) : null);
     if (cs && typeof cuotasForLoan_ === 'function' && typeof resolveTerm_ === 'function') {
       const ti = resolveTerm_(amount, term), total = round2_(amount * (1 + ti.rate)); // respeta el plazo elegido (15/30 en tramo chico)
-      const dueDays = ti.cuotas === 3 ? [30, 60, 90] : [ti.days];
+      const dueDays = ti.cadence === 'monthly' ? Array.from({ length: ti.cuotas }, (_, i) => (i + 1) * 30) : [ti.days];
       cuotasForLoan_(cs, loanId, new Date(), total, ti.cuotas, dueDays);
     }
   } catch (e) { logError_('approveApplicantV2_:cuotas', e); }

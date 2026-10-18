@@ -98,8 +98,8 @@ const VALIDATION_RULES = [
   ['V-27', 'Formulario', 'Referencias', 'Dos referencias obligatorias (1.ª familiar no conviviente, 2.ª no familiar) con nombre (mín. 10 caracteres), vínculo y teléfono argentino válido.', 'Completá las dos referencias con nombre (mín. 10 caracteres) y un teléfono argentino válido.', 'BLOQUEA', 'MEDIA'],
   ['V-28', 'Formulario', 'Referencias', 'El teléfono de una referencia no puede ser igual al del solicitante ni repetirse entre las dos referencias.', 'El teléfono de una referencia no puede ser el del solicitante ni repetirse entre referencias.', 'BLOQUEA', 'MEDIA'],
   ['V-29', 'Formulario', 'Monto', 'El monto no puede superar el tope configurable (por defecto $500.000).', 'El monto máximo por préstamo es $500.000.', 'BLOQUEA', 'ALTA'],
-  ['V-30', 'Formulario', 'Monto/Plazo', 'El plazo/tasa/cuotas se DERIVAN del monto: ≤$150.000→elige 15d/25% o 30d/50% (1 cuota); ≤$300.000→30d/50%/1; >$300.000→90d/100%/3 cuotas.', 'El plazo se calcula según el monto.', 'BLOQUEA', 'ALTA'],
-  ['V-31', 'Alta', 'Cuotas', 'Préstamo grande (>$300.000): se genera un cronograma de 3 cuotas mensuales (día 30/60/90), cada una = Total÷3.', '—', 'AUTOMÁTICO', 'ALTA'],
+  ['V-30', 'Formulario', 'Monto/Plazo', 'El plazo/tasa/cuotas se DERIVAN del monto: ≤$150.000→elige 15d/25% o 30d/50% (1 cuota); $150.000–$299.999→30d/50%/1; ≥$300.000→90d/100% en 3 a 6 cuotas mensuales (según el monto).', 'El plazo se calcula según el monto.', 'BLOQUEA', 'ALTA'],
+  ['V-31', 'Alta', 'Cuotas', 'Préstamo grande (≥$300.000): cronograma de 3 a 6 cuotas mensuales según el monto (cada cuota ≈ ≤ la "Cuota manejable objetivo"), cada una = Total÷nº.', '—', 'AUTOMÁTICO', 'ALTA'],
   ['V-32', 'Aprobación', 'Monto', 'Escalera de graduación: el monto ≤ límite por historial de repago del prestatario. Para subir de nivel hay que haber DEVUELTO A TIEMPO un préstamo cuyo Capital sea ≥ el límite del nivel anterior (muchos préstamos chicos NO promueven). Los atrasos GRADÚAN la escalera: ≤3 días la congelan, 4–15 días bajan un nivel (recuperable con repagos a tiempo), >15 días o un préstamo VENCIDO sin pagar reinician a Inicial.', 'Supera el límite por historial del prestatario. Se amplía devolviendo a tiempo un préstamo de al menos el tope actual (no basta con montos chicos), o con «Anular límites».', 'BLOQUEA', 'ALTA'],
   ['V-33', 'Formulario y Aprobación', 'Cliente', 'Cliente BLOQUEADO (columna «Bloqueado» = SÍ en Clientes): se rechaza toda solicitud y aprobación que coincida por correo, DNI, CUIL o teléfono. ABSOLUTO: no se anula con «Anular límites». Desbloquear = vaciar la columna «Bloqueado».', 'No es posible procesar solicitudes para este cliente. Ante cualquier duda, comunicate con el prestamista.', 'BLOQUEA', 'ALTA'],
   ['V-34', 'Aprobación', 'Referencias', 'Al menos UNA referencia debe estar VALIDADA (casilla «Ref 1 Validada?» o «Ref 2 Validada?» = SÍ) en «Nuevos Prestatarios» antes de aprobar/otorgar el préstamo. No se anula con «Anular límites».', 'Validá al menos una referencia antes de aprobar el préstamo.', 'BLOQUEA', 'ALTA'],
@@ -420,24 +420,39 @@ function termInfoForDays_(days) {
 /**
  * Plazos PERMITIDOS según el monto:
  *   ≤ tramo1 → [15, 30]  (el cliente elige 15 o 30 días)
- *   ≤ tramo2 → [30]      (forzado)
- *   > tramo2 (hasta el tope) → [90]  (forzado, 3 cuotas)
+ *   tramo1 < monto < tramo2 → [30]  (forzado, 1 pago)  — franja $150.000 a $299.999
+ *   ≥ tramo2 (hasta el tope) → [90]  (forzado, cuotas mensuales manejables) — desde $300.000
+ * El corte del tramo grande es ESTRICTO (< tramo2): un préstamo de exactamente $300.000 va al
+ * tramo de cuotas, no a un único pago grande (reduce la mora/default; ver datos del análisis).
  */
 function allowedTermsForAmount_(amount) {
   const a = Number(amount) || 0;
   if (a <= 0) return [];
   if (a <= tier1Max_()) return [15, 30];
-  if (a <= tier2Max_()) return [30];
+  if (a < tier2Max_()) return [30];
   return [90];
 }
-/** Plazo por defecto del monto = primer permitido. */
-function termForAmount_(amount) { const al = allowedTermsForAmount_(amount); return termInfoForDays_(al.length ? al[0] : 15); }
+/** Cantidad de cuotas del TRAMO GRANDE para que cada cuota sea MANEJABLE (≈ ≤ la "Cuota manejable
+ *  objetivo", la franja de 0% de default): clamp(ceil(Total / objetivo), 3, 6). total = Total a Pagar. */
+function bigTierCuotas_(total) {
+  const target = settingMoney_('Cuota manejable objetivo (tramo grande)', 150000);
+  const n = Math.ceil((Number(total) || 0) / target);
+  return Math.min(6, Math.max(3, n || 3));
+}
+/** termInfoForDays_ + ajuste del nº de cuotas del tramo grande según el monto (cuotas manejables). */
+function termInfoForAmount_(amount, days) {
+  const ti = termInfoForDays_(days);
+  if (ti.cadence === 'monthly') ti.cuotas = bigTierCuotas_(round2_((Number(amount) || 0) * (1 + ti.rate)));
+  return ti;
+}
+/** Plazo por defecto del monto = primer permitido (con cuotas manejables si es tramo grande). */
+function termForAmount_(amount) { const al = allowedTermsForAmount_(amount); return termInfoForAmount_(amount, al.length ? al[0] : 15); }
 /** Plazo efectivo: respeta la elección del cliente si es válida para el monto; si no, usa el default. */
 function resolveTerm_(amount, chosenDays) {
   const al = allowedTermsForAmount_(amount);
   if (!al.length) return termForAmount_(amount);
   const d = al.indexOf(Number(chosenDays)) >= 0 ? Number(chosenDays) : al[0];
-  return termInfoForDays_(d);
+  return termInfoForAmount_(amount, d);
 }
 function dueDateForDays_(days, from) { const d = new Date(from.getTime()); d.setDate(d.getDate() + Number(days || 0)); return d; }
 
@@ -1469,8 +1484,8 @@ function intakeSmartHtml_() {
             <div style="margin-bottom:5px;color:#39424f">El plazo se calcula según el monto:</div>
             <ul id="tierList" style="margin:0;padding-left:18px">
               <li id="tierLi1">Hasta <b>${fmtMoney_(tier1Max_())}</b>: elegís <b style="color:#1c4587">15 días (25%)</b> o <b style="color:#1c4587">30 días (50%)</b> — <b>1 pago</b>.</li>
-              <li id="tierLi2">De <b>${fmtMoney_(tier1Max_())}</b> a <b>${fmtMoney_(tier2Max_())}</b>: <b style="color:#1c4587">30 días (50%)</b> — <b>1 pago</b>.</li>
-              <li id="tierLi3">De <b>${fmtMoney_(tier2Max_())}</b> a <b>${fmtMoney_(loanMax_())}</b>: <b style="color:#1c4587">90 días (100%)</b> — <b>3 cuotas mensuales</b> (vencen día 30, 60 y 90).</li>
+              <li id="tierLi2">De <b>${fmtMoney_(tier1Max_())}</b> a <b>${fmtMoney_(tier2Max_() - 1)}</b>: <b style="color:#1c4587">30 días (50%)</b> — <b>1 pago</b>.</li>
+              <li id="tierLi3">De <b>${fmtMoney_(tier2Max_())}</b> a <b>${fmtMoney_(loanMax_())}</b>: <b style="color:#1c4587">90 días (100%)</b> — <b>de 3 a 6 cuotas mensuales</b> según el monto (cada cuota ≈ ≤ <b>${fmtMoney_(settingMoney_('Cuota manejable objetivo (tramo grande)', 150000))}</b>).</li>
             </ul>
             <div id="maxBanner" style="margin-top:7px;padding:7px 11px;background:#fff4e5;border:1px solid #f0b357;border-radius:8px;color:#7a4a00">⚠️ <b>Monto máximo por préstamo: ${fmtMoney_(loanMax_())}</b></div>
             <div id="levelInfo" style="display:none;margin-top:7px"></div>
@@ -1583,6 +1598,7 @@ function intakeSmartHtml_() {
       var amountEl=document.getElementById('amount'),termEl=document.getElementById('term');
       // Tramos por monto (el monto determina plazo/tasa/cuotas; se calcula, no se elige).
       var T1MAX=${tier1Max_()}, T2MAX=${tier2Max_()}, LOANMAX=${loanMax_()};
+      var CUOTA_TARGET=${settingMoney_('Cuota manejable objetivo (tramo grande)', 150000)}; // cuota manejable del tramo grande
       // Umbrales de la escalera graduada (Configuración) para explicar los atrasos en el formulario.
       var LVL_FREEZE=${settingDays_('Atraso que congela el nivel (días)', 3)}, LVL_RESET=Math.max(${settingDays_('Atraso que reinicia el nivel (días)', 15)}, ${settingDays_('Atraso que congela el nivel (días)', 3)});
       // Límite del prestatario (escalera de graduación, V-32). Arranca en el tope global y se
@@ -1785,9 +1801,16 @@ function intakeSmartHtml_() {
       });
       function parseAmount(v){var d=String(v==null?'':v).replace(/[^0-9]/g,'');return d?parseInt(d,10):0;}
       // Info fija por plazo (réplica de termInfoForDays_ del servidor).
-      function infoForDays(d){ d=parseInt(d,10); return d===15?{days:15,rate:0.25,cuotas:1}:d===30?{days:30,rate:0.5,cuotas:1}:{days:90,rate:1,cuotas:3}; }
-      // Plazos permitidos por monto: ≤T1MAX → [15,30] (elige); ≤T2MAX → [30]; grande → [90].
-      function allowedDays(a){ if(!(a>0)) return []; if(a>MAXAMT) return null; if(a<=T1MAX) return [15,30]; if(a<=T2MAX) return [30]; return [90]; }
+      // Cuotas manejables del tramo grande (réplica de bigTierCuotas_): clamp(ceil(total/objetivo),3,6).
+      function bigCuotas(total){ var n=Math.ceil((total||0)/CUOTA_TARGET); return Math.min(6,Math.max(3,n||3)); }
+      // Info por plazo (réplica de termInfoForDays_/termInfoForAmount_). El tramo grande (90 d) calcula
+      // las cuotas según el monto para que cada una sea manejable; necesita el monto 'a'.
+      function infoForDays(d,a){ d=parseInt(d,10);
+        if(d===15) return {days:15,rate:0.25,cuotas:1,cadence:'once'};
+        if(d===30) return {days:30,rate:0.5,cuotas:1,cadence:'once'};
+        return {days:90,rate:1,cuotas:bigCuotas((a||0)*2),cadence:'monthly'}; }
+      // Plazos permitidos por monto: ≤T1MAX → [15,30] (elige); <T2MAX → [30]; ≥T2MAX → [90] (cuotas).
+      function allowedDays(a){ if(!(a>0)) return []; if(a>MAXAMT) return null; if(a<=T1MAX) return [15,30]; if(a<T2MAX) return [30]; return [90]; }
       function recalc(){
         var a=parseAmount(amountEl.value), tv=el_('termView'), tc=el_('termChoice'), sel=el_('term15o30');
         var al=allowedDays(a);
@@ -1804,7 +1827,7 @@ function intakeSmartHtml_() {
           tv.textContent='Plazo: '+days+' días ('+Math.round(infoForDays(days).rate*100)+'% de interés)'; tv.style.color='#1c4587';
         }
         termEl.value=String(days);
-        var ti=infoForDays(days), total=a*(1+ti.rate), cuota=total/ti.cuotas;
+        var ti=infoForDays(days, a), total=a*(1+ti.rate), cuota=total/ti.cuotas;
         var sched=ti.cuotas===1 ? ('1 pago de '+fmt(total)+' — '+cuotaDatesTxt(1,ti.days))
           : (ti.cuotas+' cuotas de '+fmt(cuota)+' — '+cuotaDatesTxt(ti.cuotas,90));
         calc.style.display='block';
@@ -1831,7 +1854,7 @@ function intakeSmartHtml_() {
           else if(!off&&tag){tag.parentNode.removeChild(tag);}
         }
         dim('tierLi2', MAXAMT<=T1MAX);
-        dim('tierLi3', MAXAMT<=T2MAX);
+        dim('tierLi3', MAXAMT<T2MAX);
         recalc();
       }
 
@@ -1940,7 +1963,7 @@ function intakeSmartHtml_() {
       function showConfirm(){
         var a=parseAmount(amountEl.value),t=parseInt(termEl.value,10);
         if(!(a>0)||!t)return false; // recalc setea termEl.value sólo si el monto es válido
-        var ti=infoForDays(t),r=ti.rate;
+        var ti=infoForDays(t,a),r=ti.rate;
         var interes=a*r,total=a*(1+r),feePct=${lateFeePct},feeDay=total*feePct/100,pct=Math.round(r*100);
         var grace=${moraGrace},capPct=${moraCapPct},feeCap=total*capPct/100;
         function lateTotal(d){return total+Math.min(feeDay*Math.max(0,d-grace),feeCap);} // recargo tras la gracia, con tope

@@ -425,6 +425,8 @@ function applyFeatureUpdates() {
       'Tope de préstamo tras congelamiento', 'Porcentaje a pagar para congelar (%)',
       // Plan de pago (Acuerdo Transaccional): % inicial a pagar para activar el plan.
       'Porcentaje inicial para plan de pago (%)',
+      // Tramo grande ($300k–$500k): tamaño objetivo de cada cuota para que sea manejable (↓ default).
+      'Cuota manejable objetivo (tramo grande)',
       // PRUEBA: redirigir TODOS los avisos de WhatsApp a un número/cliente (vacío = normal).
       'WhatsApp de prueba (redirigir avisos)',
     ]);
@@ -451,8 +453,16 @@ function applyFeatureUpdates() {
         setSettingValue_(stsh, 'Límite inicial (préstamo nuevo)', '150000');
       if (stsh && String(getSetting_('Incremento de graduación') || '').trim() === '')
         setSettingValue_(stsh, 'Incremento de graduación', '50000');
+      // Migra el paso grueso de $100.000 (dejaba el tope en $450k, inalcanzable el de $500k) al
+      // paso gradual de $50.000: la escalera sube 150→200→…→500k y el tope SÍ se alcanza. Respeta
+      // cualquier otro valor manual (solo corrige el legacy exacto de 100000).
+      if (stsh && String(getSetting_('Incremento de graduación') || '').replace(/[^0-9]/g, '').trim() === '100000')
+        setSettingValue_(stsh, 'Incremento de graduación', '50000');
       if (stsh && String(getSetting_('Límite máximo por historial (graduación)') || '').trim() === '')
         setSettingValue_(stsh, 'Límite máximo por historial (graduación)', '500000');
+      // Tramo grande: tamaño objetivo de cuota manejable (franja de 0% de default). Default $150.000.
+      if (stsh && String(getSetting_('Cuota manejable objetivo (tramo grande)') || '').trim() === '')
+        setSettingValue_(stsh, 'Cuota manejable objetivo (tramo grande)', '150000');
       // Escalera graduada ante atrasos (V-32): ≤3 días congela, 4–15 días baja un nivel, >15 reinicia.
       if (stsh && String(getSetting_('Atraso que congela el nivel (días)') || '').trim() === '')
         setSettingValue_(stsh, 'Atraso que congela el nivel (días)', '3');
@@ -3569,7 +3579,7 @@ function agreementHtml_(loan, sig) {
   const lender = companyName_(), footer = getSetting_('Pie del Contrato');
   const signatories = ownerSignatories_();   // ambos titulares firman todos los contratos
   const days = termDays_(loan.term) || 0;
-  // Cronograma de cuotas (tramo grande = 3 cuotas mensuales; tramos chicos = 1 pago).
+  // Cronograma de cuotas (tramo grande = 3 a 6 cuotas mensuales manejables según el monto; tramos chicos = 1 pago).
   const nCuotas = (typeof termForAmount_ === 'function' ? (termForAmount_(loan.principal).cuotas || 1) : 1);
   let cuotasBox = '', cuotasNota = 'Todo se devuelve en un solo pago en la fecha de vencimiento.';
   if (nCuotas > 1 && loan.loanDate) {
@@ -3580,7 +3590,7 @@ function agreementHtml_(loan, sig) {
       filas += `<tr><td class="k">Cuota ${k} de ${nCuotas}</td><td><b>${fmtMoney_(monto)}</b> — vence ${fmtDate_(addDays_(loan.loanDate, 30 * k))}</td></tr>`;
     }
     cuotasBox = `<div class="box" style="margin-top:8px"><div class="box-title">Plan de pago — ${nCuotas} cuotas mensuales</div><table style="margin:0">${filas}</table></div>`;
-    cuotasNota = 'El total se devuelve en ' + nCuotas + ' cuotas mensuales iguales, según el cronograma de arriba (vencimientos a los 30, 60 y 90 días).';
+    cuotasNota = 'El total se devuelve en ' + nCuotas + ' cuotas mensuales iguales, según el cronograma de arriba (vencimientos mensuales a los 30, 60, … días).';
   }
   const feeDay = round2_(loan.totalDue * lateFeeRate_());              // recargo diario sobre el total
   const moraGrace = moraGraceDays_();                                  // días de gracia antes de la mora
@@ -5865,7 +5875,7 @@ function submitSignature(loanId, dni, signatureDataUrl, agree, meta) {
       const cs = getSS_().getSheetByName(CFG.SHEETS.INSTALLMENTS) || setupCuotas_(getSS_());
       const ti = resolveTerm_(freshLoan.principal, freshLoan.term);
       const totalPlan = round2_(freshLoan.principal * (1 + ti.rate));
-      const dueDays = ti.cuotas === 3 ? [30, 60, 90] : [ti.days];
+      const dueDays = ti.cadence === 'monthly' ? Array.from({ length: ti.cuotas }, (_, i) => (i + 1) * 30) : [ti.days];
       cuotasForLoan_(cs, loanId, freshLoan.loanDate, totalPlan, ti.cuotas, dueDays);
     } catch (e) { logError_('submitSignature:cuotas', e); }
 
@@ -8473,11 +8483,11 @@ function crearPrestamoPruebaMora100(clienteId, capital, plazoDias) {
         bs.getRange(tRow, dniCol).setFormula(`=IFERROR(INDEX('${CSN}'!$${cDniL}:$${cDniL},MATCH($${cliL}${tRow},'${CSN}'!$${cIdL}:$${cIdL},0)),"")`); }
     }
 
-    // Cronograma de cuotas (misma lógica que una aprobación): 1 cuota (tramo chico) o 3.
+    // Cronograma de cuotas (misma lógica que una aprobación): 1 cuota (tramo chico) o N mensuales (grande).
     // Se usa la Fecha Préstamo retrodatada → la(s) cuota(s) también quedan VENCIDAS.
     const cs = ss.getSheetByName(CFG.SHEETS.INSTALLMENTS) || (typeof setupCuotas_ === 'function' ? setupCuotas_(ss) : null);
     if (cs) {
-      const dueDays = ti.cuotas === 3 ? [30, 60, 90] : [ti.days];
+      const dueDays = ti.cadence === 'monthly' ? Array.from({ length: ti.cuotas }, (_, i) => (i + 1) * 30) : [ti.days];
       cuotasForLoan_(cs, loanId, loanDate, total, ti.cuotas, dueDays);
     }
     SpreadsheetApp.flush();

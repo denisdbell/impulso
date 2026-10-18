@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Flyer conciso ES — render a PNG con Chrome headless (820x1180 @2x). Cifras: impulso-v2 (11).xlsx -->
+<!-- Flyer conciso ES — render a PNG con Chrome headless (820 de ancho @2x, alto automático). Cifras: impulso-v2 (16).xlsx -->
 <html lang="es">
 <head>
 <meta charset="utf-8">
@@ -10,7 +10,7 @@
     --gold:#b7892b;--soft:#f5f7fb;
   }
   *{box-sizing:border-box;margin:0;padding:0}
-  html,body{width:820px;height:870px}
+  html,body{width:820px}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
     color:var(--ink);background:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact;
     display:flex;flex-direction:column}
@@ -50,18 +50,23 @@
     <table>
       <tr><th>Nivel</th><th>Podés pedir hasta</th><th>Cómo subir</th></tr>
       <tr><td class="lvl"><span class="n0">Inicial</span></td><td><span class="amt">$150.000</span></td><td class="sm">Cliente nuevo</td></tr>
-      <tr><td class="lvl"><span class="nx">Nivel 1</span></td><td><span class="amt">$250.000</span></td><td class="sm">1 préstamo pagado a tiempo (≥ $150.000)</td></tr>
-      <tr><td class="lvl"><span class="nx">Nivel 2</span></td><td><span class="amt">$350.000</span></td><td class="sm">2 pagos a tiempo, uno ≥ $250.000</td></tr>
-      <tr><td class="lvl"><span class="nx">Nivel 3</span></td><td><span class="amt">$450.000</span></td><td class="sm">3 pagos a tiempo, uno ≥ $350.000</td></tr>
+      <tr><td class="lvl"><span class="nx">Nivel 1</span></td><td><span class="amt">$200.000</span></td><td class="sm">1 pago a tiempo (≥ $150.000)</td></tr>
+      <tr><td class="lvl"><span class="nx">Nivel 2</span></td><td><span class="amt">$250.000</span></td><td class="sm">2 pagos a tiempo, uno ≥ $200.000</td></tr>
+      <tr><td class="lvl"><span class="nx">Nivel 3</span></td><td><span class="amt">$300.000</span></td><td class="sm">3 pagos a tiempo, uno ≥ $250.000</td></tr>
+      <tr><td class="lvl"><span class="nx">Nivel 4</span></td><td><span class="amt">$350.000</span></td><td class="sm">4 pagos a tiempo, uno ≥ $300.000</td></tr>
+      <tr><td class="lvl"><span class="nx">Nivel 5</span></td><td><span class="amt">$400.000</span></td><td class="sm">5 pagos a tiempo, uno ≥ $350.000</td></tr>
+      <tr><td class="lvl"><span class="nx">Nivel 6</span></td><td><span class="amt">$450.000</span></td><td class="sm">6 pagos a tiempo, uno ≥ $400.000</td></tr>
+      <tr><td class="lvl"><span class="nx">Nivel 7</span></td><td><span class="amt">$500.000</span></td><td class="sm">7 pagos a tiempo, uno ≥ $450.000</td></tr>
     </table>
 
     <h2>💳 Plazos y cuotas (según el monto)</h2>
     <table class="terms">
       <tr><th>Monto</th><th>Plazo</th><th>Interés</th><th>Pago</th></tr>
       <tr><td>Hasta $150.000</td><td>15 o 30 días</td><td>25% / 50%</td><td>1 pago</td></tr>
-      <tr><td>$150.000 – $300.000</td><td>30 días</td><td>50%</td><td>1 pago</td></tr>
-      <tr><td>$300.000 – $500.000</td><td>90 días</td><td>100%</td><td>3 cuotas (30·60·90)</td></tr>
+      <tr><td>$150.000 – $299.999</td><td>30 días</td><td>50%</td><td>1 pago</td></tr>
+      <tr><td>$300.000 – $500.000</td><td>90 días</td><td>100%</td><td>3 a 6 cuotas mensuales</td></tr>
     </table>
+    <p style="font-size:13px;color:var(--muted);margin:8px 2px 0">Los préstamos de $300.000 a $500.000 se dividen en <b>cuotas mensuales manejables</b> (cada una ≈ ≤ $150.000): 4 cuotas hasta $300.000, 5 hasta $350.000 y 6 hasta $500.000.</p>
 
     <div class="warn">
       <h3>⚠️ Si pagás tarde</h3>
