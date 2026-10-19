@@ -429,6 +429,8 @@ function applyFeatureUpdates() {
       'Tope de préstamo tras congelamiento', 'Porcentaje a pagar para congelar (%)',
       // Plan de pago (Acuerdo Transaccional): % inicial a pagar para activar el plan.
       'Porcentaje inicial para plan de pago (%)',
+      // Plan flexible (por dificultad): % inicial BAJO para que un vencido pueda arrancar un plan (0–10%).
+      'Pago inicial para plan flexible (%)',
       // Tramo grande ($300k–$500k): tamaño objetivo de cada cuota para que sea manejable (↓ default).
       'Cuota manejable objetivo (tramo grande)',
     ]);
@@ -479,6 +481,9 @@ function applyFeatureUpdates() {
       // Plan de pago: % inicial para activar (default 20%).
       if (stsh && String(getSetting_('Porcentaje inicial para plan de pago (%)') || '').trim() === '')
         setSettingValue_(stsh, 'Porcentaje inicial para plan de pago (%)', '20');
+      // Plan flexible: pago inicial bajo (default 10%). Permite arrancar un plan en cuotas a un vencido.
+      if (stsh && String(getSetting_('Pago inicial para plan flexible (%)') || '').trim() === '')
+        setSettingValue_(stsh, 'Pago inicial para plan flexible (%)', '10');
       // Limpieza: quita la fila de la redirección de WhatsApp de prueba (quedó obsoleta; ahora todos
       // los avisos van SIEMPRE al teléfono real del prestatario resuelto de «Clientes»).
       if (stsh) {
@@ -1945,6 +1950,11 @@ function collectionMessage_(loan, m) {
     b += 'Si por el momento no puede afrontar ninguna de las opciones anteriores, puede solicitar el congelamiento de su préstamo: los recargos por mora dejarán de acumularse y se fijará una fecha de pago concreta. Le enviaremos los términos y condiciones para su revisión; nada queda firme hasta su confirmación.' + nl;
     b += 'Solicitar esta opción: ' + (m.freezeUrl || '(solicite el enlace al prestamista)') + nl + nl;
   }
+  if (!m.isFrozen && m.planUrl) {
+    b += 'OPCIÓN 4 — Plan de pago en cuotas' + nl;
+    b += 'Si necesita pagar en cuotas, puede solicitar un plan de pago: elige la frecuencia (semanal, quincenal o mensual) y la cantidad de cuotas, y la mora queda suspendida mientras cumpla el plan. Lo revisamos y, si corresponde, le enviamos el acuerdo para firmar.' + nl;
+    b += 'Solicitar esta opción: ' + m.planUrl + nl + nl;
+  }
   b += 'Medios de pago' + nl;
   b += (m.alias ? ('Mercado Pago — alias ' + m.alias + ', según lo estipulado en su acuerdo. ') : '') +
     'Si prefiere pagar en efectivo o por transferencia, avísenos y le enviaremos los datos necesarios dentro de las 24 horas.' + nl + nl;
@@ -1955,6 +1965,29 @@ function collectionMessage_(loan, m) {
   b += (m.sig2 ? (m.sig1 + ' y ' + m.sig2) : m.sig1) + nl;
   b += 'Prestamistas — Préstamo ' + loan.loanId + nl;
   b += emp + (m.contact ? (' · ' + m.contact) : '');
+  return { subject: subject, body: b };
+}
+
+/** Correo GENÉRICO para proponerle al prestatario un PLAN DE PAGO EN CUOTAS: explica cómo funciona,
+ *  los pasos, y el enlace al formulario del plan (?page=plan). Se abre en Gmail (no se envía).
+ *  pctInt = % del pago inicial (planDownPct_). Devuelve {subject, body}. */
+function planEmailMessage_(loan, planUrl, pctInt) {
+  const nl = '\n', emp = companyName_();
+  const subject = 'Plan de pago en cuotas — Préstamo ' + loan.loanId + ' · ' + emp;
+  let b = 'Hola ' + (loan.name || 'cliente') + ',' + nl + nl;
+  b += 'Tu préstamo ' + loan.loanId + ' está vencido. Podés regularizarlo con un PLAN DE PAGO EN CUOTAS: pagás de a poco y la mora deja de crecer.' + nl + nl;
+  b += 'Cómo funciona:' + nl;
+  b += '• Elegís la frecuencia (semanal, quincenal o mensual) y la cantidad de cuotas.' + nl;
+  b += '• Mientras cumplas el plan, la mora queda SUSPENDIDA (no sigue creciendo).' + nl;
+  b += '• El plan cubre el total del préstamo (capital + interés), sin la mora.' + nl + nl;
+  b += 'Pasos:' + nl;
+  b += '1) Abrí este enlace e ingresá tu DNI: ' + (planUrl || '(solicitá el enlace al prestamista)') + nl;
+  b += '2) Elegí la frecuencia y la cantidad de cuotas, y enviá la solicitud.' + nl;
+  b += '3) Pagá el pago inicial (' + pctInt + '% del total) para activar el plan.' + nl;
+  b += '4) Firmá el Acuerdo (te enviamos el enlace cuando aprobemos la solicitud).' + nl;
+  b += '5) Pagá las cuotas en fecha. Al terminar, el préstamo queda saldado.' + nl + nl;
+  b += 'Si tenés dudas, respondé este correo.' + nl + nl;
+  b += emp;
   return { subject: subject, body: b };
 }
 
@@ -2351,13 +2384,14 @@ function setupFreezeRequests_(ss) {
 // crea desde el formulario web (?page=plan); el prestamista aprueba/rechaza con casillas.
 const PLAN_REQ_HEADERS = ['Fecha de solicitud', 'ID Préstamo', 'ID Cliente', 'Nombre', 'DNI', 'Correo',
   'Teléfono', 'Capital', 'Total a Pagar', 'Saldo base (sin mora)', 'Mora suspendida', 'Opción (1/4/6)',
-  'Pago inicial (20%)', 'Falta para el 20% (24 h)', 'Vencimiento', 'Motivo (cliente)', 'Ubicación', 'IP', 'Dispositivo',
+  'Pago inicial', 'Falta para el pago inicial (24 h)', 'Vencimiento', 'Motivo (cliente)', 'Ubicación', 'IP', 'Dispositivo',
   'Aprobar ✔', 'Rechazar ✖', 'Motivo de rechazo', 'Estado', 'Fecha de aprobación',
-  'Enlace de firma', 'WhatsApp', 'Estado de Firma', 'Fecha de Firma', 'Acuerdo (PDF)'];
+  'Enlace de firma', 'WhatsApp', 'Estado de Firma', 'Fecha de Firma', 'Acuerdo (PDF)', 'Cadencia'];
 const PR_APPROVE_COL = 20, PR_DENY_COL = 21, PR_COVER_COL = 14; // casillas + columna viva "Falta para el 20%"
 
 function setupPlanRequests_(ss) {
   const sh = getOrCreate_(ss, CFG.SHEETS.PLAN_REQ);
+  if (sh.getMaxColumns() < PLAN_REQ_HEADERS.length) sh.insertColumnsAfter(sh.getMaxColumns(), PLAN_REQ_HEADERS.length - sh.getMaxColumns()); // ← asegura espacio para «Cadencia»
   const head = sh.getLastRow() >= 1 ? sh.getRange(1, 1, 1, PLAN_REQ_HEADERS.length).getValues()[0].map(h => String(h).trim()) : [];
   if (head.join('|') !== PLAN_REQ_HEADERS.join('|')) {
     sh.getRange(1, 1, 1, PLAN_REQ_HEADERS.length).setValues([PLAN_REQ_HEADERS])
@@ -2374,7 +2408,7 @@ function setupPlanRequests_(ss) {
   sh.getRange(2, 24, CFG.MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd');       // Fecha de aprobación
   sh.getRange(2, 28, CFG.MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd hh:mm'); // Fecha de Firma
   for (let r = 2; r <= CFG.MAX_ROWS + 1; r++) sh.getRange(r, PR_COVER_COL).setFormula(planCoverFormula_(r));
-  [150, 100, 90, 170, 110, 200, 130, 110, 130, 140, 130, 90, 130, 160, 110, 220, 200, 120, 230, 90, 90, 220, 110, 130, 220, 160, 120, 150, 180]
+  [150, 100, 90, 170, 110, 200, 130, 110, 130, 140, 130, 90, 130, 160, 110, 220, 200, 120, 230, 90, 90, 220, 110, 130, 220, 160, 120, 150, 180, 110]
     .forEach((w, i) => sh.setColumnWidth(i + 1, w));
   const estL = colL_(23), rng = sh.getRange(2, 1, CFG.MAX_ROWS, PLAN_REQ_HEADERS.length);
   const byEstado = (val, bg, fg) => SpreadsheetApp.newConditionalFormatRule()
@@ -2385,8 +2419,8 @@ function setupPlanRequests_(ss) {
     byEstado('Firmado', '#d9ead3', '#274e13'),
     byEstado('Rechazado', '#f4cccc', '#990000'),
   ]);
-  sh.getRange(1, PR_COVER_COL).setNote('VIVO: pagos registrados vs el % inicial del total (Configuración ▸ "Porcentaje inicial para plan de pago (%)"). "✅ cubierto" o "Falta $X". El 20% debe estar PAGADO antes de aprobar y de firmar.');
-  sh.getRange(1, PR_APPROVE_COL).setNote('Tildá para APROBAR: SOLO si "Falta para el 20%" muestra ✅ cubierto. Envía el enlace para firmar el Acuerdo. El plan se activa al firmar (reemplaza las cuotas).');
+  sh.getRange(1, PR_COVER_COL).setNote('VIVO: pagos registrados vs el % inicial del total (Configuración ▸ "Pago inicial para plan flexible (%)"). "✅ cubierto" o "Falta $X". El pago inicial debe estar PAGADO antes de aprobar y de firmar.');
+  sh.getRange(1, PR_APPROVE_COL).setNote('Tildá para APROBAR: SOLO si "Falta para el pago inicial" muestra ✅ cubierto. Envía el enlace para firmar el Acuerdo. El plan se activa al firmar (reemplaza las cuotas).');
   sh.getRange(1, PR_DENY_COL).setNote('Completá "Motivo de rechazo" y tildá para RECHAZAR: avisa al cliente.');
   return sh;
 }
@@ -2449,8 +2483,12 @@ function isLoanAtMoraCap_(loan) {
 }
 /** Porcentaje (fracción 0–1) a pagar para ACTIVAR el plan de pago. Configurable; default 20%. */
 function planDownPct_() {
-  let v = Number(String(getSetting_('Porcentaje inicial para plan de pago (%)') || '').replace('%', '').replace(',', '.').trim());
-  if (!isFinite(v) || v <= 0) v = 20;
+  // Plan flexible (por dificultad): usa "Pago inicial para plan flexible (%)" (0–10%); si está vacío,
+  // cae al ajuste anterior "Porcentaje inicial para plan de pago (%)"; default 10%. Permite 0% (sin anticipo).
+  let raw = String(getSetting_('Pago inicial para plan flexible (%)') || '').replace('%', '').replace(',', '.').trim();
+  if (raw === '') raw = String(getSetting_('Porcentaje inicial para plan de pago (%)') || '').replace('%', '').replace(',', '.').trim();
+  let v = Number(raw);
+  if (!isFinite(v) || v < 0) v = 10;
   return Math.min(1, v / 100);
 }
 /**
@@ -2471,11 +2509,28 @@ function planAmounts_(loan) {
   return { pct: pct, pctInt: Math.round(pct * 100), total: total, recorded: recorded, required: required,
     base: base, mora: mora, downShort: downShort, downMet: downMet };
 }
-/** Fechas de vencimiento de las cuotas del plan: pago único → ~2 semanas; si no, mensuales. */
-function planCuotaDates_(signDate, n) {
+/** Normaliza la cadencia del plan flexible: 'weekly' (semanal), 'biweekly' (quincenal) o 'monthly'
+ *  (mensual; valor por defecto y compatible con los planes anteriores). */
+function planCadence_(c) { c = String(c || '').toLowerCase().trim(); return (c === 'weekly' || c === 'biweekly') ? c : 'monthly'; }
+/** Texto de la opción de plan: "Pago único" o "N cuotas semanales/quincenales/mensuales". */
+function planOptTxt_(n, cadence) {
+  if (Number(n) <= 1) return 'Pago único';
+  const per = planCadence_(cadence) === 'weekly' ? 'semanales' : planCadence_(cadence) === 'biweekly' ? 'quincenales' : 'mensuales';
+  return n + ' cuotas ' + per;
+}
+/** Fechas de vencimiento de las cuotas del plan según la CADENCIA (semanal/quincenal/mensual). Pago
+ *  único → ~2 semanas (1 semana si es semanal). Sin cadencia = mensual (comportamiento anterior). */
+function planCuotaDates_(signDate, n, cadence) {
   const base = startOfDay_(signDate instanceof Date ? signDate : new Date());
-  if (n <= 1) return [addDays_(base, 14)];
-  const out = []; for (let k = 1; k <= n; k++) out.push(addMonths_(base, k)); return out;
+  cadence = planCadence_(cadence);
+  if (n <= 1) return [cadence === 'weekly' ? addDays_(base, 7) : addDays_(base, 14)];
+  const out = [];
+  for (let k = 1; k <= n; k++) {
+    if (cadence === 'weekly') out.push(addDays_(base, 7 * k));
+    else if (cadence === 'biweekly') out.push(addDays_(base, 14 * k));
+    else out.push(addMonths_(base, k));
+  }
+  return out;
 }
 /** Fórmula VIVA "Falta para el 20% (24 h)" en "Solicitudes de Plan de Pago": pagos registrados vs % del total. */
 function planCoverFormula_(r) {
@@ -2485,7 +2540,7 @@ function planCoverFormula_(r) {
   const paidN = colByAny_(H, ['Total Pagado']) || PB.PAID;
   const totL = colL_(totN), paidL = colL_(paidN);
   return `=IF($B${r}="","",IFERROR(LET(id,$B${r},` +
-    `pct,VLOOKUP("Porcentaje inicial para plan de pago (%)",'${S}'!$A:$B,2,FALSE)/100,` +
+    `pct,IFERROR(VLOOKUP("Pago inicial para plan flexible (%)",'${S}'!$A:$B,2,FALSE),VLOOKUP("Porcentaje inicial para plan de pago (%)",'${S}'!$A:$B,2,FALSE))/100,` +
     `tot,VLOOKUP(id,'${B}'!$A:$${totL},${totN},FALSE),paid,VLOOKUP(id,'${B}'!$A:$${paidL},${paidN},FALSE),need,pct*tot,` +
     `IF(paid>=need-0.009,"✅ cubierto","Falta "&TEXT(need-paid,"$#,##0.00"))),""))`;
 }
@@ -3027,20 +3082,21 @@ const LATE_HEADERS = ['ID Préstamo', 'Prestatario', 'DNI', 'Correo', 'Teléfono
   'Días de Atraso', 'Total a Pagar', 'Recargo por Mora (acum.)', 'Total Pagado', 'Saldo Pendiente',
   'Enviar Aviso ✉', 'Último Aviso Enviado', 'Tope de mora', 'Plan de pago 📅 (3 cuotas)', 'Plan enviado',
   'PDF de cuotas 🧾', 'PDF generado', 'Pedir congelamiento 📲', 'Pedir plan de pago 📋',
-  'Cobranza ✉', 'Cobranza 📲'];
+  'Cobranza ✉', 'Cobranza 📲', 'Plan de pago ✉'];
 // Columnas (1-based) de control en "Pagos Atrasados".
 const LATE_SEND_COL = 12, LATE_SENT_COL = 13, LATE_CAP_COL = 14, LATE_PLAN_COL = 15, LATE_PLAN_SENT_COL = 16,
   LATE_DOC_COL = 17, LATE_DOC_DONE_COL = 18, LATE_FREEZE_COL = 19, LATE_PLANREQ_COL = 20,
-  LATE_COB_MAIL_COL = 21, LATE_COB_WA_COL = 22;
+  LATE_COB_MAIL_COL = 21, LATE_COB_WA_COL = 22, LATE_PLAN_MAIL_COL = 23;
 function setupLate_(ss) {
   const sh = getOrCreate_(ss, CFG.SHEETS.LATE); sh.clear();
   sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).clearDataValidations();
   sh.getRange(1, 1, 1, LATE_HEADERS.length).setValues([LATE_HEADERS])
     .setFontWeight('bold').setBackground('#990000').setFontColor('#fff').setWrap(true);
   sh.setFrozenRows(1);
-  [110, 170, 120, 200, 120, 130, 100, 120, 160, 120, 130, 110, 150, 100, 120, 110, 110, 110, 120, 120, 120, 120].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  [110, 170, 120, 200, 120, 130, 100, 120, 160, 120, 130, 110, 150, 100, 120, 110, 110, 110, 120, 120, 120, 120, 130].forEach((w, i) => sh.setColumnWidth(i + 1, w));
   sh.getRange(1, LATE_COB_MAIL_COL).setNote('Enlace de CORREO (mailto) de la División de Cobranzas, listo para enviar al prestatario: resumen del préstamo, pagos, mora, y 2 opciones (cancelar sin mora el próximo día hábil = saldo base, o congelar la mora hoy y pagar el total con mora). "sin correo" si el cliente no tiene email.');
   sh.getRange(1, LATE_COB_WA_COL).setNote('Enlace de WhatsApp de la División de Cobranzas, con el mismo mensaje que el correo. "sin teléfono" si el cliente no tiene un número válido.');
+  sh.getRange(1, LATE_PLAN_MAIL_COL).setNote('Enlace que ABRE GMAIL (no envía) con un correo genérico para proponer un PLAN DE PAGO EN CUOTAS: explica cómo funciona, los pasos y el enlace al formulario del plan. Revisalo y envialo desde Gmail. "sin correo" si el cliente no tiene email.');
   sh.getRange('A1').setNote('Se actualiza con "⑤ Actualizar" y automáticamente cada día. Lista los préstamos vencidos con saldo.');
   sh.getRange('L1').setNote('Tilde la casilla para enviar un aviso de mora por correo (en español). La casilla se destilda sola y la fecha de envío aparece en "Último Aviso Enviado".');
   sh.getRange(1, LATE_CAP_COL).setNote('Mora acumulada como % de su tope ("Tope de mora (% del total a devolver)" en Configuración). SÍ (100%) = llegó al tope: candidato a plan de pago en 3 cuotas.');
@@ -3147,6 +3203,7 @@ function rebuildLateSheet_(ss) {
   const cobContact = String(getSetting_('Teléfono del Prestamista') || getSetting_('Correo del Prestamista') || '').trim();
   const cobSig1 = String(getSetting_('Firmante 1 (nombre completo)') || companyName_()).trim();
   const cobSig2 = String(getSetting_('Firmante 2 (nombre completo)') || '').trim();
+  const cobPlanPctInt = (typeof planDownPct_ === 'function') ? Math.round(planDownPct_() * 100) : 10; // % del pago inicial del plan
   // --- LECTURA EN BLOQUE (una sola vez cada hoja) para reconstruir rápido ---
   const H = headerIndex_(bs), col = (n, fb) => colByAny_(H, n) || fb;
   const idC = col(['ID Préstamo', 'ID Prestamo'], PB.LOAN_ID), cliC = col(['ID Cliente'], PB.CLIENT_ID),
@@ -3196,23 +3253,30 @@ function rebuildLateSheet_(ss) {
     const atCap = capMax > 0 && pct >= 100;
     // Enlace WhatsApp al formulario de congelamiento (sólo si NO está ya congelado; filas vencidas).
     const freezeWa = isFrozen ? '' : (freezeFormWaFormula_(loan) || '');
-    // Enlace al formulario de PLAN DE PAGO: sólo cuando llegó al 100% de mora (atCap) y no congelado.
-    const planWa = (atCap && !isFrozen) ? (planFormWaFormula_(loan) || '') : '';
-    // COBRANZA (mora tardía): mensaje de correo (mailto) + WhatsApp con el detalle y las 3 opciones.
+    // Enlace al formulario de PLAN DE PAGO FLEXIBLE: disponible para cualquier vencido no congelado
+    // (ya no requiere el 100% de mora; el prestatario elige cuotas y cadencia, el prestamista aprueba).
+    const planWa = (!isFrozen) ? (planFormWaFormula_(loan) || '') : '';
+    // COBRANZA (mora tardía): mensaje de correo (mailto) + WhatsApp con el detalle y las opciones.
     const freezeUrl = (!isFrozen && cobWebBase) ? (cobWebBase + '?page=congelar&loan=' + encodeURIComponent(loan.loanId)) : '';
+    const planUrl = (!isFrozen && cobWebBase) ? (cobWebBase + '?page=plan&loan=' + encodeURIComponent(loan.loanId)) : '';
     const cobDaily = round2_(totalDue * feePctFrac);                  // recargo por día = % diario × total
     const capReach = capMax > 0 && cobDaily > 0 ? fmtDate_(addDays_(dueDate, Math.ceil(capMax / cobDaily))) : '';
     const cm = collectionMessage_(loan, { base: base, mora: feeAccum, totalPaid: totalPaid, days: days,
-      deadlineStr: cobDeadlineStr, out: out, freezeUrl: freezeUrl, isFrozen: isFrozen,
+      deadlineStr: cobDeadlineStr, out: out, freezeUrl: freezeUrl, planUrl: planUrl, isFrozen: isFrozen,
       capAmount: capMax, maxTotal: round2_(base + capMax), dailyAmount: cobDaily, capReachStr: capReach,
       todayStr: fmtDate_(today), loanDateStr: (loan.loanDate instanceof Date ? fmtDate_(loan.loanDate) : ''),
       feePctText: lateFeePctText_(), alias: cobAlias, contact: cobContact, sig1: cobSig1, sig2: cobSig2 });
     const cobWaNum = waNumberAR_(loan.phone);
     const cobWa = cobWaNum ? ('=HYPERLINK("https://wa.me/' + cobWaNum + '?text=' + encodeURIComponent(cm.body) + '","📲 Cobranza")') : 'sin teléfono';
     const cobMail = loan.email ? ('=HYPERLINK("mailto:' + encodeURIComponent(loan.email) + '?subject=' + encodeURIComponent(cm.subject) + '&body=' + encodeURIComponent(cm.body) + '","✉ Cobranza")') : 'sin correo';
+    // Correo genérico de PLAN DE PAGO: abre GMAIL (no envía) con los pasos + el enlace del plan.
+    const pm = planEmailMessage_(loan, planUrl, cobPlanPctInt);
+    const planMail = (loan.email && planUrl)
+      ? ('=HYPERLINK("https://mail.google.com/mail/?view=cm&fs=1&to=' + encodeURIComponent(loan.email) + '&su=' + encodeURIComponent(pm.subject) + '&body=' + encodeURIComponent(pm.body) + '","✉ Plan (Gmail)")')
+      : (loan.email ? '' : 'sin correo');
     rows.push([loan.loanId, nameShown, loan.dni, loan.email, loan.phone, dueDate, days,
       totalDue, feeAccum, totalPaid, out, false, (lastNotice instanceof Date) ? lastNotice : '',
-      atCap ? 'SÍ (100%)' : pct + '%', false, '', false, '', freezeWa, planWa, cobMail, cobWa]);
+      atCap ? 'SÍ (100%)' : pct + '%', false, '', false, '', freezeWa, planWa, cobMail, cobWa, planMail]);
   }
   rows.sort((a, b) => b[6] - a[6]); // más atrasados primero
   if (rows.length) {
@@ -5495,7 +5559,7 @@ function planRequestFormHtml_(loanId) {
     <div class="card">${brandHeaderHtml_()}<h1>Solicitud de plan de pago</h1>
 
     <div id="gate">
-      <p class="hint">Si tu préstamo llegó al <b>tope de mora</b>, podés acordar un <b>plan de pago</b> (pago único, 4 o 6 cuotas) y frenar la mora. Ingresá tu DNI para ver tu préstamo.</p>
+      <p class="hint">Si estás <b>atrasado/a</b> y no podés pagar todo junto, podés acordar un <b>plan de pago en cuotas</b> (semanal, quincenal o mensual) y frenar la mora. Ingresá tu DNI para ver tu préstamo.</p>
       <label>ID Préstamo</label><input type="text" id="loan" value="${lid}" placeholder="L-0001">
       <label>DNI</label><input type="text" id="dni" inputmode="numeric" placeholder="Tu DNI">
       <button onclick="look()">Ver mi préstamo</button>
@@ -5505,10 +5569,16 @@ function planRequestFormHtml_(loanId) {
     <div id="planview" class="hide">
       <div id="det"></div>
       <div class="warn">⚠ <b>Importante:</b> para activar el plan, primero debe estar <b>pagado el ${pctInt}%</b> del préstamo (dentro de las 24 h). La mora acumulada queda <b>suspendida</b> mientras cumplas el plan; si incumplís, se restablece.</div>
+      <label>Frecuencia de pago</label>
+      <select id="cad" onchange="pickOpt()" style="width:100%;box-sizing:border-box;padding:9px;border:1px solid #ccc;border-radius:6px;font-size:14px">
+        <option value="monthly">Mensual (una cuota por mes)</option>
+        <option value="biweekly">Quincenal (cada 15 días)</option>
+        <option value="weekly">Semanal (una cuota por semana)</option>
+      </select>
       <label>Elegí una opción de pago</label>
       <label class="opt"><input type="radio" name="opt" value="1" onchange="pickOpt()"><span><b>Pago único</b> — todo el saldo en un solo pago.</span></label>
-      <label class="opt"><input type="radio" name="opt" value="4" onchange="pickOpt()"><span><b>4 cuotas mensuales</b></span></label>
-      <label class="opt"><input type="radio" name="opt" value="6" onchange="pickOpt()"><span><b>6 cuotas mensuales</b></span></label>
+      <label class="opt"><input type="radio" name="opt" value="4" onchange="pickOpt()"><span><b>4 cuotas</b></span></label>
+      <label class="opt"><input type="radio" name="opt" value="6" onchange="pickOpt()"><span><b>6 cuotas</b></span></label>
       <table class="terms" id="sched"></table>
       <table class="terms">
         <tr><td class="k">Pagado hasta ahora (registrado)</td><td id="paidRec">—</td></tr>
@@ -5553,12 +5623,16 @@ function planRequestFormHtml_(loanId) {
       function out(m,err){ var o=$('out'); o.className=err?'err':'ok'; o.textContent=m; o.style.display='block'; }
       ['c1','c2','c3'].forEach(function(id){ $(id).onchange=revalidate; });
       function pickOpt(){ var r=document.querySelector('input[name=opt]:checked'); OPT=r?Number(r.value):0; drawSched(); revalidate(); }
-      function monthlyDates(n){ var today=new Date(); today.setHours(0,0,0,0); var out=[];
-        if(n<=1){ var d=new Date(today.getTime()+14*864e5); return [d]; }
-        for(var k=1;k<=n;k++){ var d=new Date(today.getFullYear(), today.getMonth()+k, today.getDate()); out.push(d); } return out; }
+      function schedDates(n){ var today=new Date(); today.setHours(0,0,0,0); var cad=$('cad')?$('cad').value:'monthly'; var out=[];
+        if(n<=1){ var d=new Date(today.getTime()+(cad==='weekly'?7:14)*864e5); return [d]; }
+        for(var k=1;k<=n;k++){ var d;
+          if(cad==='weekly') d=new Date(today.getTime()+7*k*864e5);
+          else if(cad==='biweekly') d=new Date(today.getTime()+14*k*864e5);
+          else d=new Date(today.getFullYear(), today.getMonth()+k, today.getDate());
+          out.push(d); } return out; }
       function drawSched(){
         if(!LOANDATA || !OPT){ $('sched').innerHTML=''; return; }
-        var n=OPT, base=Math.round((LOANDATA.total/n)*100)/100, paid=LOANDATA.recorded, dates=monthlyDates(n);
+        var n=OPT, base=Math.round((LOANDATA.total/n)*100)/100, paid=LOANDATA.recorded, dates=schedDates(n);
         var html='<tr><td class="k">Cuota</td><td class="k">Vencimiento (aprox.)</td><td class="k">Monto</td></tr>';
         var left=paid;
         for(var k=0;k<n;k++){
@@ -5602,7 +5676,7 @@ function planRequestFormHtml_(loanId) {
       function send(){
         $('out').style.display='none'; $('btnSend').disabled=true;
         $('planview').classList.add('hide'); $('loadingView').classList.remove('hide'); startProgress();
-        var payload={ loanId:$('loan').value, dni:$('dni').value, option:OPT, reason:$('reason').value, agree:true,
+        var payload={ loanId:$('loan').value, dni:$('dni').value, option:OPT, cadence:($('cad')?$('cad').value:'monthly'), reason:$('reason').value, agree:true,
           ip:CLIENT_IP, device:DEVICE, dwellMs:Date.now()-PAGE_OPEN };
         google.script.run.withSuccessHandler(function(r){
           if(r&&r.ok){ finishProgress(function(){ $('loadingView').classList.add('hide'); showDone(r.message); }); }
@@ -5612,15 +5686,18 @@ function planRequestFormHtml_(loanId) {
     </script></div></body></html>`;
 }
 
-/** Verifica identidad (ID+DNI) y que el préstamo esté al 100% de mora; devuelve datos para el formulario de plan. */
+/** Verifica identidad (ID+DNI) y que el préstamo esté VENCIDO con saldo; devuelve datos para el plan de pago flexible. */
 function lookupPlanLoan(loanId, dni) {
   return guard_('lookupPlanLoan', function () {
     const loan = findLoanById_(String(loanId || '').trim());
     if (!loan || String(loan.dni).replace(/\D/g, '') !== String(dni || '').replace(/\D/g, ''))
       return { ok: false, reason: 'Datos no encontrados. Verificá el ID del préstamo y tu DNI.' };
-    if (!isLoanAtMoraCap_(loan))
-      return { ok: false, reason: 'Este préstamo todavía no llegó al tope de mora. El plan de pago está disponible al 100% de mora.' };
+    // Plan de pago FLEXIBLE: disponible para cualquier préstamo VENCIDO con saldo (no requiere el
+    // 100% de mora). El prestamista aprueba cada solicitud.
+    if (!(loan.dueDate instanceof Date) || daysLate_(loan.dueDate, new Date()) <= 0)
+      return { ok: false, reason: 'El plan de pago está disponible para préstamos vencidos.' };
     const a = planAmounts_(loan);
+    if (a.base <= 0.009) return { ok: false, reason: 'Este préstamo ya está saldado.' };
     return {
       ok: true, name: loan.name, loanId: loan.loanId, principal: round2_(loan.principal),
       dueDateFmt: fmtDate_(loan.dueDate), daysLate: daysLate_(loan.dueDate, new Date()),
@@ -5647,23 +5724,33 @@ function submitPlanRequest(p) {
     const loan = findLoanById_(String(p.loanId || '').trim());
     if (!loan || String(loan.dni).replace(/\D/g, '') !== String(p.dni || '').replace(/\D/g, ''))
       return { ok: false, reason: 'Datos no encontrados. Verificá el ID del préstamo y tu DNI.' };
-    if (!isLoanAtMoraCap_(loan))
-      return { ok: false, reason: 'El plan de pago está disponible solo al 100% de mora.' };
+    if (!(loan.dueDate instanceof Date) || daysLate_(loan.dueDate, new Date()) <= 0)
+      return { ok: false, reason: 'El plan de pago está disponible para préstamos vencidos.' };
+    if (Math.max(0, round2_(loan.totalDue - loanPayments_(loan.loanId).reduce((s, pp) => s + pp.amount, 0))) <= 0.009)
+      return { ok: false, reason: 'Este préstamo ya está saldado.' };
     const option = Math.floor(Number(p.option) || 0);
     if ([1, 4, 6].indexOf(option) === -1) return { ok: false, reason: 'Elegí una opción de pago (único, 4 o 6 cuotas).' };
+    const cadence = planCadence_(p.cadence);  // semanal / quincenal / mensual (default)
     if (p.agree !== true) return { ok: false, reason: 'Debés aceptar las condiciones para continuar.' };
     const ss = getSS_();
-    const sh = ss.getSheetByName(CFG.SHEETS.PLAN_REQ) || setupPlanRequests_(ss);
+    let sh = ss.getSheetByName(CFG.SHEETS.PLAN_REQ);
+    if (!sh) { sh = setupPlanRequests_(ss); }
+    else if (headerMap_(sh)['Cadencia'] == null) {
+      // Alta LIVIANA de la columna «Cadencia» (sheets viejos de 29 col): NO corre el setup pesado
+      // (300 fórmulas + validaciones) durante el envío del formulario — eso colgaba la barra al 95%.
+      if (sh.getMaxColumns() < PLAN_REQ_HEADERS.length) sh.insertColumnsAfter(sh.getMaxColumns(), PLAN_REQ_HEADERS.length - sh.getMaxColumns());
+      sh.getRange(1, PLAN_REQ_HEADERS.length).setValue('Cadencia').setFontWeight('bold').setBackground('#674ea7').setFontColor('#fff').setWrap(true);
+    }
     if (hasPendingPlanRequest_(sh, loan.loanId))
       return { ok: false, reason: 'Ya hay una solicitud de plan de pago en curso para este préstamo.' };
     const a = planAmounts_(loan);
     const loc = (p.device && p.device.loc) || {};
     const ubic = loc.gps ? ('GPS ' + loc.gps) : (loc.ipText || '');
-    // Orden EXACTO de PLAN_REQ_HEADERS (29 col). Col 14 ("Falta para el 20%") es FÓRMULA viva.
+    // Orden EXACTO de PLAN_REQ_HEADERS (30 col). Col 14 ("Falta para el 20%") es FÓRMULA viva; col 30 = Cadencia.
     const rowVals = [new Date(), loan.loanId, loan.clientId, loan.name, loan.dni, loan.email, loan.phone,
       loan.principal, a.total, a.base, a.mora, option, a.required, '', loan.dueDate,
       String(p.reason || '').slice(0, 500), ubic, String(p.ip || ''), String((p.device && p.device.userAgent) || '').slice(0, 250),
-      false, false, '', 'Pendiente', '', '', '', 'PENDIENTE', '', ''];
+      false, false, '', 'Pendiente', '', '', '', 'PENDIENTE', '', '', cadence];
     const row = nbAppend_(sh, rowVals);
     sh.getRange(row, 1).setNumberFormat('yyyy-mm-dd hh:mm');
     sh.getRange(row, 8, 1, 4).setNumberFormat(CFG.CURRENCY_FMT);   // Capital..Mora suspendida
@@ -5671,7 +5758,7 @@ function submitPlanRequest(p) {
     sh.getRange(row, 15, 1, 1).setNumberFormat('yyyy-mm-dd');      // Vencimiento
     sh.getRange(row, PR_COVER_COL).setFormula(planCoverFormula_(row));
     try { logDeviceInfo_(loan, loan.clientId, { device: p.device || {}, ip: p.ip || '', userAgent: (p.device && p.device.userAgent) || '', dwellMs: p.dwellMs, signedAt: new Date() }); } catch (e) { logError_('submitPlanRequest:device', e); }
-    const optTxt = option === 1 ? 'Pago único' : option + ' cuotas mensuales';
+    const optTxt = planOptTxt_(option, cadence);
     const lender = getSetting_('Correo del Prestamista');
     try {
       if (loan.email) sendBrandedEmail_(loan.email, 'Recibimos tu solicitud de plan de pago — ' + loan.loanId,
@@ -5707,14 +5794,20 @@ function approveFreezeRequest_(sh, row) {
   if (!loan) { setv('Estado', 'Rechazado'); setv('Motivo de rechazo', 'No se encontró el préstamo.'); return; }
   const fz = loanFreezable_(loan);
   if (!fz.ok) { getSS_().toast(loanId + ': ' + fz.reason + ' No se aprueba.', '⚠', 8); return; }
-  // GATE: el % configurable debe estar PAGADO (registrado) antes de aprobar.
+  // GATE: el % configurable debe estar PAGADO (registrado) antes de aprobar. Si falta, NO aprueba y
+  // deja constancia VISIBLE (nota en la fila + toast persistente) — getUi().alert no corre en el onEdit.
   const amt = freezeAmounts_(loan);
   if (!amt.downMet) {
-    const msg = amt.pctInt + '% must be paid before approval can be done. Falta ' + fmtMoney_(amt.downShort) + ' (de ' + fmtMoney_(amt.required) + ').';
-    try { getSS_().toast(loanId + ': ' + msg, '⛔ Falta pagar el ' + amt.pctInt + '%', 10); } catch (e) { }
-    try { SpreadsheetApp.getUi().alert(msg); } catch (e) { }
+    const msg = 'Falta pagar el ' + amt.pctInt + '% (' + fmtMoney_(amt.required) + '): faltan ' + fmtMoney_(amt.downShort) +
+      '. Registrá el pago en «Pagos» y volvé a tildar «Aprobar».';
+    if (m['Aprobar ✔']) sh.getRange(row, m['Aprobar ✔']).setNote('⛔ ' + msg);
+    if (m['Estado']) sh.getRange(row, m['Estado']).setNote('⛔ No aprobado — ' + msg);
+    try { getSS_().toast('Préstamo ' + loanId + ' — ' + msg, '⛔ NO SE APROBÓ · Falta el pago inicial', -1); } catch (e) { }
+    try { SpreadsheetApp.getUi().alert('No se aprobó el congelamiento ' + loanId + '.\n\n' + msg); } catch (e) { }
     return; // no se aprueba: queda Pendiente
   }
+  if (m['Aprobar ✔']) sh.getRange(row, m['Aprobar ✔']).clearNote();   // cubierto: limpia la nota de bloqueo
+  if (m['Estado']) sh.getRange(row, m['Estado']).clearNote();
   const promised = g('Fecha de pago prometida');
   setv('Estado', 'Aprobado');
   if (m['Fecha de aprobación']) sh.getRange(row, m['Fecha de aprobación']).setValue(new Date()).setNumberFormat('yyyy-mm-dd');
@@ -5797,16 +5890,26 @@ function approvePlanRequest_(sh, row) {
   if (!loanId) return;
   const loan = findLoanById_(loanId);
   if (!loan) { setv('Estado', 'Rechazado'); setv('Motivo de rechazo', 'No se encontró el préstamo.'); return; }
-  // GATE: el % inicial configurable debe estar PAGADO (registrado) antes de aprobar.
+  // GATE: el PAGO INICIAL (% configurable) debe estar PAGADO (registrado en «Pagos») ANTES de aprobar.
+  // Si falta, NO aprueba y deja constancia VISIBLE (nota en la fila + aviso) — porque getUi().alert no
+  // se muestra desde el disparador onEdit, y el toast puede pasar desapercibido.
   const amt = planAmounts_(loan);
   if (!amt.downMet) {
-    const msg = 'Debe pagarse el ' + amt.pctInt + '% antes de aprobar. Falta ' + fmtMoney_(amt.downShort) + ' (de ' + fmtMoney_(amt.required) + ').';
-    try { getSS_().toast(loanId + ': ' + msg, '⛔ Falta pagar el ' + amt.pctInt + '%', 10); } catch (e) { }
-    try { SpreadsheetApp.getUi().alert(msg); } catch (e) { }
-    return; // queda Pendiente
+    const msg = 'Falta pagar el ' + amt.pctInt + '% (' + fmtMoney_(amt.required) + '): faltan ' + fmtMoney_(amt.downShort) +
+      '. Registrá el pago en «Pagos» y volvé a tildar «Aprobar».';
+    if (m['Aprobar ✔']) sh.getRange(row, m['Aprobar ✔']).setNote('⛔ ' + msg);
+    if (m['Estado']) sh.getRange(row, m['Estado']).setNote('⛔ No aprobado — ' + msg);
+    // Mensaje VISIBLE. Desde el disparador onEdit no se puede abrir un diálogo (getUi().alert falla),
+    // así que mostramos un toast PERSISTENTE (timeout -1 = queda hasta que lo cierres). Si se corre
+    // desde el menú (hay UI), además se abre el alert modal.
+    try { getSS_().toast('Préstamo ' + loanId + ' — ' + msg, '⛔ NO SE APROBÓ · Falta el pago inicial', -1); } catch (e) { }
+    try { SpreadsheetApp.getUi().alert('No se aprobó el plan ' + loanId + '.\n\n' + msg); } catch (e) { }
+    return; // queda Pendiente hasta que se registre el pago inicial
   }
+  if (m['Aprobar ✔']) sh.getRange(row, m['Aprobar ✔']).clearNote();   // cubierto: limpia la nota de bloqueo
+  if (m['Estado']) sh.getRange(row, m['Estado']).clearNote();
   const option = Math.floor(Number(g('Opción (1/4/6)')) || 0);
-  const optTxt = option === 1 ? 'Pago único' : option + ' cuotas mensuales';
+  const optTxt = planOptTxt_(option, planCadence_(g('Cadencia')));
   setv('Estado', 'Aprobado');
   if (m['Fecha de aprobación']) sh.getRange(row, m['Fecha de aprobación']).setValue(new Date()).setNumberFormat('yyyy-mm-dd');
   setv('Estado de Firma', 'PENDIENTE');
@@ -5814,10 +5917,13 @@ function approvePlanRequest_(sh, row) {
   const url = base ? base + '?page=firmar-plan&loan=' + encodeURIComponent(loanId) : '';
   if (url) setf('Enlace de firma', '=HYPERLINK("' + url + '","✍ Firmar Acuerdo")');
   else setv('Enlace de firma', 'Publicá la app web (menú ⑥) para obtener el enlace.');
+  const downTxt = amt.downMet
+    ? ('El ' + amt.pctInt + '% (' + fmtMoney_(amt.required) + ') ya está cubierto.')
+    : ('Para activar: pagá el ' + amt.pctInt + '% (' + fmtMoney_(amt.required) + '; falta ' + fmtMoney_(amt.downShort) + ') y firmá el Acuerdo.');
   const num = waNumberAR_(loan.phone);
   if (num && url) {
     const msg = 'Hola ' + (loan.name || 'cliente') + ' 👋 Aprobamos tu plan de pago (' + optTxt + ') del préstamo ' + loanId +
-      '. El ' + amt.pctInt + '% ya está cubierto. Para activarlo, firmá el Acuerdo acá: ' + url + ' — ' + companyName_();
+      '. ' + downTxt + ' Firmá el Acuerdo acá: ' + url + ' — ' + companyName_();
     setf('WhatsApp', '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📲 Avisar aprobación")');
   }
   const lender = getSetting_('Correo del Prestamista');
@@ -5825,12 +5931,12 @@ function approvePlanRequest_(sh, row) {
   const amtTable = '<table style="border-collapse:collapse;margin:6px 0">' +
     '<tr><td><b>Opción</b>&nbsp;</td><td>' + esc_(optTxt) + '</td></tr>' +
     '<tr><td><b>Total a pagar</b>&nbsp;</td><td>' + fmtMoney_(amt.total) + '</td></tr>' +
-    '<tr><td><b>Pago inicial (' + amt.pctInt + '%)</b>&nbsp;</td><td>' + fmtMoney_(amt.required) + ' — cubierto</td></tr></table>';
+    '<tr><td><b>Pago inicial (' + amt.pctInt + '%)</b>&nbsp;</td><td>' + fmtMoney_(amt.required) + (amt.downMet ? ' — cubierto' : ' — falta ' + fmtMoney_(amt.downShort)) + '</td></tr></table>';
   try {
     if (loan.email) sendBrandedEmail_(loan.email, 'Tu plan de pago fue aprobado — ' + loanId,
       'Hola ' + loan.name + ', aprobamos tu plan de pago del préstamo ' + loanId + '. Firmá el Acuerdo: ' + (url || '(enlace pendiente)'),
       '<p>Hola ' + esc_(loan.name) + ',</p><p>Aprobamos tu <b>plan de pago</b> del préstamo <b>' + esc_(loanId) + '</b>.</p>' + amtTable +
-      '<p>El <b>' + amt.pctInt + '% ya está cubierto</b>. Para activar el plan (y suspender la mora), <b>firmá el Acuerdo</b>. Al firmar se reemplazan las cuotas.</p>' + btn);
+      '<p>' + esc_(downTxt) + ' Al firmar se <b>suspende la mora</b> y se reemplazan las cuotas.</p>' + btn);
     if (lender) sendBrandedEmail_(lender, 'Plan de pago aprobado — ' + loanId,
       'Aprobaste el plan de pago de ' + loan.name + ' (' + loanId + '). Se envió el enlace de firma.',
       '<p>Aprobaste el plan de pago de <b>' + esc_(loan.name) + '</b> (' + esc_(loanId) + ').</p>' + amtTable +
@@ -6313,7 +6419,8 @@ function getPlanContractForSigning(loanId, dni) {
     if (String(g('Estado de Firma')).toUpperCase() === SIGN.SIGNED || String(g('Estado')).trim() === 'Firmado')
       return { ok: true, signed: true, msg: 'El Acuerdo ya fue firmado. Te enviamos una copia por correo.' };
     const option = Math.floor(Number(g('Opción (1/4/6)')) || 4);
-    return { ok: true, signed: false, name: loan.name, contractHtml: planAgreementHtml_(loan, { option: option }), captureLocation: locationFlag_() };
+    const cadence = planCadence_(g('Cadencia'));
+    return { ok: true, signed: false, name: loan.name, contractHtml: planAgreementHtml_(loan, { option: option, cadence: cadence }), captureLocation: locationFlag_() };
   });
 }
 
@@ -6350,11 +6457,12 @@ function submitPlanSignature(loanId, dni, signatureDataUrl, agree, meta) {
     folder.createFile(Utilities.newBlob(bytes, mime, 'Firma Acuerdo ' + loanId + '.' + ext));
 
     const option = Math.floor(Number(g('Opción (1/4/6)')) || 4);
-    // ACTIVA el plan: suspende mora, reemplaza cuotas, marca "Plan desde".
-    activarPlanPago_(loan, option, now);
+    const cadence = planCadence_(g('Cadencia'));
+    // ACTIVA el plan: suspende mora, reemplaza cuotas (según la cadencia), marca "Plan desde".
+    activarPlanPago_(loan, option, now, cadence);
 
     const sig = { dataUrl: signatureDataUrl, signedAt: now, method: method, userAgent: (meta && meta.userAgent) || '', ip: ip, hash: '', device: devInfo, deviceFp: deviceFp };
-    const signedFile = savePdfToBorrower_(planAgreementHtml_(loan, { option: option }, sig), 'Acuerdo de Plan de Pago ' + loanId + ' - ' + loan.name + '.pdf', loan);
+    const signedFile = savePdfToBorrower_(planAgreementHtml_(loan, { option: option, cadence: cadence }, sig), 'Acuerdo de Plan de Pago ' + loanId + ' - ' + loan.name + '.pdf', loan);
     let hashHex = ''; try { hashHex = hexDigest_(signedFile.getAs('application/pdf').getBytes()); } catch (e) { logError_('submitPlanSignature:hash', e); }
 
     try { setupFirmas_(getSS_()).appendRow([now, loanId, loan.name, loan.dni, loan.email, 'Plan de Pago (' + (method === 'upload' ? 'imagen' : 'dibujada') + ')',
@@ -6365,7 +6473,7 @@ function submitPlanSignature(loanId, dni, signatureDataUrl, agree, meta) {
     if (req.m['Fecha de Firma']) req.sh.getRange(req.row, req.m['Fecha de Firma']).setValue(now).setNumberFormat('yyyy-mm-dd hh:mm');
     setf('Acuerdo (PDF)', '=HYPERLINK("' + signedFile.getUrl() + '","Ver acuerdo firmado")');
 
-    const optTxt = option === 1 ? 'Pago único' : option + ' cuotas mensuales';
+    const optTxt = planOptTxt_(option, cadence);
     const lender = getSetting_('Correo del Prestamista');
     let emailOk = true;
     try {
@@ -6386,9 +6494,10 @@ function submitPlanSignature(loanId, dni, signatureDataUrl, agree, meta) {
 
 /** ACTIVA el plan: suspende la mora (Mora (ajuste)=0), reemplaza las cuotas por el plan elegido
  *  (sobre el Total a Pagar, SIN mora) y marca "Plan desde" (→ estado EN PLAN). */
-function activarPlanPago_(loan, option, signDate) {
+function activarPlanPago_(loan, option, signDate, cadence) {
   const ss = getSS_();
   const n = (option === 1) ? 1 : (option === 6 ? 6 : 4);
+  cadence = planCadence_(cadence);
   const loc = signStatusRow_(loan.loanId);
   if (loc) {
     const H = headerIndex_(loc.sh);
@@ -6401,7 +6510,7 @@ function activarPlanPago_(loan, option, signDate) {
   // el pago inicial) se imputan a la cuota más antigua por la fórmula por cuota de cuotasForLoan_.
   const cs = ss.getSheetByName(CFG.SHEETS.INSTALLMENTS) || setupCuotas_(ss);
   deleteCuotasRowsForLoan_(cs, loan.loanId);
-  cuotasForLoan_(cs, loan.loanId, loan.loanDate, round2_(loan.totalDue), n, null, { dates: planCuotaDates_(signDate, n) });
+  cuotasForLoan_(cs, loan.loanId, loan.loanDate, round2_(loan.totalDue), n, null, { dates: planCuotaDates_(signDate, n, cadence) });
 }
 
 /** HTML del ACUERDO TRANSACCIONAL — Reconocimiento de deuda y plan de pagos (modelo del PDF de ejemplo). */
@@ -6410,9 +6519,10 @@ function planAgreementHtml_(loan, req, sig) {
   const signatories = ownerSignatories_();
   const option = (req && req.option) ? Math.floor(req.option) : 4;
   const n = (option === 1) ? 1 : (option === 6 ? 6 : 4);
+  const cadence = planCadence_(req && req.cadence);
   const a = planAmounts_(loan);
   const signedAt = (sig && sig.signedAt instanceof Date) ? sig.signedAt : new Date();
-  const dates = planCuotaDates_(signedAt, n);
+  const dates = planCuotaDates_(signedAt, n, cadence);
   const baseCuota = round2_(a.total / n);
   let left = a.recorded; const cuotaRows = [];
   for (let k = 0; k < n; k++) {
@@ -6420,7 +6530,7 @@ function planAgreementHtml_(loan, req, sig) {
     const ap = Math.min(left, monto); const neto = round2_(monto - ap); left = round2_(left - ap);
     cuotaRows.push({ n: k + 1, due: dates[k], monto: monto, neto: neto, ap: ap });
   }
-  const optTxt = n === 1 ? 'Pago único' : n + ' cuotas mensuales';
+  const optTxt = planOptTxt_(n, cadence);
   const kv = (k, v) => `<tr><td class="k">${k}</td><td>${v}</td></tr>`;
   const fill = v => (v && String(v).trim()) ? esc_(v) : '<span style="color:#9aa4ad">—</span>';
   const mono = '<span style="font-family:monospace;font-size:8.5pt;word-break:break-all">';
