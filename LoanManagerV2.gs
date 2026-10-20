@@ -722,6 +722,8 @@ function setupSettings_(ss) {
     // Avisos automáticos de vencimiento (recordatorios a 30/15/7/3 días; ver enviarAvisosVencimiento).
     ['Avisos de vencimiento activos (SÍ/NO)', 'SÍ'],
     ['Días de aviso de vencimiento (lista)', '30,15,7,3'],
+    ['Días de aviso de cuota (plan)', '7,3,1'],
+    ['Días entre avisos de congelado', '7'],
     ['Hora de envío de avisos de vencimiento', '8'],
     ['Correo remitente de avisos', 'impulso.credito.ars@gmail.com'],
     ['Correo para resumen de avisos', 'impulso.credito.ars@gmail.com'],
@@ -1769,8 +1771,14 @@ function rebuildRemindersSheet_(ss) {
   const intC = col(['Interés', 'Interes'], PB.INTEREST);
   const totC = col(['Total a Pagar', 'Total a pagar'], PB.TOTAL);
   const balC = PB.BALANCE;
-  const maxCol = Math.max(idC, cliC, capC, plzC, tasC, fecC, venC, intC, totC, balC);
+  // Columnas de mora/congelamiento/plan: se leen DEL MISMO bloque para armar el desglose del
+  // WhatsApp de vencidos sin un getRange por fila (mismo criterio que rebuildLateSheet_).
+  const adjC = colByAny_(H, ['Mora (ajuste)']), sinceC = colByAny_(H, ['Congelado el']),
+    daysAccC = colByAny_(H, ['Días congelados', 'Dias congelados']), planSinceC = colByAny_(H, ['Plan desde']);
+  const maxCol = Math.max(idC, cliC, capC, plzC, tasC, fecC, venC, intC, totC, balC,
+    adjC || 0, sinceC || 0, daysAccC || 0, planSinceC || 0);
   const bdata = bs.getRange(2, 1, last - 1, maxCol).getValues();
+  const payMap = loanPaymentsAll_();   // todos los pagos en UNA lectura (evita O(N²) por fila)
   for (let i = 0; i < bdata.length; i++) {
     const v = bdata[i], g = c => v[c - 1];
     const loanId = String(g(idC) || '').trim(); if (!loanId) continue;
@@ -1785,7 +1793,7 @@ function rebuildRemindersSheet_(ss) {
     let interest = Number(g(intC)) || 0; if (!interest) interest = round2_(principal * rate);
     let loanTotal = Number(g(totC)) || 0; if (!loanTotal) loanTotal = round2_(principal + interest);
     const cli = getClienteById_(String(g(cliC) || '').trim()) || {};
-    const loan = { loanId: loanId, name: cli.name || '', email: cli.email || '', phone: cli.phone || '', dueDate: loanDue, totalDue: loanTotal };
+    const loan = { loanId: loanId, name: cli.name || '', email: cli.email || '', phone: cli.phone || '', dueDate: loanDue, totalDue: loanTotal, principal: principal, term: term, loanDate: ld, dni: cli.dni || '' };
     // Base de aviso: si el préstamo tiene cronograma, se usa la PRÓXIMA cuota impaga
     // (fecha, monto y saldo de esa cuota); si no, el vencimiento y saldo del préstamo.
     let dueDate = loanDue, totalDue = loanTotal, cuotaTxt = '';
@@ -1805,8 +1813,29 @@ function rebuildRemindersSheet_(ss) {
     rows.push([loanId, loan.name + cuotaTxt, dueDate, daysUntil, overdue ? ST.OVERDUE : 'PRÓXIMO',
       totalDue, out, feeDay, loan.email, false, false, '', '', '', '']);
     overdueFlags.push(overdue);
-    // Enlace de WhatsApp con el recordatorio listo (según el saldo pendiente de esta fila).
-    waCells.push(remWhatsappFormula_(loan, dueDate, out, daysUntil));
+    // Desglose financiero del WhatsApp de VENCIDOS, calculado con datos YA leídos (payMap + columnas
+    // del bloque) y el motor de mora SIN leer hojas (accruedMoraFast_). Evita el loanWaStatus_ por
+    // fila (que hacía ~6 lecturas de hoja completas por préstamo → O(N²) al abrir).
+    let fin = null;
+    if (overdue) {
+      const pays = payMap[loanId] || [];
+      const totalPaid = pays.reduce((s, p) => s + p.amount, 0);
+      const base = Math.max(0, round2_(loanTotal - totalPaid));
+      const adjV = adjC ? g(adjC) : '';
+      const override = (typeof adjV === 'number' && isFinite(adjV)) ? Math.max(0, round2_(adjV)) : null;
+      const frozen = { since: (sinceC && g(sinceC) instanceof Date) ? g(sinceC) : null,
+        daysAcc: daysAccC ? (Number(g(daysAccC)) || 0) : 0 };
+      const onPlan = !!(planSinceC && g(planSinceC) instanceof Date);
+      const owedMora = onPlan ? 0 : accruedMoraFast_(loan, today, pays, override, frozen);
+      fin = {
+        principal: principal, interest: round2_(Math.max(0, loanTotal - principal)),
+        totalDue: loanTotal, totalPaid: totalPaid, owedMora: owedMora,
+        toClear: round2_(base + owedMora),
+        daysLate: Math.max(0, daysLate_(loanDue, effMoraAsOf2_(frozen, today))),
+      };
+    }
+    // Enlace de WhatsApp con el recordatorio listo (desglose en vencidos; saldo simple en próximos).
+    waCells.push(remWhatsappFormula_(loan, dueDate, out, daysUntil, fin));
     // Enlace al formulario de congelamiento SOLO para filas vencidas (daysUntil < 0).
     freezeCells.push(overdue ? (freezeFormWaFormula_(loan) || '') : '');
     // Enlace al formulario de PLAN DE PAGO: sólo cuando (aprox.) llegó al 100% de mora. El formulario
@@ -1874,16 +1903,35 @@ function waNumberAR_(phone) {
 
 /** Fórmula «=HYPERLINK» que abre WhatsApp con un recordatorio breve (tono informal) para la fila.
  *  Devuelve '' si el prestatario no tiene un teléfono válido (la celda mostrará «sin teléfono»). */
-function remWhatsappFormula_(loan, dueDate, amount, daysUntil) {
+function remWhatsappFormula_(loan, dueDate, amount, daysUntil, fin) {
   const num = waNumberAR_(loan && loan.phone);
   if (!num) return '';
   const name = String((loan && loan.name) || '').trim() || 'cliente';
   const fecha = (dueDate instanceof Date) ? Utilities.formatDate(dueDate, Session.getScriptTimeZone(), 'dd/MM/yyyy') : '';
-  const monto = fmtMoney_(amount), empresa = companyName_();
+  const monto = fmtMoney_(amount), empresa = companyName_(), nl = '\n';
   let msg;
   if (daysUntil > 0)      msg = 'Hola ' + name + ' 👋 Te recordamos que tu préstamo vence el ' + fecha + '. Total a pagar: ' + monto + '. ¡Gracias! ' + empresa;
   else if (daysUntil === 0) msg = 'Hola ' + name + ' 👋 Tu préstamo vence hoy (' + fecha + '). Total a pagar: ' + monto + '. ¡Gracias! ' + empresa;
-  else                    msg = 'Hola ' + name + ' 👋 Tu préstamo venció el ' + fecha + ' (hace ' + Math.abs(daysUntil) + ' día(s)). Saldo a pagar: ' + monto + '. Por favor regularizá tu pago. ' + empresa;
+  else {
+    // Vencido: desglose capital / interés / total acordado / mora / total a pagar HOY (con mora).
+    // Las cifras (mora acumulada, pagos parciales, congelamiento/plan) vienen YA calculadas en `fin`
+    // desde rebuildRemindersSheet_ (datos leídos una sola vez). Respaldo sin mora si faltara `fin`.
+    const f = fin || {};
+    const capital = round2_(Number(loan.principal) || 0);
+    const interes = ('interest' in f) ? f.interest : round2_(Math.max(0, (Number(loan.totalDue) || 0) - capital));
+    const totalDue = ('totalDue' in f) ? f.totalDue : round2_(Number(loan.totalDue) || 0);
+    const totalPaid = Number(f.totalPaid) || 0, owedMora = Number(f.owedMora) || 0;
+    const toClear = ('toClear' in f) ? f.toClear : round2_(Math.max(0, totalDue - totalPaid) + owedMora);
+    const dLate = (f.daysLate != null) ? f.daysLate : Math.abs(daysUntil);
+    msg = 'Hola ' + name + ' 👋 Tu préstamo venció el ' + fecha + ' (hace ' + Math.abs(daysUntil) + ' día(s)).' + nl +
+      'Capital prestado: ' + fmtMoney_(capital) + nl +
+      'Interés: ' + fmtMoney_(interes) + nl +
+      'Total acordado: ' + fmtMoney_(totalDue) + nl +
+      (totalPaid > 0.009 ? ('Pagado a la fecha: ' + fmtMoney_(totalPaid) + nl) : '') +
+      (owedMora > 0.009 ? ('Mora por atraso (' + dLate + ' día(s)): ' + fmtMoney_(owedMora) + nl) : '') +
+      'Total a pagar hoy: ' + fmtMoney_(toClear) + nl +
+      'Por favor regularizá tu pago. ' + empresa;
+  }
   return '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📲 WhatsApp")';
 }
 
@@ -5219,10 +5267,10 @@ function submitIntake(form) {
     const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd-HHmmss');
     const dniUrl = savePhoto_(folder, form.dniPhoto, name + ' DNI ' + stamp);
     const cuilUrl = savePhoto_(folder, form.cuilPhoto, name + ' CUIL ' + stamp);
-    const row = nbAppend_(nb, [new Date(), name, email, dni, phone, amount, term, notes, dniUrl, cuilUrl, false, false, 'Pendiente de verificación']);
+    const row = nbAppend_(nb, [new Date(), safeCell_(name), email, dni, phone, amount, term, safeCell_(notes), dniUrl, cuilUrl, false, false, 'Pendiente de verificación']);
     nb.getRange(row, 1).setNumberFormat('yyyy-mm-dd hh:mm'); nb.getRange(row, 6).setNumberFormat(CFG.CURRENCY_FMT);
     // Forma de pago: se escribe por nombre de encabezado (columna al final de NB).
-    try { setSheetFieldByHeader_(nb, row, 'Forma de Pago', payMethodFull); } catch (e) { logError_('submitIntake:payMethod', e); }
+    try { setSheetFieldByHeader_(nb, row, 'Forma de Pago', safeCell_(payMethodFull)); } catch (e) { logError_('submitIntake:payMethod', e); }
     try {
       sendBrandedEmail_(email, 'Solicitud recibida',
         'Estimado/a ' + name + ', recibimos su solicitud de préstamo por ' + fmtMoney_(amount) + '. La revisaremos y nos pondremos en contacto.',
@@ -6855,7 +6903,7 @@ function onEditInstallable(e) {
             sh.getRange(row, PP.PAY_ID).setValue('P-' + String(seq++).padStart(4, '0'));
           }
           const loan = findLoanById_(id);
-          sh.getRange(row, PP.NAME, 1, 2).setValues([[loan ? (loan.name || '') : '', loan ? (loan.dni || '') : '']]);
+          sh.getRange(row, PP.NAME, 1, 2).setValues([[safeCell_(loan ? (loan.name || '') : ''), loan ? (loan.dni || '') : '']]);
           const fecha = sh.getRange(row, PP.DATE);
           fecha.setNumberFormat('yyyy-mm-dd').setDataValidation(datePicker_()); // selector de fecha
           if (fecha.getValue() === '') fecha.setValue(new Date());
@@ -7485,9 +7533,9 @@ function titleCaseName_(s) {
 /** Estilo/tono del aviso según los días que faltan (color, emoji, título, bajada, nota de mora). */
 function avisoVencCfg_(dias) {
   const M = {
-    30: { emoji: '📅', acc: '#1c4587', tin: '#eef3fb', tinText: '#1c4587', tit: 'Faltan 30 días', baj: 'Te avisamos con tiempo para que organices tu pago con tranquilidad.', mora: '' },
-    15: { emoji: '⏳', acc: '#e8a33d', tin: '#fdf6e9', tinText: '#b9791f', tit: 'Faltan 15 días', baj: 'Ya falta menos para tu vencimiento. Dejamos a mano el detalle de tu pago.', mora: '' },
-    7: { emoji: '🔔', acc: '#d2691e', tin: '#fbefe6', tinText: '#d2691e', tit: 'Faltan 7 días', baj: 'Tu pago se acerca. Abonando antes del vencimiento evitás recargos por mora.', mora: 'Recordá: pasada la fecha se aplica un recargo diario por mora sobre el total a devolver.' },
+    30: { emoji: '📅', acc: '#1c4587', tin: '#eef3fb', tinText: '#1c4587', tit: 'Faltan 30 días', baj: 'Te avisamos con tiempo para que organices tu pago con tranquilidad.', mora: '', refuerzo: 'Sos de los clientes que cumplen, y lo valoramos. La mayoría de quienes confían en nosotros llega al vencimiento al día.', beneficio: 'Pagar en fecha fortalece tu historial y te habilita montos más altos en tu próximo préstamo.' },
+    15: { emoji: '⏳', acc: '#e8a33d', tin: '#fdf6e9', tinText: '#b9791f', tit: 'Faltan 15 días', baj: 'Ya falta menos para tu vencimiento. Dejamos a mano el detalle de tu pago.', mora: '', refuerzo: 'La mayoría de nuestros clientes ya se organiza para llegar al día — gracias por tu compromiso.', beneficio: 'Pagar en fecha fortalece tu historial y te habilita montos más altos en tu próximo préstamo.' },
+    7: { emoji: '🔔', acc: '#d2691e', tin: '#fbefe6', tinText: '#d2691e', tit: 'Faltan 7 días', baj: 'Tu pago se acerca. Pagando antes del vencimiento abonás el monto de arriba y nada más; desde el día siguiente se suma mora por cada día de atraso.', mora: 'Recordá: pasada la fecha se aplica un recargo diario por mora sobre el total a devolver.' },
     3: { emoji: '🔔', acc: '#c0392b', tin: '#fbeceb', tinText: '#c0392b', tit: 'Quedan 3 días', baj: 'Recordatorio final antes del vencimiento. Te pedimos coordinar tu pago a la brevedad.', mora: 'A partir de la fecha de vencimiento se aplica un recargo diario por mora sobre el total a devolver, con tope.' },
   };
   return M[dias] || { emoji: '📅', acc: '#1c4587', tin: '#eef3fb', tinText: '#1c4587', tit: 'Faltan ' + dias + ' días', baj: 'Te recordamos el próximo vencimiento de tu préstamo.', mora: '' };
@@ -7503,8 +7551,24 @@ function avisoVencAsunto_(nombre, dias) {
   }
 }
 /** Cuerpo HTML del aviso (la cabecera/pie de marca y el logo los agrega sendBrandedEmail_). */
-function avisoVencimientoHtml_(nombre, loanId, dias, montoTxt, vencTxt, ctaUrl) {
+/** Bloque "Cómo pagar por Mercado Pago" (vacío si no hay alias). montoTxt = monto a transferir.
+ *  Compartido por los avisos de vencimiento, de cuota (plan) y de congelado. */
+function avisoMpBlock_(acct, montoTxt) {
+  if (!acct || !acct.mpAlias) return '';
+  return '<table role="presentation" width="100%" style="border-collapse:collapse;background:#eaf4ff;border-left:4px solid #009ee3;border-radius:6px;margin-top:16px"><tr>' +
+    '<td style="padding:16px 18px">' +
+    '<div style="font-size:14px;font-weight:bold;color:#007eb5;margin-bottom:8px">Cómo pagar por Mercado Pago</div>' +
+    '<table role="presentation" width="100%" style="border-collapse:collapse;font-size:15px">' +
+    '<tr><td style="padding:3px 0;color:#555">Alias</td><td style="padding:3px 0;text-align:right;font-weight:bold;color:#222">' + esc_(acct.mpAlias) + '</td></tr>' +
+    (acct.mpTitular ? '<tr><td style="padding:3px 0;color:#555">Titular</td><td style="padding:3px 0;text-align:right;color:#222">' + esc_(acct.mpTitular) + '</td></tr>' : '') +
+    '<tr><td style="padding:3px 0;color:#555">Monto a transferir</td><td style="padding:3px 0;text-align:right;font-weight:bold;color:#007eb5;font-size:18px">' + esc_(montoTxt) + '</td></tr>' +
+    '</table>' +
+    '<p style="font-size:13px;color:#555;margin:10px 0 0">Transferí este monto por Mercado Pago al alias de arriba. Guardá el comprobante.</p>' +
+    '</td></tr></table>';
+}
+function avisoVencimientoHtml_(nombre, loanId, dias, montoTxt, vencTxt, moraDiaTxt) {
   const c = avisoVencCfg_(dias);
+  const acct = (typeof lenderAccount_ === 'function') ? lenderAccount_() : {};
   const hero = '<table role="presentation" width="100%" style="border-collapse:collapse;background:' + c.acc + ';border-radius:8px"><tr>' +
     '<td style="padding:24px 18px;text-align:center;color:#fff">' +
     '<div style="font-size:32px;line-height:1">' + c.emoji + '</div>' +
@@ -7516,39 +7580,102 @@ function avisoVencimientoHtml_(nombre, loanId, dias, montoTxt, vencTxt, ctaUrl) 
     '<tr><td style="padding:3px 0;color:#555">Monto a pagar</td><td style="padding:3px 0;text-align:right;font-weight:bold;color:' + c.tinText + ';font-size:20px">' + esc_(montoTxt) + '</td></tr>' +
     '<tr><td style="padding:3px 0;color:#555">Fecha de vencimiento</td><td style="padding:3px 0;text-align:right;font-weight:bold;color:#222">' + esc_(vencTxt) + '</td></tr>' +
     '</table></td></tr></table>';
-  const mora = c.mora ? '<p style="font-size:13px;color:#8a5a00;background:#fff8ec;border:1px solid #f0dcae;border-radius:6px;padding:10px 12px;margin:16px 0 0">' + esc_(c.mora) + '</p>' : '';
-  const cta = ctaUrl ? '<table role="presentation" width="100%" style="border-collapse:collapse;margin-top:20px"><tr><td align="center">' +
-    '<a href="' + esc_(ctaUrl) + '" style="display:inline-block;background:' + c.acc + ';color:#fff;text-decoration:none;font-weight:bold;font-size:15px;padding:13px 28px;border-radius:8px">Ver mi saldo y cómo pagar</a></td></tr></table>' : '';
+  // Refuerzo positivo (identidad de "buen pagador" + prueba social suave) en los tramos tempranos.
+  const refuerzo = c.refuerzo ? '<p style="font-size:14px;color:#1a7a3c;background:#eefaf1;border:1px solid #bfe6cb;border-radius:6px;padding:10px 12px;margin:0 0 12px">' + esc_(c.refuerzo) + '</p>' : '';
+  // Pérdida concreta: costo de la mora por día (sólo tramos finales, cuando hay monto por día).
+  const perdida = (c.mora && moraDiaTxt) ? '<p style="font-size:14px;color:#8a0f12;background:#fdecea;border:1px solid #f3b7b4;border-radius:6px;padding:11px 13px;margin:16px 0 0">' +
+    'Pagando hasta el <b>' + esc_(vencTxt) + '</b> abonás <b>' + esc_(montoTxt) + '</b>. A partir de ahí se suma <b>' + esc_(moraDiaTxt) + ' por día</b> de mora, con tope.</p>' : '';
+  // Nota de mora cualitativa: sólo si no mostramos la cifra concreta, para no repetir.
+  const mora = (c.mora && !perdida) ? '<p style="font-size:13px;color:#8a5a00;background:#fff8ec;border:1px solid #f0dcae;border-radius:6px;padding:10px 12px;margin:16px 0 0">' + esc_(c.mora) + '</p>' : '';
+  // Cómo pagar por Mercado Pago (sólo si hay alias configurado). No hay botón "copiar": los
+  // clientes de correo quitan el JavaScript; el alias va en negrita, seleccionable.
+  const mp = avisoMpBlock_(acct, montoTxt);
+  // Beneficio futuro (graduación): pagar en fecha habilita montos más altos.
+  const beneficio = c.beneficio ? '<p style="font-size:14px;color:#1c4587;background:#eef3fb;border:1px solid #c9d8ef;border-radius:6px;padding:10px 12px;margin:16px 0 0">' + esc_(c.beneficio) + '</p>' : '';
   return hero +
     '<p style="font-size:16px;margin:16px 0 10px">Hola ' + esc_(nombre) + ',</p>' +
+    refuerzo +
     '<p style="font-size:15px;color:#444;line-height:1.5;margin:0 0 4px">' + esc_(c.baj) + '</p>' +
-    box + mora + cta +
+    box + perdida + mora + mp + beneficio +
+    '<p style="font-size:14px;color:#444;margin:18px 0 0">Gracias por tu confianza.<br>' + esc_(companyName_()) + '</p>';
+}
+/** Asunto del aviso de CUOTA de un plan de pago (préstamo EN PLAN). */
+function avisoPlanAsunto_(nombre, num, n, dias) {
+  const cuota = 'cuota ' + num + '/' + n;
+  if (dias <= 0) return nombre + ', tu ' + cuota + ' del plan vence hoy';
+  return nombre + ', tu ' + cuota + ' del plan vence en ' + dias + ' día' + (dias === 1 ? '' : 's');
+}
+/** Cuerpo HTML del aviso de CUOTA (préstamo EN PLAN). La mora está suspendida mientras se cumple el plan. */
+function avisoPlanHtml_(nombre, loanId, num, n, montoTxt, vencTxt, acct) {
+  const acc = '#1f7a5a';  // verde "plan"
+  const hero = '<table role="presentation" width="100%" style="border-collapse:collapse;background:' + acc + ';border-radius:8px"><tr>' +
+    '<td style="padding:24px 18px;text-align:center;color:#fff">' +
+    '<div style="font-size:32px;line-height:1">📋</div>' +
+    '<div style="font-size:26px;font-weight:bold;margin-top:8px">Cuota ' + esc_(String(num)) + ' de ' + esc_(String(n)) + '</div>' +
+    '<div style="font-size:13px;opacity:.92;margin-top:4px">de tu plan de pago del préstamo ' + esc_(loanId) + '</div>' +
+    '</td></tr></table>';
+  const box = '<table role="presentation" width="100%" style="border-collapse:collapse;background:#e9f7f1;border-left:4px solid ' + acc + ';border-radius:6px;margin-top:18px"><tr>' +
+    '<td style="padding:16px 18px"><table role="presentation" width="100%" style="border-collapse:collapse;font-size:15px">' +
+    '<tr><td style="padding:3px 0;color:#555">Cuota</td><td style="padding:3px 0;text-align:right;font-weight:bold;color:#222">' + esc_(String(num)) + ' de ' + esc_(String(n)) + '</td></tr>' +
+    '<tr><td style="padding:3px 0;color:#555">Monto de la cuota</td><td style="padding:3px 0;text-align:right;font-weight:bold;color:' + acc + ';font-size:20px">' + esc_(montoTxt) + '</td></tr>' +
+    '<tr><td style="padding:3px 0;color:#555">Vence</td><td style="padding:3px 0;text-align:right;font-weight:bold;color:#222">' + esc_(vencTxt) + '</td></tr>' +
+    '</table></td></tr></table>';
+  const nota = '<p style="font-size:14px;color:#1a7a3c;background:#eefaf1;border:1px solid #bfe6cb;border-radius:6px;padding:10px 12px;margin:16px 0 0">' +
+    'Mientras cumplís el plan, la mora queda <b>suspendida</b>. Si no abonás esta cuota a tiempo, el plan puede caerse y la mora vuelve a correr.</p>';
+  return hero +
+    '<p style="font-size:16px;margin:16px 0 10px">Hola ' + esc_(nombre) + ',</p>' +
+    '<p style="font-size:15px;color:#444;line-height:1.5;margin:0 0 4px">Te recordamos la próxima cuota de tu plan de pago.</p>' +
+    box + nota + avisoMpBlock_(acct, montoTxt) +
+    '<p style="font-size:14px;color:#444;margin:18px 0 0">Gracias por tu compromiso.<br>' + esc_(companyName_()) + '</p>';
+}
+/** Asunto del aviso de préstamo CONGELADO (recordatorio periódico mientras esté congelado). */
+function avisoCongeladoAsunto_(nombre) {
+  return nombre + ', recordatorio de tu préstamo congelado';
+}
+/** Cuerpo HTML del aviso de préstamo CONGELADO (mora detenida; recordatorio para cancelar). */
+function avisoCongeladoHtml_(nombre, loanId, toClearTxt, sinceTxt, prometidaTxt, acct) {
+  const acc = '#2e86c1';  // celeste "hielo"
+  const hero = '<table role="presentation" width="100%" style="border-collapse:collapse;background:' + acc + ';border-radius:8px"><tr>' +
+    '<td style="padding:24px 18px;text-align:center;color:#fff">' +
+    '<div style="font-size:32px;line-height:1">❄️</div>' +
+    '<div style="font-size:26px;font-weight:bold;margin-top:8px">Tu préstamo está congelado</div>' +
+    '<div style="font-size:13px;opacity:.92;margin-top:4px">préstamo ' + esc_(loanId) + '</div>' +
+    '</td></tr></table>';
+  const lead = 'La mora está <b>detenida</b>' + (sinceTxt ? ' desde el ' + esc_(sinceTxt) : '') + ' y no está creciendo. El congelamiento es temporal.';
+  const box = '<table role="presentation" width="100%" style="border-collapse:collapse;background:#eaf3fb;border-left:4px solid ' + acc + ';border-radius:6px;margin-top:18px"><tr>' +
+    '<td style="padding:16px 18px"><table role="presentation" width="100%" style="border-collapse:collapse;font-size:15px">' +
+    '<tr><td style="padding:3px 0;color:#555">Total para cancelar</td><td style="padding:3px 0;text-align:right;font-weight:bold;color:' + acc + ';font-size:20px">' + esc_(toClearTxt) + '</td></tr>' +
+    (prometidaTxt ? '<tr><td style="padding:3px 0;color:#555">Pago comprometido</td><td style="padding:3px 0;text-align:right;font-weight:bold;color:#222">' + esc_(prometidaTxt) + '</td></tr>' : '') +
+    '</table></td></tr></table>';
+  const nota = '<p style="font-size:14px;color:#8a5a00;background:#fff8ec;border:1px solid #f0dcae;border-radius:6px;padding:10px 12px;margin:16px 0 0">' +
+    'Aboná para cerrar tu préstamo. Cuando termine el congelamiento, la mora vuelve a sumarse día a día.</p>';
+  return hero +
+    '<p style="font-size:16px;margin:16px 0 10px">Hola ' + esc_(nombre) + ',</p>' +
+    '<p style="font-size:15px;color:#444;line-height:1.5;margin:0 0 4px">' + lead + '</p>' +
+    box + nota + avisoMpBlock_(acct, toClearTxt) +
     '<p style="font-size:14px;color:#444;margin:18px 0 0">Gracias por tu confianza.<br>' + esc_(companyName_()) + '</p>';
 }
 /** Resumen de la corrida en texto plano (alternativa del correo de resumen). */
 function resumenAvisosPlano_(stats, hitos, hoy) {
-  const sinAviso = Math.max(0, stats.activos - stats.enviados - stats.errores);
-  let t = 'Resumen de avisos de vencimiento\nEjecución: ' + fmtDate_(hoy) + '\n\n' +
-    'Préstamos activos evaluados: ' + stats.activos + '\n' +
-    'Avisos enviados: ' + stats.enviados + '\n' +
-    'Sin aviso hoy: ' + sinAviso + '\n' +
-    'Errores: ' + stats.errores + '\n\n' +
-    'Por hito: ' + hitos.map(function (h) { return h + ' días: ' + (stats.porHito[h] || 0); }).join(' | ') + '\n\n';
+  let t = 'Resumen de avisos de pago\nEjecución: ' + fmtDate_(hoy) + '\n\n' +
+    'Préstamos evaluados (en un hito hoy): ' + stats.evaluados + '\n' +
+    'Avisos enviados: ' + stats.enviados + ' (activos ' + stats.porTipo.activo + ' · plan ' + stats.porTipo.plan + ' · congelados ' + stats.porTipo.congelado + ')\n' +
+    'Omitidos (sin correo / ya avisado): ' + stats.omitidos + '\n' +
+    'Errores: ' + stats.errores + '\n\n';
   if (stats.filas.length) {
     t += 'Detalle:\n';
-    stats.filas.forEach(function (f) { t += '- ' + f.loanId + ' | ' + f.nombre + ' | ' + f.dias + ' días | ' + f.monto + ' | vence ' + f.venc + ' | ' + f.res + '\n'; });
+    stats.filas.forEach(function (f) { t += '- ' + f.loanId + ' | ' + f.nombre + ' | ' + f.tipo + ' | ' + f.detalle + ' | ' + f.monto + ' | ' + f.res + '\n'; });
   }
   return t;
 }
 /** Resumen de la corrida en HTML (tarjetas + tabla), enviado al "Correo para resumen de avisos". */
 function resumenAvisosHtml_(stats, hitos, hoy) {
-  const sinAviso = Math.max(0, stats.activos - stats.enviados - stats.errores);
   const tile = function (n, label, color, bg) {
     return '<td style="padding:0 5px;width:25%"><div style="background:' + bg + ';border-radius:8px;padding:14px 6px;text-align:center">' +
       '<div style="font-size:26px;font-weight:bold;color:' + color + '">' + n + '</div>' +
       '<div style="font-size:11px;color:#667">' + label + '</div></div></td>';
   };
-  const porHito = hitos.map(function (h) { return h + ' días: ' + (stats.porHito[h] || 0); }).join(' · ');
+  const porTipo = 'activos: ' + stats.porTipo.activo + ' · plan: ' + stats.porTipo.plan + ' · congelados: ' + stats.porTipo.congelado;
   let rows = '';
   stats.filas.forEach(function (f, i) {
     const ok = f.res === 'OK';
@@ -7557,26 +7684,26 @@ function resumenAvisosHtml_(stats, hitos, hoy) {
     rows += '<tr style="background:' + (i % 2 ? '#fafbfc' : '#fff') + '">' +
       '<td style="padding:8px 10px;border-top:1px solid #eef0f3">' + esc_(f.loanId) + '</td>' +
       '<td style="padding:8px 10px;border-top:1px solid #eef0f3">' + esc_(f.nombre) + '</td>' +
-      '<td align="center" style="padding:8px 10px;border-top:1px solid #eef0f3">' + f.dias + ' días</td>' +
+      '<td align="center" style="padding:8px 10px;border-top:1px solid #eef0f3">' + esc_(f.tipo) + '</td>' +
+      '<td style="padding:8px 10px;border-top:1px solid #eef0f3">' + esc_(f.detalle) + '</td>' +
       '<td align="right" style="padding:8px 10px;border-top:1px solid #eef0f3">' + esc_(f.monto) + '</td>' +
-      '<td style="padding:8px 10px;border-top:1px solid #eef0f3">' + esc_(f.venc) + '</td>' +
       '<td align="center" style="padding:8px 10px;border-top:1px solid #eef0f3;color:' + col + ';font-weight:bold">' + txt + '</td></tr>';
   });
   if (!rows) rows = '<tr><td colspan="6" style="padding:12px 10px;color:#888;text-align:center">No se enviaron avisos en esta corrida.</td></tr>';
   return '<p style="font-size:15px;margin:0 0 2px;color:#444">Ejecución del <b>' + esc_(fmtDate_(hoy)) + '</b></p>' +
-    '<p style="font-size:13px;margin:0 0 16px;color:#888">Avisos automáticos a clientes con préstamo activo a ' + esc_(hitos.join(' / ')) + ' días del vencimiento.</p>' +
+    '<p style="font-size:13px;margin:0 0 16px;color:#888">Recordatorios automáticos de pago: vencimiento (activos), cuota (plan) y congelado.</p>' +
     '<table role="presentation" width="100%" style="border-collapse:collapse"><tr>' +
-    tile(stats.activos, 'Activos evaluados', '#1c4587', '#eef3fb') +
-    tile(stats.enviados, 'Avisos enviados', '#2e7d46', '#e7f5ec') +
-    tile(sinAviso, 'Sin aviso hoy', '#667', '#f4f5f7') +
+    tile(stats.evaluados, 'Evaluados', '#1c4587', '#eef3fb') +
+    tile(stats.enviados, 'Enviados', '#2e7d46', '#e7f5ec') +
+    tile(stats.omitidos, 'Omitidos', '#667', '#f4f5f7') +
     tile(stats.errores, 'Errores', '#c0392b', '#fbeceb') +
     '</tr></table>' +
-    '<p style="font-size:13px;color:#555;margin:16px 0 6px"><b>Por hito:</b> ' + esc_(porHito) + '</p>' +
+    '<p style="font-size:13px;color:#555;margin:16px 0 6px"><b>Por tipo:</b> ' + esc_(porTipo) + '</p>' +
     '<table role="presentation" width="100%" style="border-collapse:collapse;font-size:13px;border:1px solid #e3e6ec;border-radius:8px;overflow:hidden">' +
     '<tr style="background:#1c4587;color:#fff">' +
     '<th align="left" style="padding:9px 10px">Préstamo</th><th align="left" style="padding:9px 10px">Cliente</th>' +
-    '<th align="center" style="padding:9px 10px">Hito</th><th align="right" style="padding:9px 10px">Monto</th>' +
-    '<th align="left" style="padding:9px 10px">Vence</th><th align="center" style="padding:9px 10px">Estado</th></tr>' +
+    '<th align="center" style="padding:9px 10px">Tipo</th><th align="left" style="padding:9px 10px">Detalle</th>' +
+    '<th align="right" style="padding:9px 10px">Monto</th><th align="center" style="padding:9px 10px">Estado</th></tr>' +
     rows + '</table>';
 }
 /**
@@ -7585,26 +7712,71 @@ function resumenAvisosHtml_(stats, hitos, hoy) {
  * configurable). Al final envía un RESUMEN de la corrida. Dedupe por "Último Aviso" (no reenvía el
  * mismo día). Se instala con instalarAvisosVencimiento(). Remitente/Resumen salen de Configuración.
  */
+/** Fecha de pago prometida (si existe) por ID de préstamo, desde "Solicitudes de Congelamiento".
+ *  UNA sola lectura. Devuelve {loanId: Date}; la fila más reciente gana. Vacío si no hay hoja. */
+function freezePromisedByLoan_() {
+  const map = {};
+  const sh = getSS_().getSheetByName(CFG.SHEETS.FREEZE_REQ);
+  if (!sh || sh.getLastRow() < 2) return map;
+  const hdr = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0], H = {};
+  hdr.forEach(function (h, i) { H[String(h).trim()] = i + 1; });
+  const idC = H['ID Préstamo'] || 2, prC = H['Fecha de pago prometida'] || 0;
+  if (!prC) return map;
+  const data = sh.getRange(2, 1, sh.getLastRow() - 1, Math.max(idC, prC)).getValues();
+  data.forEach(function (r) {
+    const id = String(r[idC - 1] || '').trim(), d = r[prC - 1];
+    if (id && d instanceof Date) map[id] = d;
+  });
+  return map;
+}
 function enviarAvisosVencimiento() {
   return guard_('enviarAvisosVencimiento', function () {
     if (!avisosVencActivos_()) return 'Avisos de vencimiento desactivados (Configuración).';
     const hitos = String(getSetting_('Días de aviso de vencimiento (lista)') || '30,15,7,3')
       .split(',').map(function (s) { return parseInt(String(s).trim(), 10); }).filter(function (n) { return isFinite(n) && n > 0; });
     const hitoSet = {}; hitos.forEach(function (h) { hitoSet[h] = true; });
+    // EN PLAN: recordatorio por cuota a 7/3/1 días; CONGELADO: recordatorio periódico cada N días.
+    const planHitos = String(getSetting_('Días de aviso de cuota (plan)') || '7,3,1')
+      .split(',').map(function (s) { return parseInt(String(s).trim(), 10); }).filter(function (n) { return isFinite(n) && n >= 0; });
+    const planSet = {}; planHitos.forEach(function (h) { planSet[h] = true; });
+    const congPeriod = Math.max(1, parseInt(String(getSetting_('Días entre avisos de congelado') || '7'), 10) || 7);
     const resumenTo = String(getSetting_('Correo para resumen de avisos') || '').trim();
     // Remitente: sólo se aplica si es un alias verificado de la cuenta (si no, se envía como la
     // cuenta que ejecuta el script, sin fallar). Las respuestas van siempre a esa dirección.
     const wantFrom = String(getSetting_('Correo remitente de avisos') || '').trim();
     let fromAddr = '';
     if (wantFrom) { try { if (GmailApp.getAliases().indexOf(wantFrom) !== -1) fromAddr = wantFrom; } catch (e) { } }
-    const replyTo = wantFrom || '';
-    const base = (typeof webAppBaseUrl_ === 'function') ? webAppBaseUrl_() : '';
-    const ctaUrl = base ? (base + '?page=saldo') : '';
+    const emailOpts = { from: fromAddr, replyTo: wantFrom || '' };
+    const acct = (typeof lenderAccount_ === 'function') ? lenderAccount_() : {};
 
     const bs = getSS_().getSheetByName(CFG.SHEETS.BORROWERS), last = bs ? bs.getLastRow() : 0;
-    const stats = { activos: 0, enviados: 0, omitidos: 0, errores: 0, porHito: {}, filas: [] };
-    hitos.forEach(function (h) { stats.porHito[h] = 0; });
+    const stats = { evaluados: 0, enviados: 0, omitidos: 0, errores: 0, porTipo: { activo: 0, plan: 0, congelado: 0 }, filas: [] };
     const hoy = new Date(); hoy.setHours(0, 0, 0, 0);
+    const DAY = 86400000;
+    if (last < 2) return 'Avisos: 0 enviados, 0 omitidos, 0 errores.';
+
+    // Datos cargados UNA sola vez (plan/congelado necesitan pagos, cuotas y mora SIN leer por fila).
+    const payMap = loanPaymentsAll_();
+    const cuotasByLoan = {};
+    const cs = getSS_().getSheetByName(CFG.SHEETS.INSTALLMENTS);
+    if (cs && cs.getLastRow() >= 2) {
+      cs.getRange(2, 1, cs.getLastRow() - 1, CUOTAS_HEADERS.length).getValues().forEach(function (cr) {
+        const lid = String(cr[CU.LOAN_ID - 1]).trim(); if (!lid) return;
+        (cuotasByLoan[lid] = cuotasByLoan[lid] || []).push({ num: Number(cr[CU.NUM - 1]) || 0, due: cr[CU.DUE - 1], saldo: Number(cr[CU.BALANCE - 1]) || 0 });
+      });
+      Object.keys(cuotasByLoan).forEach(function (k) { cuotasByLoan[k].sort(function (a, b) { return a.num - b.num; }); });
+    }
+    // Columnas de mora/congelamiento (lectura en bloque, por nombre de encabezado; para la mora rápida).
+    const H = headerIndex_(bs);
+    const adjC = colByAny_(H, ['Mora (ajuste)']), sinceC = colByAny_(H, ['Congelado el']), daysAccC = colByAny_(H, ['Días congelados', 'Dias congelados']);
+    const extraMax = Math.max(adjC || 0, sinceC || 0, daysAccC || 0);
+    const extra = extraMax ? bs.getRange(2, 1, last - 1, extraMax).getValues() : [];
+    const promisedByLoan = freezePromisedByLoan_();
+
+    const mpPlano = function (montoTxt) {
+      return (acct && acct.mpAlias) ? ('\nCómo pagar por Mercado Pago:\n  Alias: ' + acct.mpAlias + '\n' +
+        (acct.mpTitular ? '  Titular: ' + acct.mpTitular + '\n' : '') + '  Monto a transferir: ' + montoTxt + '\n  Guardá el comprobante.\n') : '';
+    };
 
     for (let row = 2; row <= last; row++) {
       let loan;
@@ -7612,40 +7784,96 @@ function enviarAvisosVencimiento() {
       if (!loan || !loan.loanId) continue;
       const status = bs.getRange(row, PB.STATE).getValue();
       const saldo = Number(bs.getRange(row, PB.BALANCE).getValue()) || 0;
-      if (status !== ST.ACTIVE || saldo <= 0) continue;   // SOLO préstamos activos con saldo
-      stats.activos++;
-      const due = loan.dueDate instanceof Date ? loan.dueDate : null; if (!due) continue;
-      const dias = Math.round((startOfDay_(due).getTime() - hoy.getTime()) / 86400000);
-      if (!hitoSet[dias]) continue;                        // hoy no es un hito para este préstamo
+      if (status === ST.PAID || status === ST.CLEARED || saldo <= 0) continue;
       const nombre = titleCaseName_(loan.name) || 'cliente';
-      const montoTxt = fmtMoney_(round2_(saldo));
-      const vencTxt = fmtDate_(due);
       const lastNotice = bs.getRange(row, PB.NOTICE).getValue();
       const yaHoy = (lastNotice instanceof Date) && fmtDate_(lastNotice) === fmtDate_(hoy);
-      if (!loan.email) { stats.omitidos++; stats.filas.push({ loanId: loan.loanId, nombre: nombre, dias: dias, monto: montoTxt, venc: vencTxt, res: 'sin correo' }); continue; }
-      if (yaHoy) { stats.omitidos++; stats.filas.push({ loanId: loan.loanId, nombre: nombre, dias: dias, monto: montoTxt, venc: vencTxt, res: 'ya avisado hoy' }); continue; }
+      const ev = extra[row - 2] || [], g2 = function (c) { return c ? ev[c - 1] : ''; };
+      const omit = function (tipo, detalle, monto, res) {
+        stats.omitidos++; stats.filas.push({ loanId: loan.loanId, nombre: nombre, tipo: tipo, detalle: detalle, monto: monto, res: res });
+      };
+      let job = null;  // {tipo, asunto, plano, html, monto, detalle}
+
+      if (status === ST.ACTIVE) {
+        const due = loan.dueDate instanceof Date ? loan.dueDate : null; if (!due) continue;
+        const dias = Math.round((startOfDay_(due).getTime() - hoy.getTime()) / DAY);
+        if (!hitoSet[dias]) continue;
+        stats.evaluados++;
+        const montoTxt = fmtMoney_(round2_(saldo)), vencTxt = fmtDate_(due), det = dias + ' días';
+        if (!loan.email) { omit('activo', det, montoTxt, 'sin correo'); continue; }
+        if (yaHoy) { omit('activo', det, montoTxt, 'ya avisado hoy'); continue; }
+        const moraDiaTxt = fmtMoney_(round2_((Number(loan.totalDue) || 0) * lateFeeRate_()));
+        const cfg = avisoVencCfg_(dias);
+        let plano = 'Hola ' + nombre + ',\n\n';
+        if (cfg.refuerzo) plano += cfg.refuerzo + '\n\n';
+        plano += cfg.baj + '\n\nPréstamo: ' + loan.loanId + '\nMonto a pagar: ' + montoTxt + '\nVence el: ' + vencTxt + '\n';
+        if (cfg.mora && moraDiaTxt) plano += '\nSi pagás después del vencimiento se suma ' + moraDiaTxt + ' por día de mora (con tope).\n';
+        plano += mpPlano(montoTxt);
+        if (cfg.beneficio) plano += '\n' + cfg.beneficio + '\n';
+        plano += '\nGracias por tu confianza.\n' + companyName_();
+        job = { tipo: 'activo', asunto: avisoVencAsunto_(nombre, dias), plano: plano, html: avisoVencimientoHtml_(nombre, loan.loanId, dias, montoTxt, vencTxt, moraDiaTxt), monto: montoTxt, detalle: det };
+
+      } else if (status === ST.PLAN) {
+        const qs = cuotasByLoan[loan.loanId] || [];
+        const nextQ = qs.filter(function (q) { return q.saldo > 0.009 && q.due instanceof Date; })[0];
+        if (!nextQ) continue;  // plan sin cuotas impagas
+        const dias = Math.round((startOfDay_(nextQ.due).getTime() - hoy.getTime()) / DAY);
+        if (!planSet[dias]) continue;
+        stats.evaluados++;
+        const montoTxt = fmtMoney_(round2_(nextQ.saldo)), vencTxt = fmtDate_(nextQ.due), det = 'cuota ' + nextQ.num + '/' + qs.length + ' en ' + dias + 'd';
+        if (!loan.email) { omit('plan', det, montoTxt, 'sin correo'); continue; }
+        if (yaHoy) { omit('plan', det, montoTxt, 'ya avisado hoy'); continue; }
+        let plano = 'Hola ' + nombre + ',\n\nTe recordamos la próxima cuota de tu plan de pago.\n\n' +
+          'Préstamo: ' + loan.loanId + '\nCuota: ' + nextQ.num + ' de ' + qs.length + '\nMonto de la cuota: ' + montoTxt + '\nVence el: ' + vencTxt + '\n' +
+          '\nMientras cumplís el plan, la mora queda suspendida. Si no abonás esta cuota a tiempo, el plan puede caerse y la mora vuelve a correr.\n' +
+          mpPlano(montoTxt) + '\nGracias por tu compromiso.\n' + companyName_();
+        job = { tipo: 'plan', asunto: avisoPlanAsunto_(nombre, nextQ.num, qs.length, dias), plano: plano, html: avisoPlanHtml_(nombre, loan.loanId, nextQ.num, qs.length, montoTxt, vencTxt, acct), monto: montoTxt, detalle: det };
+
+      } else if (status === ST.FROZEN) {
+        const daysSince = (lastNotice instanceof Date) ? Math.round((hoy.getTime() - startOfDay_(lastNotice).getTime()) / DAY) : Infinity;
+        if (daysSince < congPeriod) continue;  // todavía no toca el próximo recordatorio periódico
+        const pays = payMap[loan.loanId] || [];
+        const totalPaid = pays.reduce(function (s, p) { return s + p.amount; }, 0);
+        const base = Math.max(0, round2_((Number(loan.totalDue) || 0) - totalPaid));
+        const adjV = adjC ? g2(adjC) : '';
+        const override = (typeof adjV === 'number' && isFinite(adjV)) ? Math.max(0, round2_(adjV)) : null;
+        const frozen = { since: (sinceC && g2(sinceC) instanceof Date) ? g2(sinceC) : null, daysAcc: daysAccC ? (Number(g2(daysAccC)) || 0) : 0 };
+        const toClear = round2_(base + accruedMoraFast_(loan, hoy, pays, override, frozen));
+        if (toClear <= 0.009) continue;
+        stats.evaluados++;
+        const toClearTxt = fmtMoney_(toClear);
+        if (!loan.email) { omit('congelado', 'congelado', toClearTxt, 'sin correo'); continue; }
+        const sinceTxt = frozen.since instanceof Date ? fmtDate_(frozen.since) : '';
+        const prometida = promisedByLoan[loan.loanId];
+        const prometidaTxt = prometida instanceof Date ? fmtDate_(prometida) : '';
+        let plano = 'Hola ' + nombre + ',\n\nLa mora de tu préstamo está detenida' + (sinceTxt ? ' desde el ' + sinceTxt : '') + ' y no está creciendo. El congelamiento es temporal.\n\n' +
+          'Préstamo: ' + loan.loanId + '\nTotal para cancelar: ' + toClearTxt + '\n' + (prometidaTxt ? 'Pago comprometido: ' + prometidaTxt + '\n' : '') +
+          '\nAboná para cerrar tu préstamo. Cuando termine el congelamiento, la mora vuelve a sumarse día a día.\n' +
+          mpPlano(toClearTxt) + '\nGracias por tu confianza.\n' + companyName_();
+        job = { tipo: 'congelado', asunto: avisoCongeladoAsunto_(nombre), plano: plano, html: avisoCongeladoHtml_(nombre, loan.loanId, toClearTxt, sinceTxt, prometidaTxt, acct), monto: toClearTxt, detalle: 'congelado' };
+
+      } else {
+        continue;  // VENCIDO u otros estados: no se avisan por esta vía (cobranza es aparte)
+      }
+
       try {
-        const asunto = avisoVencAsunto_(nombre, dias);
-        const plano = 'Hola ' + nombre + ',\n\n' + avisoVencCfg_(dias).baj +
-          '\n\nPréstamo: ' + loan.loanId + '\nMonto a pagar: ' + montoTxt + '\nVence el: ' + vencTxt +
-          '\n\nGracias por tu confianza.\n' + companyName_();
-        sendBrandedEmail_(loan.email, asunto, plano, avisoVencimientoHtml_(nombre, loan.loanId, dias, montoTxt, vencTxt, ctaUrl), { from: fromAddr, replyTo: replyTo });
+        sendBrandedEmail_(loan.email, job.asunto, job.plano, job.html, emailOpts);
         bs.getRange(row, PB.NOTICE).setValue(hoy);
-        stats.enviados++; stats.porHito[dias] = (stats.porHito[dias] || 0) + 1;
-        stats.filas.push({ loanId: loan.loanId, nombre: nombre, dias: dias, monto: montoTxt, venc: vencTxt, res: 'OK' });
+        stats.enviados++; stats.porTipo[job.tipo] = (stats.porTipo[job.tipo] || 0) + 1;
+        stats.filas.push({ loanId: loan.loanId, nombre: nombre, tipo: job.tipo, detalle: job.detalle, monto: job.monto, res: 'OK' });
       } catch (e) {
         logError_('enviarAvisosVencimiento:email', e);
         stats.errores++;
-        stats.filas.push({ loanId: loan.loanId, nombre: nombre, dias: dias, monto: montoTxt, venc: vencTxt, res: 'ERROR' });
+        stats.filas.push({ loanId: loan.loanId, nombre: nombre, tipo: job.tipo, detalle: job.detalle, monto: job.monto, res: 'ERROR' });
       }
     }
     if (resumenTo) {
       try {
-        const asunto = 'Resumen de avisos de vencimiento — ' + stats.enviados + ' enviados, ' + stats.errores + ' errores (' + fmtDate_(hoy) + ')';
-        sendBrandedEmail_(resumenTo, asunto, resumenAvisosPlano_(stats, hitos, hoy), resumenAvisosHtml_(stats, hitos, hoy), { from: fromAddr, replyTo: replyTo });
+        const asunto = 'Resumen de avisos — ' + stats.enviados + ' enviados (' + stats.porTipo.activo + ' activos · ' + stats.porTipo.plan + ' plan · ' + stats.porTipo.congelado + ' congelados), ' + stats.errores + ' errores (' + fmtDate_(hoy) + ')';
+        sendBrandedEmail_(resumenTo, asunto, resumenAvisosPlano_(stats, hitos, hoy), resumenAvisosHtml_(stats, hitos, hoy), emailOpts);
       } catch (e) { logError_('enviarAvisosVencimiento:resumen', e); }
     }
-    return 'Avisos: ' + stats.enviados + ' enviados, ' + stats.omitidos + ' omitidos, ' + stats.errores + ' errores.';
+    return 'Avisos: ' + stats.enviados + ' enviados (' + stats.porTipo.activo + ' activos, ' + stats.porTipo.plan + ' plan, ' + stats.porTipo.congelado + ' congelados), ' + stats.omitidos + ' omitidos, ' + stats.errores + ' errores.';
   });
 }
 /**
@@ -7657,6 +7885,8 @@ function instalarAvisosVencimiento() {
     const defs = [
       ['Avisos de vencimiento activos (SÍ/NO)', 'SÍ'],
       ['Días de aviso de vencimiento (lista)', '30,15,7,3'],
+      ['Días de aviso de cuota (plan)', '7,3,1'],
+      ['Días entre avisos de congelado', '7'],
       ['Hora de envío de avisos de vencimiento', '8'],
       ['Correo remitente de avisos', 'impulso.credito.ars@gmail.com'],
       ['Correo para resumen de avisos', 'impulso.credito.ars@gmail.com'],
@@ -8095,7 +8325,7 @@ function appendCliente_(name, email, dni, phone) {
   const sh = setupClientes_();
   const id = nextClienteId_(), now = new Date(), row = firstEmptyClienteRow_(sh);
   sh.getRange(row, 1, 1, CLIENTES_HEADERS.length)
-    .setValues([[id, name, email, dni, phone, normDni_(dni), normEmail_(email), now, now]]);
+    .setValues([[id, safeCell_(name), email, dni, phone, normDni_(dni), normEmail_(email), now, now]]);
   invalidateClientesCache_();
   return id;
 }
@@ -8375,6 +8605,18 @@ function fmtDateTime_(d) {
   return fmtDate_(d) + ' · ' + Utilities.formatDate(d, Session.getScriptTimeZone(), 'HH:mm');
 }
 function esc_(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+/**
+ * Neutraliza la INYECCIÓN DE FÓRMULAS: un texto de usuario que empiece con = + - @ (o un
+ * carácter de control) se evalúa como fórmula al abrir la planilla (=IMPORTXML/=HYPERLINK →
+ * fuga de datos o phishing). Prefija una comilla simple para forzarlo a TEXTO. Deja intactos
+ * números, fechas, booleanos y los strings que no empiezan con un disparador. Aplicar SOLO a
+ * campos de TEXTO LIBRE del usuario (nombre, dirección, notas, referencias, forma de pago); no
+ * hace falta en teléfonos E164 (empiezan con + pero son dígitos → número inocuo) ni en celdas
+ * con fórmulas legítimas (esas se escriben con setFormula, no con setValue). Idempotente.
+ */
+function safeCell_(v) {
+  return (typeof v === 'string' && /^[=+\-@\t\r\n]/.test(v)) ? "'" + v : v;
+}
 
 /* ==================================================================
  *  DATOS DE PRUEBA  —  crear / eliminar (create & tear down)
@@ -9058,7 +9300,7 @@ function addTestPayment_(ps, seq, loanId, name, dni, date, monto) {
   ps.getRange(row, PP.LOAN_ID).setValue(loanId);
   ps.getRange(row, PP.DATE).setValue(date).setNumberFormat('yyyy-mm-dd');
   ps.getRange(row, PP.AMOUNT).setValue(monto).setNumberFormat(CFG.CURRENCY_FMT);
-  ps.getRange(row, PP.NAME).setValue(name);
+  ps.getRange(row, PP.NAME).setValue(safeCell_(name));
   ps.getRange(row, PP.DNI).setValue(normDni_(dni));
   ps.getRange(row, PP.BALANCE).setFormula(paymentBalanceFormula_(row));
   SpreadsheetApp.flush();

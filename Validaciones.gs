@@ -334,7 +334,7 @@ function appendClienteV2_(name, email, dni, phone, opts) {
   const row = emptyRow || (lastRow < 2 ? 2 : lastRow + 1);
   const vals = new Array(CLIENTES_HEADERS_V2.length).fill('');
   vals[ccol_('ID Cliente', 1) - 1] = id;
-  vals[ccol_('Nombre', 2) - 1] = name;
+  vals[ccol_('Nombre', 2) - 1] = safeCell_(name);
   vals[ccol_('Correo', 3) - 1] = email;
   vals[ccol_('DNI', 4) - 1] = dni;
   vals[ccol_('Teléfono', 5) - 1] = phone;
@@ -345,7 +345,7 @@ function appendClienteV2_(name, email, dni, phone, opts) {
   if (ccol_('Duplicado', 10)) vals[ccol_('Duplicado', 10) - 1] = opts.duplicado || '';
   if (ccol_('Nota', 11)) vals[ccol_('Nota', 11) - 1] = opts.nota || '';
   if (ccol_('CUIL', 12)) vals[ccol_('CUIL', 12) - 1] = opts.cuil || '';
-  if (ccol_('Dirección', 13)) vals[ccol_('Dirección', 13) - 1] = opts.address || '';
+  if (ccol_('Dirección', 13)) vals[ccol_('Dirección', 13) - 1] = safeCell_(opts.address || '');
   sh.getRange(row, 1, 1, vals.length).setValues([vals]);
   invalidateClientesHdrCache_();
   if (typeof invalidateClientesCache_ === 'function') invalidateClientesCache_();
@@ -380,7 +380,7 @@ function updateClienteCuil_(row, cuil) {
 function updateClienteDireccion_(row, address) {
   const sh = getSS_().getSheetByName(CFG.SHEETS.CLIENTS), col = ccol_('Dirección', 13);
   if (!sh || !col || !row || !address) return;
-  sh.getRange(row, col).setValue(address);
+  sh.getRange(row, col).setValue(safeCell_(address));
   invalidateClientesHdrCache_();
   invalidateClientesRows_();
   if (typeof invalidateClientesCache_ === 'function') invalidateClientesCache_();
@@ -670,12 +670,12 @@ function submitIntakeSmart(form) {
     // Cols: 1 Fecha,2 Nombre,3 Correo,4 DNI,5 Teléfono,6 Monto,7 Plazo,8 Notas,
     //       9 dniFrente,10 dniDorso,11 Verificado?,12 Rechazar?,13 Resultado,
     //       14 Verificar BCRA?,15 Parámetro BCRA,16 CUIL.
-    const rowVals = [new Date(), name, emV.norm, dnV.norm, phone, amount, term, notes, dniUrl, cuilUrl,
+    const rowVals = [new Date(), safeCell_(name), emV.norm, dnV.norm, phone, amount, term, safeCell_(notes), dniUrl, cuilUrl,
       false, false, 'Pendiente de verificación', false, 'DNI', cuil];
     const row = nbAppend_(nb, rowVals);
     // Forma de pago: en NB por nombre de encabezado, y en el cliente (para el contrato).
-    try { setSheetFieldByHeader_(nb, row, 'Forma de Pago', payMethodFull); } catch (e) { logError_('submitIntakeSmart:payMethodNb', e); }
-    try { setClienteFieldByHeader_(clientId, CLIENTE_PAY_HEADER, payMethodFull); } catch (e) { logError_('submitIntakeSmart:payMethod', e); }
+    try { setSheetFieldByHeader_(nb, row, 'Forma de Pago', safeCell_(payMethodFull)); } catch (e) { logError_('submitIntakeSmart:payMethodNb', e); }
+    try { setClienteFieldByHeader_(clientId, CLIENTE_PAY_HEADER, safeCell_(payMethodFull)); } catch (e) { logError_('submitIntakeSmart:payMethod', e); }
     nb.getRange(row, 1).setNumberFormat('yyyy-mm-dd hh:mm');
     nb.getRange(row, 6).setNumberFormat(CFG.CURRENCY_FMT);
     // Dirección: columna adicional (se resuelve por nombre; se crea si falta en hojas anteriores).
@@ -686,26 +686,26 @@ function submitIntakeSmart(form) {
         dirCol = nb.getLastColumn() + 1;
         nb.getRange(1, dirCol).setValue('Dirección').setFontWeight('bold').setBackground('#1c4587').setFontColor('#fff');
       }
-      nb.getRange(row, dirCol).setValue(address);
+      nb.getRange(row, dirCol).setValue(safeCell_(address));
     } catch (e) { logError_('submitIntakeSmart:direccion', e); }
 
     // Referencias + compromiso: en "Nuevos Prestatarios" (para revisar) y en "Clientes"
     // (persisten tras aprobar, cuando se borra la fila de la solicitud → útiles para cobranza).
     try {
-      setSheetFieldByHeader_(nb, row, 'Ref 1 Nombre', ref1Name);
-      setSheetFieldByHeader_(nb, row, 'Ref 1 Vínculo', ref1Rel);
+      setSheetFieldByHeader_(nb, row, 'Ref 1 Nombre', safeCell_(ref1Name));
+      setSheetFieldByHeader_(nb, row, 'Ref 1 Vínculo', safeCell_(ref1Rel));
       setSheetFieldByHeader_(nb, row, 'Ref 1 Teléfono', ref1PhoneN);
-      setSheetFieldByHeader_(nb, row, 'Ref 2 Nombre', ref2Name);
-      setSheetFieldByHeader_(nb, row, 'Ref 2 Vínculo', ref2Rel);
+      setSheetFieldByHeader_(nb, row, 'Ref 2 Nombre', safeCell_(ref2Name));
+      setSheetFieldByHeader_(nb, row, 'Ref 2 Vínculo', safeCell_(ref2Rel));
       setSheetFieldByHeader_(nb, row, 'Ref 2 Teléfono', ref2PhoneN);
       setSheetFieldByHeader_(nb, row, 'Compromiso aceptado', new Date());
     } catch (e) { logError_('submitIntakeSmart:referenciasNb', e); }
     try {
-      setClienteFieldByHeader_(clientId, 'Ref 1 Nombre', ref1Name);
-      setClienteFieldByHeader_(clientId, 'Ref 1 Vínculo', ref1Rel);
+      setClienteFieldByHeader_(clientId, 'Ref 1 Nombre', safeCell_(ref1Name));
+      setClienteFieldByHeader_(clientId, 'Ref 1 Vínculo', safeCell_(ref1Rel));
       setClienteFieldByHeader_(clientId, 'Ref 1 Teléfono', ref1PhoneN);
-      setClienteFieldByHeader_(clientId, 'Ref 2 Nombre', ref2Name);
-      setClienteFieldByHeader_(clientId, 'Ref 2 Vínculo', ref2Rel);
+      setClienteFieldByHeader_(clientId, 'Ref 2 Nombre', safeCell_(ref2Name));
+      setClienteFieldByHeader_(clientId, 'Ref 2 Vínculo', safeCell_(ref2Rel));
       setClienteFieldByHeader_(clientId, 'Ref 2 Teléfono', ref2PhoneN);
     } catch (e) { logError_('submitIntakeSmart:referenciasCliente', e); }
 
