@@ -7449,13 +7449,11 @@ function dailyTasks() {
       const lastNotice = bs.getRange(row, PB.NOTICE).getValue();
       const lastStr = (lastNotice instanceof Date) ? fmtDate_(lastNotice) : '';
       let send = false, subject = '', intro = '';
+      // Recordatorio PRE-vencimiento (sólo si los avisos por hitos NO están activos). Los avisos de
+      // MORA (préstamos vencidos) se quitaron a pedido: dailyTasks ya NO envía correos de mora.
       if (!avisosHitoActivos && days >= 0 && days <= noticeDays && lastStr !== fmtDate_(today)) {
         send = true; subject = 'Recordatorio: su préstamo vence pronto';
         intro = 'Le recordamos que su préstamo ' + loan.loanId + ' vence el ' + fmtDate_(due) + '.';
-      } else if (days < 0) {
-        // en mora: avisar como máximo cada 7 días
-        const daysSince = lastNotice instanceof Date ? Math.round((today - new Date(lastNotice.getFullYear(), lastNotice.getMonth(), lastNotice.getDate())) / 86400000) : 999;
-        if (daysSince >= 7) { send = true; subject = 'Aviso de mora — préstamo ' + loan.loanId; intro = 'Su préstamo ' + loan.loanId + ' venció el ' + fmtDate_(due) + ' (' + daysLate_(due, today) + ' día(s) de atraso). Se aplica un recargo por mora del ' + lateFeePctText_() + ' por día (' + fmtMoney_(round2_(loan.totalDue * lateFeeRate_())) + ' por día) sobre el total a devolver, con tope del ' + moraCapPctText_() + ' del capital.'; }
       }
       if (send) {
         try {
