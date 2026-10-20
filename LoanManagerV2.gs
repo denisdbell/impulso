@@ -133,6 +133,9 @@ function onOpen() {
     .addSubMenu(ui.createMenu('🚫 Bloqueo de clientes (fila activa en Clientes)')
       .addItem('Bloquear cliente…', 'bloquearClienteFilaActiva')
       .addItem('Desbloquear cliente', 'desbloquearClienteFilaActiva'))
+    .addSubMenu(ui.createMenu('📅 Avisos de vencimiento (automáticos)')
+      .addItem('⏰ Instalar / actualizar envío diario', 'instalarAvisosVencimiento')
+      .addItem('✉ Enviar avisos ahora (envío real a clientes)', 'enviarAvisosVencimiento'))
     .addSeparator()
     .addSubMenu(ui.createMenu('🗂 Pestañas')
       .addItem('Ver solo operaciones diarias', 'showDailyOnly')
@@ -369,6 +372,8 @@ function sendBrandedEmail_(to, subject, plainBody, htmlInner, opts) {
   const o = { name: companyName_(), htmlBody: html };
   const logo = getLogoBlob_(); if (logo) o.inlineImages = { logo: logo };
   if (opts.attachments) o.attachments = opts.attachments;
+  if (opts.from) o.from = opts.from;           // remitente (debe ser un alias verificado de la cuenta)
+  if (opts.replyTo) o.replyTo = opts.replyTo;  // las respuestas van a esta dirección
   GmailApp.sendEmail(to, subject, plainBody, o);
 }
 /** Cabecera de marca para PDF y páginas web (data URI, o monograma CSS). */
@@ -714,6 +719,12 @@ function setupSettings_(ss) {
     ['Ventana para estimar el ritmo de colocación (días)', '60'],
     ['Aceptar solicitudes de préstamo (SÍ/NO)', 'SÍ'],
     ['Capturar ubicación en la firma (SÍ/NO)', 'SÍ'],
+    // Avisos automáticos de vencimiento (recordatorios a 30/15/7/3 días; ver enviarAvisosVencimiento).
+    ['Avisos de vencimiento activos (SÍ/NO)', 'SÍ'],
+    ['Días de aviso de vencimiento (lista)', '30,15,7,3'],
+    ['Hora de envío de avisos de vencimiento', '8'],
+    ['Correo remitente de avisos', 'impulso.credito.ars@gmail.com'],
+    ['Correo para resumen de avisos', 'impulso.credito.ars@gmail.com'],
   ];
   sh.getRange(1, 1, rows.length, 2).setValues(rows);
   sh.getRange(1, 1, 1, 2).setFontWeight('bold').setBackground('#1c4587').setFontColor('#fff');
@@ -7423,6 +7434,9 @@ function dailyTasks() {
     const bs = getSS_().getSheetByName(CFG.SHEETS.BORROWERS), last = bs.getLastRow();
     if (last < 2) return;
     const noticeDays = Number(getSetting_('Días de aviso antes del vencimiento')) || 3;
+    // Si los avisos por hitos (30/15/7/3 días) están activos, ellos son el ÚNICO recordatorio
+    // PRE-vencimiento (evita duplicar el aviso de "faltan pocos días"). La rama de mora sigue igual.
+    const avisosHitoActivos = avisosVencActivos_();
     const today = new Date(); today.setHours(0, 0, 0, 0);
     for (let row = 2; row <= last; row++) {
       const loan = readLoan_(bs, row); if (!loan.loanId || !loan.email) continue;
@@ -7435,7 +7449,7 @@ function dailyTasks() {
       const lastNotice = bs.getRange(row, PB.NOTICE).getValue();
       const lastStr = (lastNotice instanceof Date) ? fmtDate_(lastNotice) : '';
       let send = false, subject = '', intro = '';
-      if (days >= 0 && days <= noticeDays && lastStr !== fmtDate_(today)) {
+      if (!avisosHitoActivos && days >= 0 && days <= noticeDays && lastStr !== fmtDate_(today)) {
         send = true; subject = 'Recordatorio: su préstamo vence pronto';
         intro = 'Le recordamos que su préstamo ' + loan.loanId + ' vence el ' + fmtDate_(due) + '.';
       } else if (days < 0) {
@@ -7451,6 +7465,215 @@ function dailyTasks() {
         } catch (e) { logError_('dailyTasks:email', e); }
       }
     }
+  });
+}
+
+/* ============ AVISOS AUTOMÁTICOS DE VENCIMIENTO (30 / 15 / 7 / 3 días) ============ */
+/** ¿Están activos los avisos por hitos de vencimiento? (Configuración, SÍ/NO). */
+function avisosVencActivos_() {
+  const v = String(getSetting_('Avisos de vencimiento activos (SÍ/NO)') || '').trim().toUpperCase();
+  return v === 'SÍ' || v === 'SI';
+}
+/** Capitaliza un nombre ("micaela daiana pedernera" → "Micaela Daiana Pedernera"), dejando en
+ *  minúscula los conectores (de, del, la, las, los, y). Para saludos y asuntos. */
+function titleCaseName_(s) {
+  s = String(s == null ? '' : s).trim().toLowerCase();
+  if (!s) return '';
+  const chicas = { 'de': 1, 'del': 1, 'la': 1, 'las': 1, 'los': 1, 'y': 1 };
+  return s.split(/\s+/).map(function (w, i) {
+    return (i > 0 && chicas[w]) ? w : (w.charAt(0).toUpperCase() + w.slice(1));
+  }).join(' ');
+}
+/** Estilo/tono del aviso según los días que faltan (color, emoji, título, bajada, nota de mora). */
+function avisoVencCfg_(dias) {
+  const M = {
+    30: { emoji: '📅', acc: '#1c4587', tin: '#eef3fb', tinText: '#1c4587', tit: 'Faltan 30 días', baj: 'Te avisamos con tiempo para que organices tu pago con tranquilidad.', mora: '' },
+    15: { emoji: '⏳', acc: '#e8a33d', tin: '#fdf6e9', tinText: '#b9791f', tit: 'Faltan 15 días', baj: 'Ya falta menos para tu vencimiento. Dejamos a mano el detalle de tu pago.', mora: '' },
+    7: { emoji: '🔔', acc: '#d2691e', tin: '#fbefe6', tinText: '#d2691e', tit: 'Faltan 7 días', baj: 'Tu pago se acerca. Abonando antes del vencimiento evitás recargos por mora.', mora: 'Recordá: pasada la fecha se aplica un recargo diario por mora sobre el total a devolver.' },
+    3: { emoji: '🔔', acc: '#c0392b', tin: '#fbeceb', tinText: '#c0392b', tit: 'Quedan 3 días', baj: 'Recordatorio final antes del vencimiento. Te pedimos coordinar tu pago a la brevedad.', mora: 'A partir de la fecha de vencimiento se aplica un recargo diario por mora sobre el total a devolver, con tope.' },
+  };
+  return M[dias] || { emoji: '📅', acc: '#1c4587', tin: '#eef3fb', tinText: '#1c4587', tit: 'Faltan ' + dias + ' días', baj: 'Te recordamos el próximo vencimiento de tu préstamo.', mora: '' };
+}
+/** Asunto del correo, atractivo y "spam-safe" (sin emojis ni signos excesivos), con el nombre. */
+function avisoVencAsunto_(nombre, dias) {
+  switch (dias) {
+    case 30: return nombre + ', faltan 30 días para el pago de tu préstamo';
+    case 15: return nombre + ', faltan 15 días para el vencimiento de tu préstamo';
+    case 7: return nombre + ', tu préstamo vence en 7 días';
+    case 3: return nombre + ', tu préstamo vence en 3 días (recordatorio final)';
+    default: return nombre + ', faltan ' + dias + ' días para el vencimiento de tu préstamo';
+  }
+}
+/** Cuerpo HTML del aviso (la cabecera/pie de marca y el logo los agrega sendBrandedEmail_). */
+function avisoVencimientoHtml_(nombre, loanId, dias, montoTxt, vencTxt, ctaUrl) {
+  const c = avisoVencCfg_(dias);
+  const hero = '<table role="presentation" width="100%" style="border-collapse:collapse;background:' + c.acc + ';border-radius:8px"><tr>' +
+    '<td style="padding:24px 18px;text-align:center;color:#fff">' +
+    '<div style="font-size:32px;line-height:1">' + c.emoji + '</div>' +
+    '<div style="font-size:28px;font-weight:bold;margin-top:8px">' + esc_(c.tit) + '</div>' +
+    '<div style="font-size:13px;opacity:.92;margin-top:4px">para el vencimiento de tu préstamo ' + esc_(loanId) + '</div>' +
+    '</td></tr></table>';
+  const box = '<table role="presentation" width="100%" style="border-collapse:collapse;background:' + c.tin + ';border-left:4px solid ' + c.acc + ';border-radius:6px;margin-top:18px"><tr>' +
+    '<td style="padding:16px 18px"><table role="presentation" width="100%" style="border-collapse:collapse;font-size:15px">' +
+    '<tr><td style="padding:3px 0;color:#555">Monto a pagar</td><td style="padding:3px 0;text-align:right;font-weight:bold;color:' + c.tinText + ';font-size:20px">' + esc_(montoTxt) + '</td></tr>' +
+    '<tr><td style="padding:3px 0;color:#555">Fecha de vencimiento</td><td style="padding:3px 0;text-align:right;font-weight:bold;color:#222">' + esc_(vencTxt) + '</td></tr>' +
+    '</table></td></tr></table>';
+  const mora = c.mora ? '<p style="font-size:13px;color:#8a5a00;background:#fff8ec;border:1px solid #f0dcae;border-radius:6px;padding:10px 12px;margin:16px 0 0">' + esc_(c.mora) + '</p>' : '';
+  const cta = ctaUrl ? '<table role="presentation" width="100%" style="border-collapse:collapse;margin-top:20px"><tr><td align="center">' +
+    '<a href="' + esc_(ctaUrl) + '" style="display:inline-block;background:' + c.acc + ';color:#fff;text-decoration:none;font-weight:bold;font-size:15px;padding:13px 28px;border-radius:8px">Ver mi saldo y cómo pagar</a></td></tr></table>' : '';
+  return hero +
+    '<p style="font-size:16px;margin:16px 0 10px">Hola ' + esc_(nombre) + ',</p>' +
+    '<p style="font-size:15px;color:#444;line-height:1.5;margin:0 0 4px">' + esc_(c.baj) + '</p>' +
+    box + mora + cta +
+    '<p style="font-size:14px;color:#444;margin:18px 0 0">Gracias por tu confianza.<br>' + esc_(companyName_()) + '</p>';
+}
+/** Resumen de la corrida en texto plano (alternativa del correo de resumen). */
+function resumenAvisosPlano_(stats, hitos, hoy) {
+  const sinAviso = Math.max(0, stats.activos - stats.enviados - stats.errores);
+  let t = 'Resumen de avisos de vencimiento\nEjecución: ' + fmtDate_(hoy) + '\n\n' +
+    'Préstamos activos evaluados: ' + stats.activos + '\n' +
+    'Avisos enviados: ' + stats.enviados + '\n' +
+    'Sin aviso hoy: ' + sinAviso + '\n' +
+    'Errores: ' + stats.errores + '\n\n' +
+    'Por hito: ' + hitos.map(function (h) { return h + ' días: ' + (stats.porHito[h] || 0); }).join(' | ') + '\n\n';
+  if (stats.filas.length) {
+    t += 'Detalle:\n';
+    stats.filas.forEach(function (f) { t += '- ' + f.loanId + ' | ' + f.nombre + ' | ' + f.dias + ' días | ' + f.monto + ' | vence ' + f.venc + ' | ' + f.res + '\n'; });
+  }
+  return t;
+}
+/** Resumen de la corrida en HTML (tarjetas + tabla), enviado al "Correo para resumen de avisos". */
+function resumenAvisosHtml_(stats, hitos, hoy) {
+  const sinAviso = Math.max(0, stats.activos - stats.enviados - stats.errores);
+  const tile = function (n, label, color, bg) {
+    return '<td style="padding:0 5px;width:25%"><div style="background:' + bg + ';border-radius:8px;padding:14px 6px;text-align:center">' +
+      '<div style="font-size:26px;font-weight:bold;color:' + color + '">' + n + '</div>' +
+      '<div style="font-size:11px;color:#667">' + label + '</div></div></td>';
+  };
+  const porHito = hitos.map(function (h) { return h + ' días: ' + (stats.porHito[h] || 0); }).join(' · ');
+  let rows = '';
+  stats.filas.forEach(function (f, i) {
+    const ok = f.res === 'OK';
+    const col = ok ? '#2e7d46' : (f.res === 'ERROR' ? '#c0392b' : '#8a7b00');
+    const txt = ok ? '✓ Enviado' : (f.res === 'ERROR' ? '✗ Error' : '– ' + esc_(f.res));
+    rows += '<tr style="background:' + (i % 2 ? '#fafbfc' : '#fff') + '">' +
+      '<td style="padding:8px 10px;border-top:1px solid #eef0f3">' + esc_(f.loanId) + '</td>' +
+      '<td style="padding:8px 10px;border-top:1px solid #eef0f3">' + esc_(f.nombre) + '</td>' +
+      '<td align="center" style="padding:8px 10px;border-top:1px solid #eef0f3">' + f.dias + ' días</td>' +
+      '<td align="right" style="padding:8px 10px;border-top:1px solid #eef0f3">' + esc_(f.monto) + '</td>' +
+      '<td style="padding:8px 10px;border-top:1px solid #eef0f3">' + esc_(f.venc) + '</td>' +
+      '<td align="center" style="padding:8px 10px;border-top:1px solid #eef0f3;color:' + col + ';font-weight:bold">' + txt + '</td></tr>';
+  });
+  if (!rows) rows = '<tr><td colspan="6" style="padding:12px 10px;color:#888;text-align:center">No se enviaron avisos en esta corrida.</td></tr>';
+  return '<p style="font-size:15px;margin:0 0 2px;color:#444">Ejecución del <b>' + esc_(fmtDate_(hoy)) + '</b></p>' +
+    '<p style="font-size:13px;margin:0 0 16px;color:#888">Avisos automáticos a clientes con préstamo activo a ' + esc_(hitos.join(' / ')) + ' días del vencimiento.</p>' +
+    '<table role="presentation" width="100%" style="border-collapse:collapse"><tr>' +
+    tile(stats.activos, 'Activos evaluados', '#1c4587', '#eef3fb') +
+    tile(stats.enviados, 'Avisos enviados', '#2e7d46', '#e7f5ec') +
+    tile(sinAviso, 'Sin aviso hoy', '#667', '#f4f5f7') +
+    tile(stats.errores, 'Errores', '#c0392b', '#fbeceb') +
+    '</tr></table>' +
+    '<p style="font-size:13px;color:#555;margin:16px 0 6px"><b>Por hito:</b> ' + esc_(porHito) + '</p>' +
+    '<table role="presentation" width="100%" style="border-collapse:collapse;font-size:13px;border:1px solid #e3e6ec;border-radius:8px;overflow:hidden">' +
+    '<tr style="background:#1c4587;color:#fff">' +
+    '<th align="left" style="padding:9px 10px">Préstamo</th><th align="left" style="padding:9px 10px">Cliente</th>' +
+    '<th align="center" style="padding:9px 10px">Hito</th><th align="right" style="padding:9px 10px">Monto</th>' +
+    '<th align="left" style="padding:9px 10px">Vence</th><th align="center" style="padding:9px 10px">Estado</th></tr>' +
+    rows + '</table>';
+}
+/**
+ * TAREA DIARIA (disparador por tiempo): recorre "Prestatarios" y envía un recordatorio por correo
+ * a cada cliente con préstamo ACTIVO cuyo vencimiento cae EXACTAMENTE a 30/15/7/3 días (lista
+ * configurable). Al final envía un RESUMEN de la corrida. Dedupe por "Último Aviso" (no reenvía el
+ * mismo día). Se instala con instalarAvisosVencimiento(). Remitente/Resumen salen de Configuración.
+ */
+function enviarAvisosVencimiento() {
+  return guard_('enviarAvisosVencimiento', function () {
+    if (!avisosVencActivos_()) return 'Avisos de vencimiento desactivados (Configuración).';
+    const hitos = String(getSetting_('Días de aviso de vencimiento (lista)') || '30,15,7,3')
+      .split(',').map(function (s) { return parseInt(String(s).trim(), 10); }).filter(function (n) { return isFinite(n) && n > 0; });
+    const hitoSet = {}; hitos.forEach(function (h) { hitoSet[h] = true; });
+    const resumenTo = String(getSetting_('Correo para resumen de avisos') || '').trim();
+    // Remitente: sólo se aplica si es un alias verificado de la cuenta (si no, se envía como la
+    // cuenta que ejecuta el script, sin fallar). Las respuestas van siempre a esa dirección.
+    const wantFrom = String(getSetting_('Correo remitente de avisos') || '').trim();
+    let fromAddr = '';
+    if (wantFrom) { try { if (GmailApp.getAliases().indexOf(wantFrom) !== -1) fromAddr = wantFrom; } catch (e) { } }
+    const replyTo = wantFrom || '';
+    const base = (typeof webAppBaseUrl_ === 'function') ? webAppBaseUrl_() : '';
+    const ctaUrl = base ? (base + '?page=saldo') : '';
+
+    const bs = getSS_().getSheetByName(CFG.SHEETS.BORROWERS), last = bs ? bs.getLastRow() : 0;
+    const stats = { activos: 0, enviados: 0, omitidos: 0, errores: 0, porHito: {}, filas: [] };
+    hitos.forEach(function (h) { stats.porHito[h] = 0; });
+    const hoy = new Date(); hoy.setHours(0, 0, 0, 0);
+
+    for (let row = 2; row <= last; row++) {
+      let loan;
+      try { loan = readLoan_(bs, row); } catch (e) { continue; }
+      if (!loan || !loan.loanId) continue;
+      const status = bs.getRange(row, PB.STATE).getValue();
+      const saldo = Number(bs.getRange(row, PB.BALANCE).getValue()) || 0;
+      if (status !== ST.ACTIVE || saldo <= 0) continue;   // SOLO préstamos activos con saldo
+      stats.activos++;
+      const due = loan.dueDate instanceof Date ? loan.dueDate : null; if (!due) continue;
+      const dias = Math.round((startOfDay_(due).getTime() - hoy.getTime()) / 86400000);
+      if (!hitoSet[dias]) continue;                        // hoy no es un hito para este préstamo
+      const nombre = titleCaseName_(loan.name) || 'cliente';
+      const montoTxt = fmtMoney_(round2_(saldo));
+      const vencTxt = fmtDate_(due);
+      const lastNotice = bs.getRange(row, PB.NOTICE).getValue();
+      const yaHoy = (lastNotice instanceof Date) && fmtDate_(lastNotice) === fmtDate_(hoy);
+      if (!loan.email) { stats.omitidos++; stats.filas.push({ loanId: loan.loanId, nombre: nombre, dias: dias, monto: montoTxt, venc: vencTxt, res: 'sin correo' }); continue; }
+      if (yaHoy) { stats.omitidos++; stats.filas.push({ loanId: loan.loanId, nombre: nombre, dias: dias, monto: montoTxt, venc: vencTxt, res: 'ya avisado hoy' }); continue; }
+      try {
+        const asunto = avisoVencAsunto_(nombre, dias);
+        const plano = 'Hola ' + nombre + ',\n\n' + avisoVencCfg_(dias).baj +
+          '\n\nPréstamo: ' + loan.loanId + '\nMonto a pagar: ' + montoTxt + '\nVence el: ' + vencTxt +
+          '\n\nGracias por tu confianza.\n' + companyName_();
+        sendBrandedEmail_(loan.email, asunto, plano, avisoVencimientoHtml_(nombre, loan.loanId, dias, montoTxt, vencTxt, ctaUrl), { from: fromAddr, replyTo: replyTo });
+        bs.getRange(row, PB.NOTICE).setValue(hoy);
+        stats.enviados++; stats.porHito[dias] = (stats.porHito[dias] || 0) + 1;
+        stats.filas.push({ loanId: loan.loanId, nombre: nombre, dias: dias, monto: montoTxt, venc: vencTxt, res: 'OK' });
+      } catch (e) {
+        logError_('enviarAvisosVencimiento:email', e);
+        stats.errores++;
+        stats.filas.push({ loanId: loan.loanId, nombre: nombre, dias: dias, monto: montoTxt, venc: vencTxt, res: 'ERROR' });
+      }
+    }
+    if (resumenTo) {
+      try {
+        const asunto = 'Resumen de avisos de vencimiento — ' + stats.enviados + ' enviados, ' + stats.errores + ' errores (' + fmtDate_(hoy) + ')';
+        sendBrandedEmail_(resumenTo, asunto, resumenAvisosPlano_(stats, hitos, hoy), resumenAvisosHtml_(stats, hitos, hoy), { from: fromAddr, replyTo: replyTo });
+      } catch (e) { logError_('enviarAvisosVencimiento:resumen', e); }
+    }
+    return 'Avisos: ' + stats.enviados + ' enviados, ' + stats.omitidos + ' omitidos, ' + stats.errores + ' errores.';
+  });
+}
+/**
+ * Instala/actualiza el disparador DIARIO de enviarAvisosVencimiento (sin duplicar) y asegura los
+ * ajustes de Configuración. Correr una vez desde el menú o el editor (pide autorización de Google).
+ */
+function instalarAvisosVencimiento() {
+  return guard_('instalarAvisosVencimiento', function () {
+    const defs = [
+      ['Avisos de vencimiento activos (SÍ/NO)', 'SÍ'],
+      ['Días de aviso de vencimiento (lista)', '30,15,7,3'],
+      ['Hora de envío de avisos de vencimiento', '8'],
+      ['Correo remitente de avisos', 'impulso.credito.ars@gmail.com'],
+      ['Correo para resumen de avisos', 'impulso.credito.ars@gmail.com'],
+    ];
+    defs.forEach(function (d) { if (!String(getSetting_(d[0]) || '').trim()) setSetting_(d[0], d[1]); });
+    ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'enviarAvisosVencimiento') ScriptApp.deleteTrigger(t); });
+    let hora = parseInt(String(getSetting_('Hora de envío de avisos de vencimiento') || '8'), 10);
+    if (!isFinite(hora) || hora < 0 || hora > 23) hora = 8;
+    ScriptApp.newTrigger('enviarAvisosVencimiento').timeBased().everyDays(1).atHour(hora).create();
+    const remitente = String(getSetting_('Correo remitente de avisos') || '').trim() || '(cuenta actual)';
+    const msg = 'Avisos de vencimiento: envío diario instalado (~' + hora + ':00 h). Remitente: ' + remitente +
+      '. Para enviar DESDE esa dirección, debe ser la cuenta que ejecuta el script o un alias verificado (Gmail ▸ Configuración ▸ "Enviar como").';
+    try { getSS_().toast(msg, '📅 Avisos instalados', 8); } catch (e) { }
+    try { SpreadsheetApp.getUi().alert(msg); } catch (e) { }
+    return msg;
   });
 }
 
