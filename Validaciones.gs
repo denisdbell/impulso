@@ -104,6 +104,8 @@ const VALIDATION_RULES = [
   ['V-33', 'Formulario y Aprobación', 'Cliente', 'Cliente BLOQUEADO (columna «Bloqueado» = SÍ en Clientes): se rechaza toda solicitud y aprobación que coincida por correo, DNI, CUIL o teléfono. ABSOLUTO: no se anula con «Anular límites». Desbloquear = vaciar la columna «Bloqueado».', 'No es posible procesar solicitudes para este cliente. Ante cualquier duda, comunicate con el prestamista.', 'BLOQUEA', 'ALTA'],
   ['V-34', 'Aprobación', 'Referencias', 'Al menos UNA referencia debe estar VALIDADA (casilla «Ref 1 Validada?» o «Ref 2 Validada?» = SÍ) en «Nuevos Prestatarios» antes de aprobar/otorgar el préstamo. No se anula con «Anular límites».', 'Validá al menos una referencia antes de aprobar el préstamo.', 'BLOQUEA', 'ALTA'],
   ['V-35', 'Formulario', 'Nombre', 'El nombre del solicitante y el de cada referencia deben tener al menos 10 caracteres.', 'El nombre debe tener al menos 10 caracteres.', 'BLOQUEA', 'MEDIA'],
+  ['V-36', 'Formulario y Aprobación', 'Cuenta de terceros', 'Si el dinero se recibe en una cuenta que NO es del solicitante (métodos distintos de Efectivo), es OBLIGATORIO declarar al titular: nombre (mín. 10 caracteres), DNI válido, correo válido, teléfono válido y fotos del DNI (frente y dorso). El DNI, el correo y el teléfono del titular deben ser DISTINTOS de los del solicitante (el nombre puede coincidir). El titular será notificado y recibirá una copia del contrato. Antes de aprobar, el titular debe CONFIRMAR su conformidad (casilla «Titular acepta?» en Nuevos Prestatarios, pedible con «Avisar al titular 📲»): ABSOLUTO, no se anula con «Anular límites». Sin estos datos la solicitud NO se procesa.', 'Para enviar el dinero a la cuenta de un tercero, completá los datos del titular (nombre, DNI, correo, teléfono y fotos del DNI) y obtené su conformidad. Sin esta información el préstamo no puede procesarse.', 'BLOQUEA', 'ALTA'],
+  ['V-37', 'Formulario', 'Cuenta destino', 'La cuenta destino (alias, CBU o CVU donde se recibe el dinero) es obligatoria para todo método que no sea Efectivo.', 'Ingresá la cuenta (alias, CBU o CVU) donde vas a recibir el dinero.', 'BLOQUEA', 'MEDIA'],
 ];
 
 /* ==================== VALIDADORES DE CAMPO ==================== */
@@ -592,6 +594,38 @@ function submitIntakeSmart(form) {
     const payMethodSel = String(form.payMethod || '').trim() || 'Mercado Pago';
     const payDetails = String(form.payDetails || '').trim();
     const payMethodFull = payDetails ? (payMethodSel + ' — ' + payDetails) : payMethodSel;
+    // Cuenta de destino / titularidad (V-36 / V-37). Por defecto el dinero va a la cuenta del
+    // solicitante; si declara la cuenta de un tercero, los datos del titular (nombre, DNI, correo
+    // y fotos del DNI) son OBLIGATORIOS y el titular será notificado con una copia del contrato.
+    const needsAccount = payMethodSel !== 'Efectivo';
+    const isThirdParty = needsAccount && String(form.acctOwn || 'si').trim().toLowerCase() === 'no';
+    if (needsAccount && !payDetails) throw new Error('Ingresá la cuenta (alias, CBU o CVU) donde vas a recibir el dinero.'); // V-37
+    let holderName = '', holderDniN = '', holderEmailN = '', holderPhoneN = '';
+    if (isThirdParty) { // V-36 — BLOQUEA
+      holderName = String(form.holderName || '').trim();
+      const hDn = vDni_(form.holderDni), hEm = vEmail_(form.holderEmail), hPh = vPhone_(form.holderPhone);
+      if (!holderName || holderName.length < 10) throw new Error('Para enviar el dinero a la cuenta de un tercero, ingresá el nombre completo del titular (mín. 10 caracteres).');
+      if (!hDn.ok) throw new Error('El DNI del titular de la cuenta no es válido (7 u 8 dígitos).');
+      if (!hEm.ok) throw new Error('El correo del titular de la cuenta no es válido.');
+      if (!hPh.ok) throw new Error('El teléfono del titular de la cuenta no es válido (10 dígitos: código de área + número).');
+      if (!hasFile_(form.holderDniFront) || !hasFile_(form.holderDniBack)) throw new Error('Subí las fotos del DNI del titular de la cuenta (frente y dorso): sin ellas el préstamo no puede procesarse.');
+      holderDniN = hDn.norm; holderEmailN = hEm.norm; holderPhoneN = hPh.norm;
+      // El titular debe ser OTRA persona: DNI, correo y teléfono no pueden coincidir con los del solicitante (el nombre sí puede).
+      if (holderDniN && holderDniN === dnV.norm) throw new Error('El DNI del titular de la cuenta no puede ser el mismo que el del solicitante.');
+      if (holderEmailN && holderEmailN === emV.norm) throw new Error('El correo del titular de la cuenta no puede ser el mismo que el del solicitante.');
+      const appPhoneNorm = (typeof normPhoneE164_ === 'function') ? normPhoneE164_(phone) : phone;
+      if (holderPhoneN && appPhoneNorm && holderPhoneN === appPhoneNorm) throw new Error('El teléfono del titular de la cuenta no puede ser el mismo que el del solicitante.');
+    }
+    // Enlace de WhatsApp para pedirle la conformidad al titular (se reutiliza en la hoja "Nuevos
+    // Prestatarios" y en el aviso al prestamista): mensaje genérico con el texto ya listo.
+    let holderWaUrl = '';
+    if (isThirdParty) {
+      const waNum = (typeof waNumberAR_ === 'function') ? waNumberAR_(holderPhoneN) : '';
+      const empresa = (typeof companyName_ === 'function') ? companyName_() : 'Impulso Crédito';
+      const waMsg = 'Buenos días ' + holderName + '. ' + name + ' quiere solicitar un préstamo de ' + fmtMoney_(amount) +
+        ' y pidió que el dinero se transfiera a tu cuenta. ¿Estás de acuerdo? Te avisamos que el contrato del préstamo se enviará al correo ' + holderEmailN + ' que nos indicaron. — ' + empresa;
+      if (waNum) holderWaUrl = 'https://wa.me/' + waNum + '?text=' + encodeURIComponent(waMsg);
+    }
     if (!address) throw new Error('La dirección es obligatoria.');   // obligatoria para nuevos y existentes
     if (!amount) throw new Error('Ingresá un monto de préstamo válido.');
     if (amount > loanMax_()) throw new Error('El monto máximo por préstamo es ' + fmtMoney_(loanMax_()) + '.'); // V-29
@@ -663,6 +697,10 @@ function submitIntakeSmart(form) {
     const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd-HHmmss');
     const dniUrl = hasFile_(form.dniPhoto) ? savePhoto_(folder, form.dniPhoto, name + ' DNI ' + stamp) : '';
     const cuilUrl = hasFile_(form.cuilPhoto) ? savePhoto_(folder, form.cuilPhoto, name + ' DNI dorso ' + stamp) : '';
+    // Fotos del DNI del titular (cuenta de terceros): misma convención de nombre para que el OCR
+    // de "Verificación de DNI" las lea con el nombre del titular.
+    const holderFrontUrl = isThirdParty ? savePhoto_(folder, form.holderDniFront, holderName + ' DNI ' + stamp) : '';
+    const holderBackUrl = isThirdParty ? savePhoto_(folder, form.holderDniBack, holderName + ' DNI dorso ' + stamp) : '';
 
     // Registro en "Nuevos Prestatarios" (mismo orden de columnas que NB).
     const ss = getSS_();
@@ -700,6 +738,24 @@ function submitIntakeSmart(form) {
       setSheetFieldByHeader_(nb, row, 'Ref 2 Teléfono', ref2PhoneN);
       setSheetFieldByHeader_(nb, row, 'Compromiso aceptado', new Date());
     } catch (e) { logError_('submitIntakeSmart:referenciasNb', e); }
+    // Cuenta de destino / titular: queda registrado en "Nuevos Prestatarios" para su revisión
+    // y para que, al aprobar, se notifique al titular con una copia del contrato (V-36).
+    try {
+      setSheetFieldByHeader_(nb, row, '¿Cuenta propia?', isThirdParty ? 'No (tercero)' : 'Sí');
+      if (isThirdParty) {
+        setSheetFieldByHeader_(nb, row, 'Titular de la cuenta', safeCell_(holderName));
+        setSheetFieldByHeader_(nb, row, 'DNI del titular', holderDniN);
+        setSheetFieldByHeader_(nb, row, 'Correo del titular', holderEmailN);
+        setSheetFieldByHeader_(nb, row, 'Teléfono del titular', holderPhoneN);
+        setSheetFieldByHeader_(nb, row, 'DNI titular (frente)', holderFrontUrl);
+        setSheetFieldByHeader_(nb, row, 'DNI titular (dorso)', holderBackUrl);
+        // Enlace de WhatsApp (en la hoja) para pedirle al TITULAR su conformidad.
+        try {
+          const waCol = setSheetFieldByHeader_(nb, row, 'Avisar al titular 📲', '');
+          if (waCol && holderWaUrl) nb.getRange(row, waCol).setFormula('=HYPERLINK("' + holderWaUrl + '","📲 Avisar al titular")');
+        } catch (e) { logError_('submitIntakeSmart:waTitular', e); }
+      }
+    } catch (e) { logError_('submitIntakeSmart:titular', e); }
     try {
       setClienteFieldByHeader_(clientId, 'Ref 1 Nombre', safeCell_(ref1Name));
       setClienteFieldByHeader_(clientId, 'Ref 1 Vínculo', safeCell_(ref1Rel));
@@ -734,6 +790,13 @@ function submitIntakeSmart(form) {
           row_('Interés', fmtMoney_(interest)) + row_('Total a devolver', fmtMoney_(total)) +
           row_('Notas / Motivo', esc_(notes)) +
           row_('Forma de pago preferida', esc_(payMethodFull)) +
+          (isThirdParty
+            ? row_('Cuenta de un tercero', '<b style="color:#a50e0e">SÍ</b> — ' + esc_(holderName) + ' · DNI ' + esc_(holderDniN) + ' · ' + esc_(holderEmailN) + ' · Tel ' + esc_(holderPhoneN)) +
+              row_('DNI del titular (frente)', holderFrontUrl ? '<a href="' + holderFrontUrl + '">Ver documento</a>' : '—') +
+              row_('DNI del titular (dorso)', holderBackUrl ? '<a href="' + holderBackUrl + '">Ver documento</a>' : '—') +
+              row_('Avisar al titular (WhatsApp)', holderWaUrl ? '<a href="' + holderWaUrl + '">📲 Pedir conformidad al titular</a>' : '— (sin teléfono válido para WhatsApp)') +
+              row_('⚠ Acción requerida', 'Antes de aprobar: pedile la conformidad al titular (botón de arriba o «Avisar al titular 📲» en la fila) y tildá «Titular acepta?».')
+            : (needsAccount ? row_('Cuenta de destino', (payDetails ? '<b>' + esc_(payDetails) + '</b> — ' : '') + 'a nombre del solicitante') : '')) +
           row_('Referencia 1 (familiar)', esc_(ref1Name + ' · ' + ref1Rel + ' · ' + ref1PhoneN) + (reuseRefs ? ' <i>(en archivo)</i>' : '')) +
           row_('Referencia 2 (no familiar)', esc_(ref2Name + ' · ' + ref2Rel + ' · ' + ref2PhoneN) + (reuseRefs ? ' <i>(en archivo)</i>' : '')) +
           row_('Compromisos de pago', 'Aceptados ✓') +
@@ -1513,8 +1576,35 @@ function intakeSmartHtml_() {
             <option value="Transferencia bancaria">Transferencia bancaria</option>
             <option value="Efectivo">Efectivo</option>
             <option value="Otro">Otro</option></select></label>
-          <label>Datos de la cuenta / alias <small style="font-weight:normal;color:#888">— alias, CBU/CVU o el medio que prefiera (opcional)</small>
-            <input name="payDetails" id="payDetails" type="text" autocomplete="off" placeholder="Ej: alias.mercadopago o CBU"></label>
+          <div id="payAcctWrap">
+            <label>Datos de la cuenta / alias <span class="req" id="rqPayDetails">*</span> <small style="font-weight:normal;color:#888">— alias, CBU o CVU donde vas a recibir el dinero</small>
+              <input name="payDetails" id="payDetails" type="text" autocomplete="off" placeholder="Ej: alias.mercadopago o CBU"></label>
+            <small class="fieldErr" id="e_payDetails"></small>
+            <label style="margin-top:6px">¿La cuenta donde vas a recibir el dinero está a tu nombre? <span class="req">*</span></label>
+            <div style="display:flex;gap:18px;flex-wrap:wrap;margin:4px 0 2px">
+              <label class="agree" style="margin:0;width:auto"><input type="radio" name="acctOwn" value="si" checked> <span>Sí, es mi cuenta</span></label>
+              <label class="agree" style="margin:0;width:auto"><input type="radio" name="acctOwn" value="no"> <span>No, es de otra persona</span></label>
+            </div>
+            <small class="fieldErr" id="e_acctOwn"></small>
+            <div id="thirdParty" style="display:none">
+              <div style="margin:10px 0;padding:9px 12px;background:#fff4e5;border:1px solid #f0b357;border-radius:8px;color:#7a4a00;font-size:13px;line-height:1.5">
+                ⚠️ <b>El titular de la cuenta será notificado y recibirá una copia del contrato.</b> Si no completás estos datos, el préstamo no puede procesarse.</div>
+              <label>Nombre completo del titular <span class="req">*</span><input name="holderName" id="holderName" autocomplete="off" placeholder="Nombre y apellido del titular"></label>
+              <small class="fieldErr" id="e_holderName"></small>
+              <div class="row2">
+                <div><label>DNI del titular <span class="req">*</span><input name="holderDni" id="holderDni" inputmode="numeric" autocomplete="off" placeholder="XX.XXX.XXX"></label>
+                  <small class="fieldErr" id="e_holderDni"></small></div>
+                <div><label>Correo del titular <span class="req">*</span><input name="holderEmail" id="holderEmail" type="email" autocomplete="off" placeholder="correo@ejemplo.com"></label>
+                  <small class="fieldErr" id="e_holderEmail"></small></div>
+              </div>
+              <label>Teléfono del titular (WhatsApp) <span class="req">*</span><input name="holderPhone" id="holderPhone" inputmode="tel" autocomplete="off" placeholder="11 XXXX XXXX"></label>
+              <small class="fieldErr" id="e_holderPhone"></small>
+              <label>Foto del frente del DNI del titular <span class="req">*</span> <span class="hint">— imagen o PDF, nítida</span><input name="holderDniFront" id="holderDniFront" type="file" accept="image/*,.pdf" capture="environment"></label>
+              <small class="fieldErr" id="e_holderDniFront"></small>
+              <label>Foto del dorso del DNI del titular <span class="req">*</span> <span class="hint">— imagen o PDF, nítida</span><input name="holderDniBack" id="holderDniBack" type="file" accept="image/*,.pdf" capture="environment"></label>
+              <small class="fieldErr" id="e_holderDniBack"></small>
+            </div>
+          </div>
           </div>
           </div><!-- /paso 4 -->
 
@@ -1675,6 +1765,9 @@ function intakeSmartHtml_() {
         var n=normPhoneC(v),ap=normPhoneC(el_('phone').value),ot=normPhoneC(other);
         if(n&&ap&&n===ap)return 'El teléfono de una referencia no puede ser el del solicitante.';
         if(n&&ot&&n===ot)return 'Las dos referencias no pueden tener el mismo teléfono.';return '';}
+      // Titular de la cuenta de destino (cuenta de terceros): nombre completo, mín. 10 caracteres.
+      function vHolderNameC(v){var s=String(v==null?'':v).trim();if(!s)return 'Ingresá el nombre completo del titular de la cuenta.';
+        if(s.length<10)return 'El nombre del titular debe tener al menos 10 caracteres.';return '';}
 
       /* ===== Muestra/oculta el error de un campo de inmediato ===== */
       function setErr(key,m,el){var e=document.getElementById('e_'+key);
@@ -1706,6 +1799,23 @@ function intakeSmartHtml_() {
           case 'agreeConseq':{var okC=el_('agreeConseq').checked;setErr('agreeConseq',okC?'':'Debe aceptar las consecuencias del impago.');el_('agreeConseqLabel').classList.toggle('invalid',!okC);return okC;}
           case 'agreeContact':{var okK=el_('agreeContact').checked;setErr('agreeContact',okK?'':'Debe aceptar la condición sobre comunicación y préstamos futuros.');el_('agreeContactLabel').classList.toggle('invalid',!okK);return okK;}
           case 'agree':{var ok=el_('agree').checked;setErr('agree',ok?'':'Debe aceptar los Términos y Condiciones para enviar la solicitud.');el_('agreeLabel').classList.toggle('invalid',!ok);return ok;}
+          case 'payDetails':{var needP=payNeedsAccount();return setErr('payDetails', needP && !String(el_('payDetails').value).trim() ? 'Ingresá la cuenta (alias, CBU o CVU) donde vas a recibir el dinero.' : '', el_('payDetails'));}
+          case 'acctOwn':return setErr('acctOwn', document.querySelector('input[name="acctOwn"]:checked') ? '' : 'Indicá si la cuenta está a tu nombre.');
+          case 'holderName':return setErr('holderName',vHolderNameC(el_('holderName').value),el_('holderName'));
+          case 'holderDni':{var hDnM=vDniC(el_('holderDni').value);
+            if(!hDnM){var hDnN=digitsOnly(el_('holderDni').value),apDnN=digitsOnly(dniEl.value);
+              if(hDnN&&apDnN&&hDnN===apDnN)hDnM='El DNI del titular no puede ser el mismo que el del solicitante.';}
+            return setErr('holderDni',hDnM,el_('holderDni'));}
+          case 'holderEmail':{var hEmM=vEmailC(el_('holderEmail').value);
+            if(!hEmM){var hEmN=String(el_('holderEmail').value||'').trim().toLowerCase(),apEmN=String(emailEl.value||'').trim().toLowerCase();
+              if(hEmN&&apEmN&&hEmN===apEmN)hEmM='El correo del titular no puede ser el mismo que el del solicitante.';}
+            return setErr('holderEmail',hEmM,el_('holderEmail'));}
+          case 'holderPhone':{var hPhM=vPhoneC(el_('holderPhone').value);
+            if(!hPhM){var hPhN=normPhoneC(el_('holderPhone').value),apPhN=normPhoneC(el_('phone').value);
+              if(hPhN&&apPhN&&hPhN===apPhN)hPhM='El teléfono del titular no puede ser el mismo que el del solicitante.';}
+            return setErr('holderPhone',hPhM,el_('holderPhone'));}
+          case 'holderDniFront':return setErr('holderDniFront',vPhotoC(el_('holderDniFront'),true),el_('holderDniFront'));
+          case 'holderDniBack':return setErr('holderDniBack',vPhotoC(el_('holderDniBack'),true),el_('holderDniBack'));
         }
         return true;
       }
@@ -1721,6 +1831,28 @@ function intakeSmartHtml_() {
       ['ref1Name','ref1Rel','ref1Phone','ref2Name','ref2Rel','ref2Phone'].forEach(function(k){bindLive(k,el_(k));});
       ['agreeRepay','agreeMora','agreeConseq','agreeContact','agree'].forEach(function(k){el_(k).addEventListener('change',function(){checkField(k);});});
       function clearErrors(keys){keys.forEach(function(k){setErr(k,'',el_(k));});}
+
+      // Cuenta de destino: por defecto es la del solicitante; si elige la de un tercero, los
+      // datos del titular pasan a ser obligatorios. "Efectivo" no requiere cuenta ni titular.
+      var THIRD_KEYS=['holderName','holderDni','holderEmail','holderPhone','holderDniFront','holderDniBack'];
+      function payNeedsAccount(){var pm=el_('payMethod');return !!pm&&pm.value!=='Efectivo';}
+      function isThirdParty(){var r=document.querySelector('input[name="acctOwn"]:checked');return !!r&&r.value==='no';}
+      function applyAcct(){
+        var wrap=el_('payAcctWrap'),tp=el_('thirdParty'),need=payNeedsAccount();
+        if(wrap)wrap.style.display=need?'':'none';
+        setRequired(el_('payDetails'),need);
+        var star=el_('rqPayDetails');if(star)star.style.display=need?'inline':'none';
+        if(!need)clearErrors(['payDetails','acctOwn']);
+        var third=need&&isThirdParty();
+        if(tp)tp.style.display=third?'':'none';
+        THIRD_KEYS.forEach(function(k){setRequired(el_(k),third);});
+        if(!third)clearErrors(THIRD_KEYS);
+      }
+      bindLive('payDetails',el_('payDetails'));
+      ['holderName','holderDni','holderEmail','holderPhone','holderDniFront','holderDniBack'].forEach(function(k){bindLive(k,el_(k));});
+      (function(){var pm=el_('payMethod');if(pm)pm.addEventListener('change',applyAcct);
+        Array.prototype.forEach.call(document.querySelectorAll('input[name="acctOwn"]'),function(r){r.addEventListener('change',applyAcct);});
+        applyAcct();})();
 
       // Requerido dinámico por modo.
       function setRequired(el,on){if(!el)return;if(on)el.setAttribute('required','required');else el.removeAttribute('required');}
@@ -1921,6 +2053,7 @@ function intakeSmartHtml_() {
         var refKeys=reusing?[]:['ref1Name','ref1Rel','ref1Phone','ref2Name','ref2Rel','ref2Phone'];
         var keys=['email','dni','fullName','phone','cuil','address'].concat(refKeys)
           .concat(['amount','term','notes','agreeRepay','agreeMora','agreeConseq','agreeContact','agree','dniPhoto','cuilPhoto']);
+        if(payNeedsAccount()){ keys=keys.concat(['payDetails','acctOwn']); if(isThirdParty()) keys=keys.concat(THIRD_KEYS); } // cuenta de destino / titular
         var firstBad=null;
         keys.forEach(function(k){if(!checkField(k)&&!firstBad)firstBad=k;});
         if(firstBad){var t=el_(firstBad)||document.getElementById('e_'+firstBad);
@@ -2006,6 +2139,7 @@ function intakeSmartHtml_() {
       function stepValid(n){
         var keys=STEP_KEYS[n]||[];
         if(n===3 && el_('reuseRefs') && el_('reuseRefs').value==='1') keys=[]; // referencias en archivo → nada que validar
+        if(n===4 && payNeedsAccount()){ keys=keys.concat(['payDetails','acctOwn']); if(isThirdParty()) keys=keys.concat(THIRD_KEYS); } // cuenta de destino / titular
         var firstBad=null;
         keys.forEach(function(k){ if(!checkField(k)&&!firstBad) firstBad=k; });
         if(firstBad){var t=el_(firstBad); if(t){ if(t.focus)try{t.focus();}catch(_){}

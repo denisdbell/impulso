@@ -898,9 +898,17 @@ function reactivateNew_(ss) {
 
   // Formato condicional por estado de la solicitud (usa toda la fila de datos).
   const verC = colByAny_(H, ['Verificado?']), rejC = colByAny_(H, ['Rechazar?']);
+  const propC = colByAny_(H, ['¿Cuenta propia?']);
   const width = sh.getMaxColumns(), rng = sh.getRange(2, 1, CFG.MAX_ROWS, width), rules = [];
+  // Decisión explícita del prestamista (prioritaria): rechazado = rojo, verificado = verde.
   if (rejC) rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=$${a1col_(rejC)}2=TRUE`).setBackground('#f4cccc').setRanges([rng]).build());
   if (verC) rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=$${a1col_(verC)}2=TRUE`).setBackground('#d9ead3').setRanges([rng]).build());
+  // Cuenta de destino (solicitudes pendientes): cuenta de un tercero = rojo, cuenta propia = verde.
+  if (propC) {
+    const pL = a1col_(propC);
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=REGEXMATCH($${pL}2,"[Tt]ercero")`).setBackground('#f4cccc').setRanges([rng]).build());
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=$${pL}2="Sí"`).setBackground('#d9ead3').setRanges([rng]).build());
+  }
   if (rules.length) sh.setConditionalFormatRules(rules);
 
   return (nueva ? 'creada' : 'actualizada') + ' · casillas + Plazo(15/30/60) + Parámetro BCRA + formato condicional';
@@ -986,6 +994,15 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
   const amount = Number(g('Monto Solicitado')) || 0;
   const term = Number(g('Plazo (días)') || g('Plazo (meses)') || g('Plazo')) || 0;
   const natId = g('Foto del frente del DNI'), workId = g('Foto del dorso del DNI');
+  // Cuenta de destino (cuenta de terceros): si la solicitud declaró la cuenta de otra persona,
+  // hay que validar que el titular aceptó, notificarlo y enviarle una copia del contrato. Se lee
+  // acá (rowVals ya cargado) ANTES de que la fila de la solicitud se borre más abajo (nb.deleteRow).
+  const isThirdParty = /tercero|^no\b/i.test(String(g('¿Cuenta propia?') || '').trim());
+  const holderName = String(g('Titular de la cuenta') || '').trim();
+  const holderEmail = String(g('Correo del titular') || '').trim();
+  const holderPhone = String(g('Teléfono del titular') || '').trim();
+  const holderDni = String(g('DNI del titular') || '').trim();
+  const holderFront = g('DNI titular (frente)'), holderBack = g('DNI titular (dorso)');
 
   // V-19 / V-01: identidad mínima.
   const dnV = vDni_(dni);
@@ -1014,6 +1031,10 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
   // No se anula con "Anular límites" (igual que V-27/V-33).
   if (!isRefValidated_(g('Ref 1 Validada?')) && !isRefValidated_(g('Ref 2 Validada?')))
     return fail('V-34 — Ninguna referencia está validada. Marcá «Ref 1 Validada?» o «Ref 2 Validada?» antes de aprobar (no se anula con «Anular límites»).');
+  // V-36 — cuenta de terceros: el TITULAR de la cuenta debe confirmar que acepta recibir el dinero
+  // (casilla «Titular acepta?»). ABSOLUTO: no se anula con «Anular límites» (igual que V-27/V-33/V-34).
+  if (isThirdParty && !isRefValidated_(g('Titular acepta?')))
+    return fail('V-36 — El titular de la cuenta de un tercero todavía no confirmó que acepta recibir el dinero. Pedile su conformidad con «Avisar al titular 📲» y tildá «Titular acepta?» (no se anula con «Anular límites»).');
 
   // BCRA MANUAL: la verificación ya NO se corre automáticamente al aprobar. Si el
   // prestamista la corrió antes (casilla "Verificar BCRA?") y quedó "RECHAZAR",
@@ -1128,9 +1149,20 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
   // Mueve las fotos a la carpeta del prestatario.
   try {
     const folder = borrowerFolder_(borrowerFolderName_(name, dnV.norm));
-    [natId, workId].forEach(u => extractDriveIds_(u).forEach(id => { try { DriveApp.getFileById(id).moveTo(folder); } catch (e) { } }));
+    [natId, workId, holderFront, holderBack].forEach(u => extractDriveIds_(u).forEach(id => { try { DriveApp.getFileById(id).moveTo(folder); } catch (e) { } }));
     bs.getRange(tRow, cliCol).setNote('📁 ' + folder.getUrl());
   } catch (e) { logError_('approveApplicantV2_:fotos', e); }
+
+  // Cuenta de terceros: deja constancia en la fila del préstamo (persiste tras borrar la solicitud).
+  if (isThirdParty) {
+    try {
+      setSheetFieldByHeader_(bs, tRow, '¿Cuenta propia?', 'No (tercero)');
+      setSheetFieldByHeader_(bs, tRow, 'Titular de la cuenta', holderName);
+      setSheetFieldByHeader_(bs, tRow, 'Correo del titular', holderEmail);
+      if (holderPhone) setSheetFieldByHeader_(bs, tRow, 'Teléfono del titular', holderPhone);
+      if (holderDni) setSheetFieldByHeader_(bs, tRow, 'DNI del titular', holderDni);
+    } catch (e) { logError_('approveApplicantV2_:titular', e); }
+  }
 
   // Aviso al prestatario: aprobado + ENLACE para revisar y firmar el contrato.
   // El enlace apunta a la página de firma (?page=firmar&loan=…); requiere la
@@ -1153,6 +1185,8 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
           cuil: cuil || '', direccion: address || '', payMethod: payMethod || '',
           principal: amount, term: term, interest: interest, totalDue: total,
           loanDate: new Date(), dueDate: addDays_(new Date(), termDays_(term)),
+          thirdParty: isThirdParty, holderName: holderName, holderDni: holderDni,
+          holderEmail: holderEmail, holderPhone: holderPhone,
         };
         contractFile = makeAgreementFile_(loanObj);
       } catch (e) { logError_('approveApplicantV2_:contratoPDF', e); }
@@ -1167,6 +1201,22 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
         row_('Interés', fmtMoney_(interest)) + row_('Total a devolver', '<b>' + fmtMoney_(total) + '</b>') +
         '</table>' + btn,
         contractFile ? { attachments: [contractFile.getAs('application/pdf')] } : {});
+      // Cuenta de terceros (V-36): se notifica al TITULAR de la cuenta y se le envía una copia
+      // del contrato para su conocimiento. En su propio try/catch: un fallo acá NO debe abortar
+      // la aprobación ni afectar el correo al prestatario (que ya se envió).
+      if (isThirdParty && holderEmail) {
+        try {
+          sendBrandedEmail_(holderEmail, 'Sos el titular de la cuenta de un préstamo — ' + loanId,
+            'Hola ' + holderName + '. ' + name + ' solicitó un préstamo (' + loanId + ') e indicó tu cuenta para recibir el dinero. Te enviamos una copia del contrato para tu conocimiento.',
+            '<p>Hola ' + esc_(holderName) + ',</p>' +
+            '<p><b>' + esc_(name) + '</b> solicitó un préstamo (' + esc_(loanId) + ') e indicó que el dinero se enviará a <b>tu cuenta</b>. Como titular de la cuenta, te enviamos <b>una copia del contrato</b> (adjunta) para tu conocimiento.</p>' +
+            '<table style="border-collapse:collapse">' +
+            row_('Solicitante', esc_(name)) + row_('Capital', fmtMoney_(amount)) +
+            row_('Total a devolver', '<b>' + fmtMoney_(total) + '</b>') + '</table>' +
+            '<p style="font-size:12px;color:#888">Si no reconocés esta solicitud, respondé este correo de inmediato.</p>',
+            contractFile ? { attachments: [contractFile.getAs('application/pdf')] } : {});
+        } catch (e) { logError_('approveApplicantV2_:holderEmail', e); }
+      }
     } catch (e) {
       // El correo NO debe hacer fallar la aprobación, pero el prestamista tiene que
       // enterarse: dejamos un aviso visible en la fila del préstamo (antes quedaba

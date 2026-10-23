@@ -103,7 +103,9 @@ const NB = ['Fecha de Envío', 'Nombre completo', 'Correo', 'DNI', 'Teléfono', 
   'Verificar BCRA?', 'Parámetro BCRA', 'CUIL', 'Nombre BCRA', 'Peor Situación', '% al día', 'Decisión', 'Puntaje BCRA', 'Calificación de Riesgo', 'Resumen BCRA', 'Dirección', 'Forma de Pago',
   'Anular límites',
   'Ref 1 Nombre', 'Ref 1 Vínculo', 'Ref 1 Teléfono', 'Ref 1 Validada?',
-  'Ref 2 Nombre', 'Ref 2 Vínculo', 'Ref 2 Teléfono', 'Ref 2 Validada?', 'Compromiso aceptado'];
+  'Ref 2 Nombre', 'Ref 2 Vínculo', 'Ref 2 Teléfono', 'Ref 2 Validada?', 'Compromiso aceptado',
+  '¿Cuenta propia?', 'Titular de la cuenta', 'DNI del titular', 'Correo del titular', 'Teléfono del titular',
+  'DNI titular (frente)', 'DNI titular (dorso)', 'Titular acepta?', 'Avisar al titular 📲'];
 
 /* ============================ MENÚ ============================ */
 function onOpen() {
@@ -2493,6 +2495,14 @@ function setupNew_(ss) {
   sh.getRange(2, 6, CFG.MAX_ROWS, 1).setNumberFormat(CFG.CURRENCY_FMT);
   [150, 170, 200, 130, 120, 130, 100, 200, 190, 190, 90, 90, 220,
     110, 120, 120, 170, 110, 90, 130, 100, 170, 460].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  // Anchos de las columnas de la cuenta de destino / titular (cuenta de terceros).
+  [['¿Cuenta propia?', 110], ['Titular de la cuenta', 180], ['DNI del titular', 120],
+    ['Correo del titular', 200], ['Teléfono del titular', 130], ['DNI titular (frente)', 160],
+    ['DNI titular (dorso)', 160], ['Titular acepta?', 120], ['Avisar al titular 📲', 150]]
+    .forEach(function (p) { const c = NB.indexOf(p[0]) + 1; if (c > 0) sh.setColumnWidth(c, p[1]); });
+  // Casilla "Titular acepta?" (cuenta de terceros): el titular confirmó que acepta recibir el dinero.
+  const taCol = NB.indexOf('Titular acepta?') + 1;
+  if (taCol > 0) { sh.getRange(2, taCol, CFG.MAX_ROWS, 1).setDataValidation(cb); sh.getRange(1, taCol).setNote('Tildá SOLO cuando el titular de la cuenta (cuenta de terceros) confirmó —por WhatsApp o teléfono— que acepta recibir el dinero. Obligatorio para aprobar; NO se anula con «Anular límites». Usá «Avisar al titular 📲» para pedir su conformidad.'); }
   sh.getRange(2, 23, CFG.MAX_ROWS, 1).setWrap(true); // Resumen BCRA
   sh.getRange('K1').setNote('Tilde "Verificado?" para aprobar (pasa a Prestatarios) o "Rechazar?" para archivar en Rechazados.');
   sh.getRange('N1').setNote('Tilde "Verificar BCRA?" para consultar la Central de Deudores del BCRA. En "Parámetro BCRA" elegí DNI o CUIL: con CUIL se usa el valor de la columna CUIL (si está vacío, se deriva del DNI).');
@@ -3916,6 +3926,27 @@ function agreementHtml_(loan, sig) {
   const firmadoEl = (sig && sig.dataUrl) ? fmtDate_(sig.signedAt || new Date()) : '__________';
   const fill = v => (v && String(v).trim()) ? esc_(v) : '<span style="color:#9aa4ad;letter-spacing:1px">________________________</span>';
   const kv = (k, v) => `<tr><td class="k">${k}</td><td>${v}</td></tr>`;
+  // Medio de pago y cuenta de destino (se DESTACAN en el contrato). "Forma de Pago" se guarda como
+  // "Método — alias/CBU/CVU"; si es la cuenta de un tercero, se incluyen sus datos (nombre/DNI/correo/teléfono).
+  const paySep = payMethod.indexOf(' — ');
+  const payMethodName = paySep >= 0 ? payMethod.slice(0, paySep).trim() : payMethod;
+  const payAlias = (loan.payAlias != null && String(loan.payAlias).trim())
+    ? String(loan.payAlias).trim() : (paySep >= 0 ? payMethod.slice(paySep + 3).trim() : '');
+  const isTP = !!loan.thirdParty;
+  let destinoRows = kv('Forma de pago', '<b>' + esc_(payMethodName) + '</b>');
+  if (payAlias) destinoRows += kv('Cuenta de destino (alias/CBU/CVU)', '<b>' + esc_(payAlias) + '</b>');
+  if (isTP) {
+    destinoRows += kv('Cuenta a nombre de', '<b>' + fill(loan.holderName) + '</b> — tercero autorizado por el Prestatario');
+    destinoRows += kv('DNI del titular', fill(loan.holderDni));
+    destinoRows += kv('Correo del titular', fill(loan.holderEmail));
+    destinoRows += kv('Teléfono del titular', fill(loan.holderPhone));
+  } else {
+    destinoRows += kv('Cuenta a nombre de', 'El Prestatario');
+  }
+  const destinoBox = `<div class="box"><div class="box-title">Medio de pago y cuenta de destino</div><table style="margin:0">${destinoRows}</table></div>`;
+  const titularidadNota = isTP
+    ? 'El dinero se transfiere, por indicación expresa del Prestatario, a la cuenta del tercero identificado arriba (' + esc_(loan.holderName || '') + '). El Prestatario declara contar con la autorización del titular, quien fue notificado y recibió copia de este contrato; el pago a esa cuenta cancela la entrega del préstamo a todos los efectos.'
+    : 'El Prestatario confirma que la cuenta usada es suya.';
   // Resumen de ubicación para el panel de firma (prioridad GPS > IP > zona horaria).
   const locSummary = s => {
     const d = (s && s.device) || {}, l = d.loc || {};
@@ -3988,10 +4019,10 @@ function agreementHtml_(loan, sig) {
 
     <h2>3. Entrega del préstamo</h2>
     <p>El Prestamista le entrega al Prestatario ${fmtMoney_(loan.principal)} por
-       ☐ efectivo &nbsp; ☐ transferencia &nbsp; ☐ Mercado Pago. Los datos de la cuenta se le informan al Prestatario por separado y
-       están disponibles cuando los pida. Comprobante N.º <span class="note">____________</span>.</p>
+       ☐ efectivo &nbsp; ☐ transferencia &nbsp; ☐ Mercado Pago. Comprobante N.º <span class="note">____________</span>.</p>
+    ${destinoBox}
     <p>Al firmar, el Prestatario confirma que recibió el monto completo. Este contrato es su recibo. El comprobante de transferencia, o
-       el recibo firmado en caso de efectivo, prueba que el dinero fue entregado. El Prestatario confirma que la cuenta usada es suya.</p>
+       el recibo firmado en caso de efectivo, prueba que el dinero fue entregado. ${titularidadNota}</p>
 
     <h2>4. Devolución</h2>
     <p>El Prestatario debe pagar <b>${fmtMoney_(loan.totalDue)}</b> antes del <b>${fmtDate_(loan.dueDate)}</b>. No hace falta ningún aviso
@@ -4000,7 +4031,7 @@ function agreementHtml_(loan, sig) {
        aviso previo. Pagar antes no reduce el monto: los ${fmtMoney_(loan.interest)} de interés son fijos, así que el total es siempre
        ${fmtMoney_(loan.totalDue)}. No hay penalidad ni cargo por pagar antes. Esto no afecta el derecho a cancelar dentro de los 10 días
        de la cláusula 8.</p>
-    <p><span class="lbl">Forma de pago elegida por el Prestatario:</span> ${esc_(payMethod)}.</p>
+    <p><span class="lbl">Forma de pago elegida por el Prestatario:</span> ${esc_(payMethodName)}${payAlias ? ' — ' + esc_(payAlias) : ''}${isTP ? ' (cuenta de un tercero: ' + esc_(loan.holderName || '') + ')' : ''}.</p>
     <table>
       <tr><th style="width:22%">Medio</th><th>Cómo funciona</th></tr>
       <tr><td class="lbl">Efectivo</td><td>Entregado en persona a cualquiera de los dos prestamistas. Se da un recibo numerado en el momento. No hay que entregarle efectivo a ninguna otra persona, salvo que el Prestamista la haya autorizado por escrito. Sin recibo, el pago no cuenta.</td></tr>
@@ -8810,6 +8841,12 @@ function borrowerLoanCols_(H) {
     venC: col(['Fecha de Vencimiento', 'Vencimiento'], PB.DUE),
     intC: col(['Interés', 'Interes'], PB.INTEREST),
     totC: col(['Total a Pagar', 'Total a pagar'], PB.TOTAL),
+    // Cuenta de destino / titular (cuenta de terceros): opcionales (0 si la columna no existe).
+    propC: col(['¿Cuenta propia?'], 0),
+    titC: col(['Titular de la cuenta'], 0),
+    tdniC: col(['DNI del titular'], 0),
+    temailC: col(['Correo del titular'], 0),
+    tphoneC: col(['Teléfono del titular'], 0),
   };
 }
 // Igual que readLoan_, pero sobre una FILA YA leída (v = valores de la fila completa, columna c → v[c-1]).
@@ -8826,6 +8863,8 @@ function parseLoanRow_(v, H, cols) {
   let rate = Number(g(cols.tasC)) || 0; if (!rate) rate = loanRateForTerm_(term);
   let interest = Number(g(cols.intC)) || 0; if (!interest) interest = round2_(principal * rate);
   let totalDue = Number(g(cols.totC)) || 0; if (!totalDue) totalDue = round2_(principal + interest);
+  const gh = cc => (cc && cc <= v.length) ? String(g(cc) || '').trim() : '';
+  const thirdParty = /tercero|^no\b/i.test(gh(cols.propC));
   return {
     loanId: g(cols.idC), clientId: clientId,
     name: c.name || '', email: c.email || '', dni: c.dni || '', phone: c.phone || '',
@@ -8834,6 +8873,8 @@ function parseLoanRow_(v, H, cols) {
     loanDate: ld,
     dueDate: g(cols.venC) instanceof Date ? g(cols.venC) : dueDateForTerm_(term || 1, ld),
     interest: interest, totalDue: totalDue,
+    thirdParty: thirdParty, holderName: gh(cols.titC), holderDni: gh(cols.tdniC),
+    holderEmail: gh(cols.temailC), holderPhone: gh(cols.tphoneC),
   };
 }
 function readLoan_(sh, row) {
@@ -8842,7 +8883,8 @@ function readLoan_(sh, row) {
   // cuya fila aún no tiene las fórmulas), para que el contrato nunca muestre $0.
   const H = headerIndex_(sh);
   const cols = borrowerLoanCols_(H);
-  const lastCol = Math.max(cols.idC, cols.cliC, cols.capC, cols.plzC, cols.tasC, cols.fecC, cols.venC, cols.intC, cols.totC);
+  const lastCol = Math.max(cols.idC, cols.cliC, cols.capC, cols.plzC, cols.tasC, cols.fecC, cols.venC, cols.intC, cols.totC,
+    cols.propC || 0, cols.titC || 0, cols.tdniC || 0, cols.temailC || 0, cols.tphoneC || 0);
   const v = sh.getRange(row, 1, 1, lastCol).getValues()[0];
   return parseLoanRow_(v, H, cols);
 }
