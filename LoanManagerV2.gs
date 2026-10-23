@@ -138,6 +138,9 @@ function onOpen() {
     .addSubMenu(ui.createMenu('📅 Avisos de vencimiento (automáticos)')
       .addItem('⏰ Instalar / actualizar envío diario', 'instalarAvisosVencimiento')
       .addItem('✉ Enviar avisos ahora (envío real a clientes)', 'enviarAvisosVencimiento'))
+    .addSubMenu(ui.createMenu('💳 Confirmaciones de pago (automáticas)')
+      .addItem('⏰ Instalar / actualizar envío diario', 'instalarConfirmacionesPago')
+      .addItem('✉ Enviar confirmaciones ahora (envío real a clientes)', 'enviarConfirmacionesPago'))
     .addSubMenu(ui.createMenu('🪪 Verificación de DNI (OCR)')
       .addItem('⏰ Instalar / actualizar escaneo diario', 'instalarVerificacionDNI')
       .addItem('🔍 Escanear ahora (solo nuevos)', 'escanearDNIAhora')
@@ -567,6 +570,11 @@ function applyFeatureUpdates() {
         const nWa = fillPaymentWaLinks_(ss);
         done.push('casilla «Generar recibo» + «Saldo Posterior» vivo en «Pagos»');
         done.push('columna «Avisar pago 📲» (WhatsApp) en «Pagos»' + (nWa ? (' · ' + nWa + ' fila(s)') : ''));
+        // Columna "Confirmación enviada": marca del envío diario de confirmaciones de pago. Al crearla
+        // por primera vez, marca los pagos ya existentes como "previo" (no reenvía el histórico).
+        const confCol = ensureConfirmColumn_(psh);
+        if (confCol > 0) psh.setColumnWidth(confCol, 150);
+        done.push('columna «Confirmación enviada» (correo diario) en «Pagos»');
       }
     } catch (e) { logError_('applyFeatureUpdates:pagos', e); }
     // 7b) Congelamiento de préstamos: columnas "Congelado el" (fecha) + "Días congelados" (auto)
@@ -1311,7 +1319,7 @@ function setupPayments_(ss) {
   // Modelo normalizado: la identidad vive en "Clientes". Nombre y DNI se muestran
   // aquí por comodidad (se autocompletan al elegir el ID Préstamo); no son la
   // fuente de verdad. El ID Pago se autogenera (P-0001, P-0002, …).
-  const H = ['ID Pago', 'ID Préstamo', 'Fecha de Pago', 'Monto Pagado', 'Saldo Posterior', 'Recibo Enviado', 'Nombre', 'DNI', 'Enviar recibo', 'Generar recibo', 'Avisar pago 📲'];
+  const H = ['ID Pago', 'ID Préstamo', 'Fecha de Pago', 'Monto Pagado', 'Saldo Posterior', 'Recibo Enviado', 'Nombre', 'DNI', 'Enviar recibo', 'Generar recibo', 'Avisar pago 📲', 'Confirmación enviada'];
   sh.getRange(1, 1, 1, H.length).setValues([H]).setFontWeight('bold').setBackground('#38761d').setFontColor('#fff');
   sh.setFrozenRows(1);
   sh.getRange(2, PP.DATE, CFG.MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd')
@@ -1322,8 +1330,9 @@ function setupPayments_(ss) {
   // "Saldo Posterior" VIVO: lo que falta pagar del préstamo tras cada pago, INCLUIDA la mora.
   const balF = []; for (let r = 2; r <= CFG.MAX_ROWS + 1; r++) balF.push([paymentBalanceFormula_(r)]);
   sh.getRange(2, PP.BALANCE, balF.length, 1).setFormulas(balF);
-  [140, 90, 110, 120, 130, 150, 200, 110, 110, 110, 130].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  [140, 90, 110, 120, 130, 150, 200, 110, 110, 110, 130, 150].forEach((w, i) => sh.setColumnWidth(i + 1, w));
   sh.getRange(1, PP.WA_PAYMENT).setNote('Enlace de WhatsApp con el AVISO DE PAGO listo (confirma el pago recibido, el saldo pendiente y el vencimiento). Se arma solo al registrar el pago; "sin teléfono" si el cliente no tiene un número válido.');
+  sh.getRange(1, H.length).setNote('Fecha en que el ENVÍO DIARIO de confirmaciones de pago mandó el correo de esta fila (no reenvía). "previo" = pago anterior a activar el envío; "sin correo"/"sin préstamo" = no se pudo enviar. Vaciá la celda para forzar un reenvío.');
   sh.getRange(1, PP.SEND_RECEIPT).setNote('Tildá para ENVIAR por correo el recibo de pago de esa fila. Se destilda solo y deja el enlace en "Recibo Enviado". (Si el prestatario no tiene correo, usá "Generar recibo".)');
   sh.getRange(1, PP.GEN_RECEIPT).setNote('Tildá para GENERAR el PDF del recibo (con monto pagado y saldo pendiente) sin enviar correo. Se destilda solo y deja el enlace en "Recibo Enviado".');
   sh.getRange(1, PP.BALANCE).setNote('Lo que falta pagar del préstamo después de este pago, INCLUIDA la mora (= "Saldo con Mora" del prestatario en el último pago). Se calcula solo.');
@@ -4228,6 +4237,12 @@ function recordPayment(loanId, amountStr, dateStr) {
     const row = appendPaymentRowFixed_(psh, [payId, loanId, payDate, amount, '', '', loan.name || '', loan.dni || '']);
     psh.getRange(row, PP.BALANCE).setFormula(paymentBalanceFormula_(row)); // saldo vivo (no un valor fijo)
     psh.getRange(row, PP.DATE).setNumberFormat('yyyy-mm-dd'); psh.getRange(row, PP.AMOUNT, 1, 2).setNumberFormat(CFG.CURRENCY_FMT);
+    // Aviso de pago por WhatsApp (col. «Avisar pago 📲»): mismo enlace que arma la edición directa de
+    // Pagos. loanWaStatus_ ya cuenta este pago (la fila se agregó arriba). "sin teléfono" si no hay número.
+    try {
+      const waF = paymentWaFormula_(loan, payDate, amount);
+      psh.getRange(row, PP.WA_PAYMENT).setValue(waF || 'sin teléfono'); // setValue trata "=…" como fórmula
+    } catch (e) { logError_('recordPayment:waPago', e); }
     updateLoanOutstanding_(loanId);
     if (loan.email) {
       // Recibo de pago como PDF numerado, adjunto al correo de confirmación y enlazado en "Recibo".
@@ -8069,6 +8084,271 @@ function instalarAvisosVencimiento() {
     const msg = 'Avisos de vencimiento: envío diario instalado (~' + hora + ':00 h). Remitente: ' + remitente +
       '. Para enviar DESDE esa dirección, debe ser la cuenta que ejecuta el script o un alias verificado (Gmail ▸ Configuración ▸ "Enviar como").';
     try { getSS_().toast(msg, '📅 Avisos instalados', 8); } catch (e) { }
+    try { SpreadsheetApp.getUi().alert(msg); } catch (e) { }
+    return msg;
+  });
+}
+
+/* ============== CONFIRMACIONES DE PAGO (correo diario, una por pago) ============== */
+
+/** ¿Está activo el envío diario de confirmaciones de pago? (Configuración SÍ/NO). */
+function confirmacionesPagoActivas_() {
+  const v = String(getSetting_('Confirmaciones de pago activas (SÍ/NO)') || '').trim().toUpperCase();
+  return v === 'SÍ' || v === 'SI';
+}
+
+/** Asegura la columna "Confirmación enviada" en "Pagos". Si la crea por PRIMERA vez, marca los pagos
+ *  ya existentes como "previo" para no reenviar el histórico (sólo se confirman los pagos nuevos).
+ *  Devuelve el número de columna. */
+function ensureConfirmColumn_(ps) {
+  const existed = !!headerMap_(ps)['Confirmación enviada'];
+  const col = clientesHeaderCol_(ps, 'Confirmación enviada', true);
+  if (!existed && ps.getLastRow() >= 2) {
+    const n = ps.getLastRow() - 1;
+    const cur = ps.getRange(2, col, n, 1).getValues();
+    const ids = ps.getRange(2, PP.LOAN_ID, n, 1).getValues();
+    const amts = ps.getRange(2, PP.AMOUNT, n, 1).getValues();
+    let changed = false;
+    for (let i = 0; i < n; i++) {
+      const id = String(ids[i][0] || '').trim(), amt = Number(amts[i][0]) || 0;
+      if ((cur[i][0] === '' || cur[i][0] == null) && id && amt) { cur[i][0] = 'previo'; changed = true; }
+    }
+    if (changed) ps.getRange(2, col, n, 1).setValues(cur);
+  }
+  return col;
+}
+
+/**
+ * Envío DIARIO (y botón "✉ Enviar confirmaciones ahora"): confirma por correo los pagos que todavía
+ * NO fueron confirmados (normalmente los de hoy; también barre los que hayan quedado pendientes). Un
+ * correo por CLIENTE, con una tarjeta por préstamo, reusando la MISMA redacción del aviso de pago por
+ * WhatsApp (paymentWaMsg_) pero en HTML con la estética de la marca. Marca cada fila en "Confirmación
+ * enviada" para no reenviar. Es independiente del recibo instantáneo de recordPayment (ambos conviven).
+ */
+function enviarConfirmacionesPago() {
+  return guard_('enviarConfirmacionesPago', function () {
+    if (!confirmacionesPagoActivas_()) return 'Confirmaciones de pago desactivadas (Configuración).';
+    const ps = getSS_().getSheetByName(CFG.SHEETS.PAYMENTS);
+    if (!ps || ps.getLastRow() < 2) return 'Confirmaciones de pago: no hay pagos.';
+    // Remitente / resumen: se reusan los mismos ajustes que los avisos de vencimiento.
+    const resumenTo = String(getSetting_('Correo para resumen de avisos') || '').trim();
+    const wantFrom = String(getSetting_('Correo remitente de avisos') || '').trim();
+    let fromAddr = '';
+    if (wantFrom) { try { if (GmailApp.getAliases().indexOf(wantFrom) !== -1) fromAddr = wantFrom; } catch (e) { } }
+    const emailOpts = { from: fromAddr, replyTo: wantFrom || '' };
+
+    const confCol = ensureConfirmColumn_(ps);     // crea + backfillea "previo" si recién se agrega
+    const last = ps.getLastRow();
+    const width = Math.max(confCol, PP.WA_PAYMENT);
+    const vals = ps.getRange(2, 1, last - 1, width).getValues();
+    const hoy = new Date(); hoy.setHours(0, 0, 0, 0);
+
+    // Agrupa los pagos PENDIENTES de confirmar por cliente (correo) → por préstamo.
+    const loanCache = {}, statusCache = {}, byClient = {};
+    const noEmailRows = [], noLoanRows = [];
+    for (let i = 0; i < vals.length; i++) {
+      const r = vals[i];
+      const already = r[confCol - 1];
+      if (already !== '' && already != null) continue;            // ya confirmado (fecha o sentinel)
+      const loanId = String(r[PP.LOAN_ID - 1] || '').trim();
+      const amount = Number(r[PP.AMOUNT - 1]) || 0;
+      if (!loanId || !amount) continue;                            // fila vacía / sin monto: no se marca
+      if (!(loanId in loanCache)) loanCache[loanId] = findLoanById_(loanId);
+      const loan = loanCache[loanId];
+      if (!loan) { noLoanRows.push(i); continue; }                 // préstamo no está en "Prestatarios"
+      const email = String(loan.email || '').trim();
+      if (!email) { noEmailRows.push(i); continue; }
+      const pdate = r[PP.DATE - 1] instanceof Date ? r[PP.DATE - 1] : new Date();
+      const c = byClient[email] || (byClient[email] = { name: loan.name || 'cliente', loans: {} });
+      const lg = c.loans[loanId] || (c.loans[loanId] = { loan: loan, pays: [], rows: [] });
+      lg.pays.push({ date: pdate, amount: amount });
+      lg.rows.push(i);
+    }
+
+    // Copia editable de "Confirmación enviada" (se vuelca al final en UNA sola escritura).
+    const confOut = vals.map(function (r) { return [r[confCol - 1]]; });
+    let dirty = false;
+    const stamp = function (idx, v) { confOut[idx][0] = v; dirty = true; };
+
+    const stats = { clientes: 0, correos: 0, pagos: 0, sinCorreo: noEmailRows.length, sinPrestamo: noLoanRows.length, errores: 0 };
+    Object.keys(byClient).forEach(function (email) {
+      const c = byClient[email], loanIds = Object.keys(c.loans);
+      // Estado de cada préstamo calculado UNA vez (tras todos los pagos, ya escritos en la hoja).
+      const cards = loanIds.map(function (lid) {
+        const lg = c.loans[lid];
+        if (!(lid in statusCache)) statusCache[lid] = loanWaStatus_(lg.loan);
+        return paymentConfirmCardHtml_(lg.loan, statusCache[lid], lg.pays);
+      });
+      const totalPays = loanIds.reduce(function (n, lid) { return n + c.loans[lid].pays.length; }, 0);
+      const nombre = titleCaseName_(c.name) || 'cliente';
+      const html = '<p style="font-size:15px;margin:0 0 4px">¡Hola ' + esc_(nombre) + '! 👋 Confirmamos ' +
+        (totalPays > 1 ? 'tus pagos' : 'tu pago') + ' de hoy:</p>' + cards.join('') +
+        '<p style="font-size:13px;color:#666;margin-top:16px">Guardá este correo como comprobante. ¡Gracias por tu confianza!</p>';
+      // Texto plano: reusa la redacción de WhatsApp de cada préstamo (una sección por préstamo).
+      const plano = loanIds.map(function (lid) {
+        const lg = c.loans[lid], amt = lg.pays.reduce(function (s, p) { return s + p.amount; }, 0);
+        return paymentWaMsg_(lg.loan, statusCache[lid], lg.pays[lg.pays.length - 1].date, amt);
+      }).join('\n\n— — —\n\n');
+      const subject = loanIds.length > 1
+        ? ('Confirmación de tus pagos — ' + companyName_())
+        : ('Confirmación de tu pago — préstamo ' + loanIds[0]);
+      try {
+        sendBrandedEmail_(email, subject, plano, html, emailOpts);
+        stats.correos++; stats.clientes++;
+        loanIds.forEach(function (lid) { c.loans[lid].rows.forEach(function (idx) { stamp(idx, hoy); stats.pagos++; }); });
+      } catch (e) {
+        logError_('enviarConfirmacionesPago:email', e); stats.errores++;
+      }
+    });
+    // Sentinels para no reintentar indefinidamente filas sin correo / sin préstamo (auditables; vaciar para reintentar).
+    noEmailRows.forEach(function (idx) { stamp(idx, 'sin correo'); });
+    noLoanRows.forEach(function (idx) { stamp(idx, 'sin préstamo'); });
+    if (dirty) ps.getRange(2, confCol, confOut.length, 1).setValues(confOut);
+
+    const resumen = 'Confirmaciones de pago: ' + stats.correos + ' correo(s) a ' + stats.clientes +
+      ' cliente(s) · ' + stats.pagos + ' pago(s)' +
+      (stats.sinCorreo ? (' · ' + stats.sinCorreo + ' sin correo') : '') +
+      (stats.sinPrestamo ? (' · ' + stats.sinPrestamo + ' sin préstamo') : '') +
+      (stats.errores ? (' · ' + stats.errores + ' error(es)') : '') + '.';
+    if (resumenTo && (stats.correos || stats.errores)) {
+      try {
+        sendBrandedEmail_(resumenTo, 'Resumen de confirmaciones de pago (' + fmtDate_(hoy) + ')',
+          resumen, '<p>' + esc_(resumen) + '</p>', emailOpts);
+      } catch (e) { logError_('enviarConfirmacionesPago:resumen', e); }
+    }
+    try { getSS_().toast(resumen, '💳 Confirmaciones de pago', 8); } catch (e) { }
+    return resumen;
+  });
+}
+
+/** Tarjeta HTML (una por préstamo) del correo de confirmación de pago. Refleja el MISMO estado y la
+ *  MISMA redacción que paymentWaMsg_ (saldado / congelado / en plan / cuotas / atrasado / al día),
+ *  pero con la estética de la marca. pays = [{date, amount}] del préstamo en el día.
+ *  IMPORTANTE: si cambia la redacción de paymentWaMsg_, actualizá también esta función (van a la par). */
+function paymentConfirmCardHtml_(loan, s, pays) {
+  const tz = Session.getScriptTimeZone();
+  const money = function (n) { return esc_(fmtMoney_(n)); };
+  const dmy = function (d) { return d instanceof Date ? Utilities.formatDate(d, tz, 'dd/MM/yyyy') : ''; };
+  const navy = BRAND.navy, amber = BRAND.amber, green = '#38761d', red = '#b00020';
+  const paidToday = pays.reduce(function (a, p) { return a + (Number(p.amount) || 0); }, 0);
+  const fVenc = (loan && loan.dueDate instanceof Date) ? dmy(loan.dueDate) : '';
+
+  // Insignia + cifras + banner según el escenario (mismo orden de decisión que paymentWaMsg_).
+  let badge, badgeBg, banner = '';
+  const figs = [['Pagado hoy', '<b>' + money(paidToday) + '</b>']];
+  if (s.paidOff) {
+    badge = '✅ SALDADO'; badgeBg = green;
+    let b = '¡Tu préstamo quedó <b>SALDADO</b>! Gracias por tu cumplimiento.';
+    if (s.limit != null) b += '<br>Tu límite actual para un nuevo préstamo es <b>' + money(s.limit) + '</b>.';
+    const base = webAppBaseUrl_();
+    if (base) b += '<br><a href="' + esc_(base) + '" style="display:inline-block;margin-top:10px;background:' + green + ';color:#fff;text-decoration:none;padding:9px 16px;border-radius:6px;font-weight:bold">Pedí tu próximo préstamo</a>';
+    banner = bannerHtml_(b, green, '#eef6ee');
+    figs.push(['Total para cancelar', '<b>' + money(0) + '</b>']);
+  } else if (s.frozen) {
+    badge = '❄ CONGELADO'; badgeBg = navy;
+    const fSince = s.frz && s.frz.since instanceof Date ? dmy(s.frz.since) : '';
+    banner = bannerHtml_('Tu préstamo está <b>congelado</b>' + (fSince ? (' desde el ' + esc_(fSince)) : '') + ': la mora <b>no sigue creciendo</b>.', navy, '#eef2f8');
+    figs.push(['Saldo pendiente', money(s.baseOwed) + (s.mora > 0.009 ? (' <span style="color:#888">+ mora congelada ' + money(s.mora) + '</span>') : '')]);
+    figs.push(['Total para cancelar', '<b>' + money(s.toClear) + '</b>']);
+  } else if (s.onPlan) {
+    badge = '📋 EN PLAN'; badgeBg = amber;
+    banner = bannerHtml_('Estás en un <b>plan de pago</b>: la mora quedó <b>suspendida</b> mientras cumplas las cuotas.', amber, '#fcf3e3');
+    figs.push(['Total del plan pendiente', '<b>' + money(s.baseOwed) + '</b>']);
+  } else if (s.multiCuota) {
+    badge = 'CUOTAS'; badgeBg = navy;
+    if (s.late && s.mora > 0.009) {
+      figs.push(['Falta pagar', money(s.baseOwed)]);
+      figs.push(['Mora por atraso', money(s.mora)]);
+      figs.push(['Total para cancelar', '<b>' + money(s.toClear) + '</b>']);
+    } else {
+      figs.push(['Falta pagar en total', '<b>' + money(s.baseOwed) + '</b>']);
+    }
+    if (fVenc) banner = bannerHtml_((s.late ? 'Venció el ' : 'Vence el ') + '<b>' + esc_(fVenc) + '</b>.', s.late ? red : navy, s.late ? '#fbecee' : '#eef2f8');
+  } else if (s.late && s.mora > 0.009) {
+    badge = '⚠ ATRASADO'; badgeBg = red;
+    figs.push(['Saldo pendiente', money(s.baseOwed)]);
+    figs.push(['Mora por atraso', money(s.mora)]);
+    figs.push(['Total para cancelar', '<b>' + money(s.toClear) + '</b>']);
+    banner = bannerHtml_('Tu préstamo está <b>atrasado</b>.' + (fVenc ? (' Venció el <b>' + esc_(fVenc) + '</b>.') : ''), red, '#fbecee');
+  } else {
+    badge = 'AL DÍA'; badgeBg = green;
+    figs.push(['Saldo pendiente', '<b>' + money(s.baseOwed) + '</b>']);
+    if (fVenc) banner = bannerHtml_('Vence el <b>' + esc_(fVenc) + '</b>.', navy, '#eef2f8');
+  }
+
+  // Lista de cuotas (en plan y en cuotas múltiples), mismo criterio ✅/🔸/⬜ que cuotaLines_.
+  const cuotasHtml = ((s.onPlan || s.multiCuota) && s.cuotas && s.cuotas.length) ? cuotasTableHtml_(s.cuotas) : '';
+
+  // Línea(s) del/los pago(s) del día.
+  let payLine;
+  if (pays.length === 1) {
+    payLine = 'Confirmamos tu pago de <b>' + money(paidToday) + '</b>' + (pays[0].date ? (' del <b>' + esc_(dmy(pays[0].date)) + '</b>') : '') + '.';
+  } else {
+    payLine = 'Confirmamos tus <b>' + pays.length + '</b> pagos de hoy (total <b>' + money(paidToday) + '</b>): ' +
+      pays.map(function (p) { return money(p.amount); }).join(' + ') + '.';
+  }
+
+  const figRows = figs.map(function (f) {
+    return '<tr><td style="padding:7px 12px;border:1px solid #e3e8ef;background:#f6f8fb;color:#3d4952;font-weight:bold;width:52%">' + f[0] +
+      '</td><td style="padding:7px 12px;border:1px solid #e3e8ef">' + f[1] + '</td></tr>';
+  }).join('');
+
+  return '<div style="border:1px solid #e3e8ef;border-radius:10px;overflow:hidden;margin:14px 0">' +
+    '<table style="width:100%;border-collapse:collapse;background:' + navy + ';color:#fff"><tr>' +
+      '<td style="padding:10px 14px;font-size:15px;font-weight:bold">Préstamo ' + esc_(loan.loanId) + '</td>' +
+      '<td style="padding:10px 14px;text-align:right">' +
+        '<span style="background:' + badgeBg + ';color:#fff;font-size:12px;font-weight:bold;padding:3px 10px;border-radius:12px;border:1px solid rgba(255,255,255,.55)">' + esc_(badge) + '</span>' +
+      '</td></tr></table>' +
+    '<div style="padding:14px">' +
+      '<p style="margin:0 0 10px">' + payLine + '</p>' +
+      '<table style="border-collapse:collapse;width:100%;font-size:14px">' + figRows + '</table>' +
+      cuotasHtml + banner +
+    '</div></div>';
+}
+
+/** Banner de color para la tarjeta (innerHtml ya armado y escapado por el llamador). */
+function bannerHtml_(innerHtml, borderColor, bgColor) {
+  return '<div style="margin-top:12px;padding:10px 12px;border-left:4px solid ' + borderColor + ';background:' + bgColor + ';border-radius:4px;font-size:14px;line-height:1.5">' + innerHtml + '</div>';
+}
+
+/** Tabla de cuotas (✅ pagada / 🔸 parcial / ⬜ pendiente) para el correo. Mismo criterio que cuotaLines_. */
+function cuotasTableHtml_(cuotas) {
+  const tz = Session.getScriptTimeZone(), n = cuotas.length;
+  const rows = cuotas.map(function (c) {
+    const etq = 'Cuota ' + c.num + '/' + n;
+    const venc = c.due instanceof Date ? Utilities.formatDate(c.due, tz, 'dd/MM/yyyy') : '';
+    let ico, txt;
+    if (c.saldo <= 0.009) { ico = '✅'; txt = esc_(fmtMoney_(c.monto)) + ' <span style="color:#38761d;font-weight:bold">PAGADA</span>'; }
+    else if (c.pagado > 0.009) { ico = '🔸'; txt = 'pagaste ' + esc_(fmtMoney_(c.pagado)) + ' de ' + esc_(fmtMoney_(c.monto)) + ', falta <b>' + esc_(fmtMoney_(c.saldo)) + '</b>' + (venc ? (' <span style="color:#888">(vence ' + esc_(venc) + ')</span>') : ''); }
+    else { ico = '⬜'; txt = esc_(fmtMoney_(c.monto)) + ' pendiente' + (venc ? (' <span style="color:#888">(vence ' + esc_(venc) + ')</span>') : ''); }
+    return '<tr><td style="padding:4px 8px;border:1px solid #eef0f3;white-space:nowrap;vertical-align:top">' + ico + ' ' + etq +
+      '</td><td style="padding:4px 8px;border:1px solid #eef0f3">' + txt + '</td></tr>';
+  }).join('');
+  return '<table style="border-collapse:collapse;width:100%;font-size:13px;margin-top:12px">' + rows + '</table>';
+}
+
+/**
+ * Instala/actualiza el disparador DIARIO de enviarConfirmacionesPago (sin duplicar), asegura los
+ * ajustes de Configuración y marca el histórico como "previo" para no reenviarlo. Correr una vez
+ * desde el menú o el editor (pide autorización de Google).
+ */
+function instalarConfirmacionesPago() {
+  return guard_('instalarConfirmacionesPago', function () {
+    const defs = [
+      ['Confirmaciones de pago activas (SÍ/NO)', 'SÍ'],
+      ['Hora de envío de confirmaciones de pago', '21'],
+    ];
+    defs.forEach(function (d) { if (!String(getSetting_(d[0]) || '').trim()) setSetting_(d[0], d[1]); });
+    // Asegura la columna marca (y marca el histórico como "previo" al crearla por primera vez).
+    try { const ps = getSS_().getSheetByName(CFG.SHEETS.PAYMENTS); if (ps) ensureConfirmColumn_(ps); } catch (e) { logError_('instalarConfirmacionesPago:col', e); }
+    ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'enviarConfirmacionesPago') ScriptApp.deleteTrigger(t); });
+    let hora = parseInt(String(getSetting_('Hora de envío de confirmaciones de pago') || '21'), 10);
+    if (!isFinite(hora) || hora < 0 || hora > 23) hora = 21;
+    ScriptApp.newTrigger('enviarConfirmacionesPago').timeBased().everyDays(1).atHour(hora).create();
+    const remitente = String(getSetting_('Correo remitente de avisos') || '').trim() || '(cuenta actual)';
+    const msg = 'Confirmaciones de pago: envío diario instalado (~' + hora + ':00 h). Confirma por correo los pagos del día ' +
+      '(una vez por pago). Los pagos anteriores quedaron marcados como "previo" y no se reenvían. Remitente: ' + remitente + '.';
+    try { getSS_().toast(msg, '💳 Confirmaciones instaladas', 8); } catch (e) { }
     try { SpreadsheetApp.getUi().alert(msg); } catch (e) { }
     return msg;
   });
