@@ -646,7 +646,8 @@ function writeBorrowerRowFormulas_(bs, r) {
   setF(['Estado'], `=IF($${A}${r}="","",IF($${BM}${r}<=0,"${ST.PAID}",IF(OR(${cuotaVencidaExpr_('$' + A + r)},TODAY()>$${G}${r}),"${ST.OVERDUE}",IF(${planExpr},"${ST.PLAN}","${ST.ACTIVE}"))))`);
   // Enlace de Firma = enlace clicable a la página de firma del contrato (o "✔ Firmado").
   const firmaC = colByAny_(H, ['Estado de Firma']);
-  setF(['Enlace de Firma'], signingLinkFormula_(r, A, firmaC ? a1col_(firmaC) : '', webAppBaseUrl_()));
+  const tokFC = colByAny_(H, ['Token de acceso']);
+  setF(['Enlace de Firma'], signingLinkFormula_(r, A, firmaC ? a1col_(firmaC) : '', webAppBaseUrl_(), tokFC ? a1col_(tokFC) : ''));
 }
 
 /* ============================ PAGOS ============================ */

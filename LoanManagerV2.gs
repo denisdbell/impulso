@@ -449,6 +449,9 @@ function applyFeatureUpdates() {
       'Pago inicial para plan flexible (%)',
       // Tramo grande ($300k–$500k): tamaño objetivo de cada cuota para que sea manejable (↓ default).
       'Cuota manejable objetivo (tramo grande)',
+      // Seguridad de enlaces (token por préstamo + anti-fuerza bruta).
+      'Vigencia del enlace (minutos)', 'Exigir token en enlaces (SÍ/NO)',
+      'Intentos antes de bloquear (enlaces)', 'Bloqueo por intentos (minutos)',
     ]);
     done.push(nAdded ? (nAdded + ' ajuste(s) nuevo(s) en «Configuración»') : '«Configuración» ya estaba al día');
     // Prefill del tope de concentración (10%) si quedó en blanco, para que sea visible/editable.
@@ -735,6 +738,11 @@ function setupSettings_(ss) {
     ['Ventana para estimar el ritmo de colocación (días)', '60'],
     ['Aceptar solicitudes de préstamo (SÍ/NO)', 'SÍ'],
     ['Capturar ubicación en la firma (SÍ/NO)', 'SÍ'],
+    // Seguridad de los enlaces de autogestión (firma/saldo/congelar/plan): token por préstamo + anti-fuerza bruta.
+    ['Vigencia del enlace (minutos)', '1440'],
+    ['Exigir token en enlaces (SÍ/NO)', 'SÍ'],
+    ['Intentos antes de bloquear (enlaces)', '8'],
+    ['Bloqueo por intentos (minutos)', '15'],
     // Avisos automáticos de vencimiento (recordatorios a 30/15/7/3 días; ver enviarAvisosVencimiento).
     ['Avisos de vencimiento activos (SÍ/NO)', 'SÍ'],
     ['Días de aviso de vencimiento (lista)', '30,15,7,3'],
@@ -767,7 +775,8 @@ function setupBorrowers_(ss) {
     'Fecha del Préstamo', 'Fecha de Vencimiento', 'Interés', 'Total a Pagar',
     'Total Pagado', 'Saldo Pendiente (hoy)', 'Estado', 'Contrato PDF', 'Contrato Enviado', 'Último Aviso',
     'Estado de Firma', 'Fecha de Firma', 'Contrato Firmado (PDF)', 'Eliminar', 'Enviar recibo desembolso', 'Préstamos (de ' + MAX_LOANS_PER_CLIENT + ')',
-    'Recargo por Mora (acum.)', 'Mora (ajuste)', 'Saldo con Mora', 'Suma de cuotas', 'Congelado el', 'Días congelados', 'Plan desde'];
+    'Recargo por Mora (acum.)', 'Mora (ajuste)', 'Saldo con Mora', 'Suma de cuotas', 'Congelado el', 'Días congelados', 'Plan desde',
+    'Token de acceso', 'Token emitido'];
   sh.getRange(1, 1, 1, H.length).setValues([H]).setFontWeight('bold').setBackground('#1c4587').setFontColor('#fff').setWrap(true);
   sh.getRange(1, PB.DELETE).setBackground('#990000').setNote('Tildá para ELIMINAR ese préstamo (borra la fila; recuperable con el historial de versiones).');
   sh.getRange(1, PB.SEND_DISB).setNote('Tildá para enviar el recibo de DESEMBOLSO (entrega de fondos) al prestatario. Sólo se envía si el contrato está FIRMADO. Se destilda solo.');
@@ -926,12 +935,13 @@ function borrowerPlanTotalFormula_(r, aCol, totCol) {
  * = letras A1 de "ID Préstamo" y "Estado de Firma"; `base` = URL base de la app web
  * (webAppBaseUrl_()), fijada al escribir la fórmula.
  */
-function signingLinkFormula_(r, A, firmaL, base) {
+function signingLinkFormula_(r, A, firmaL, base, tokL) {
   const a = '$' + A + r;
   if (!base) return `=IF(${a}="","","Publicá la app web (menú ⑥) para el enlace de firma")`;
   // URL = texto visible Y destino del HYPERLINK: así la celda muestra el enlace real y, al
-  // copiarla, se copia la URL (no una etiqueta).
-  const url = `"${base}?page=firmar&loan="&${a}`;
+  // copiarla, se copia la URL (no una etiqueta). Incluye el token de acceso (&t=…) si existe.
+  const tpart = tokL ? `&IF($${tokL}${r}="","","&t="&$${tokL}${r})` : '';
+  const url = `"${base}?page=firmar&loan="&${a}${tpart}`;
   const link = `HYPERLINK(${url},${url})`;
   if (!firmaL) return `=IF(${a}="","",${link})`;
   return `=IF(${a}="","",IF($${firmaL}${r}="${SIGN.SIGNED}","✔ Firmado",${link}))`;
@@ -1250,6 +1260,79 @@ function logDeviceInfo_(loan, clientId, meta) {
     String((meta && meta.userAgent) || dev.userAgent || '').slice(0, 300),
   ]);
   return sh;
+}
+
+/**
+ * JS (como texto) para capturar la huella de dispositivo + IP + ubicación en una página pública
+ * (mismo esquema que la firma). Define CLIENT_IP, PAGE_OPEN, CAPTURE_LOC, withTimeout() y
+ * collectDeviceInfo(). Se inyecta en el <script> de un formulario; el llamador arma `meta`
+ * ({userAgent, ip:CLIENT_IP, device, dwellMs:Date.now()-PAGE_OPEN}) y lo envía al servidor.
+ */
+function deviceCaptureJs_() {
+  const cap = locationFlag_() ? 'true' : 'false';
+  return `
+      var CLIENT_IP='', PAGE_OPEN=Date.now(), CAPTURE_LOC=${cap};
+      try{ fetch('https://api.ipify.org?format=json').then(function(r){return r.json();}).then(function(j){ CLIENT_IP=(j&&j.ip)||''; }).catch(function(){}); }catch(e){}
+      function withTimeout(p, ms){ return Promise.race([p, new Promise(function(res){ setTimeout(res, ms); })]); }
+      function collectDeviceInfo(){
+        var dev = { loc: { source:'desactivada', ipText:'', gps:'', gpsAcc:null, gpsStatus:'' } };
+        try {
+          var s = window.screen||{}, n = navigator||{};
+          dev.screen = (s.width||'')+'x'+(s.height||'');
+          dev.color = s.colorDepth||'';
+          dev.dpr = window.devicePixelRatio||'';
+          dev.touch = (n.maxTouchPoints!=null)?n.maxTouchPoints:'';
+          dev.cores = n.hardwareConcurrency||'';
+          dev.memory = n.deviceMemory||'';
+          dev.langs = (n.languages&&n.languages.join)?n.languages.join(','):(n.language||'');
+          dev.webdriver = !!n.webdriver;
+          try { dev.tz = Intl.DateTimeFormat().resolvedOptions().timeZone||''; } catch(e){ dev.tz=''; }
+          dev.tzOffset = (new Date()).getTimezoneOffset();
+          dev.net = (n.connection&&n.connection.effectiveType)||'';
+          dev.os = n.platform||''; dev.browser=''; dev.model=''; dev.arch='';
+          dev.userAgent = n.userAgent||'';
+        } catch(e){}
+        var jobs = [];
+        try {
+          if (navigator.userAgentData && navigator.userAgentData.getHighEntropyValues) {
+            jobs.push(navigator.userAgentData.getHighEntropyValues(
+              ['platform','platformVersion','architecture','bitness','model','fullVersionList'])
+              .then(function(h){ if(!h) return;
+                if(h.platform) dev.os = h.platform + (h.platformVersion?(' '+h.platformVersion):'');
+                if(h.model) dev.model = h.model;
+                if(h.architecture) dev.arch = h.architecture + (h.bitness?('/'+h.bitness):'');
+                var b = h.fullVersionList && h.fullVersionList.filter(function(x){ return !/Not.?A.?Brand/i.test(x.brand); });
+                if(b && b.length) dev.browser = b[b.length-1].brand+' '+b[b.length-1].version;
+              }).catch(function(){}));
+          }
+        } catch(e){}
+        if (CAPTURE_LOC) {
+          jobs.push(withTimeout(fetch('https://ipwho.is/').then(function(r){return r.json();}).then(function(j){
+            if(j && j.success!==false){
+              var parts=[j.city,j.region,j.country].filter(Boolean).join(', ');
+              var isp=(j.connection&&j.connection.isp)||j.isp||'';
+              dev.loc.ipText = parts + (isp?(' · '+isp):'');
+            }
+          }).catch(function(){}), 4000));
+          jobs.push(withTimeout(new Promise(function(res){
+            if(!navigator.geolocation){ dev.loc.gpsStatus='no disponible'; return res(); }
+            navigator.geolocation.getCurrentPosition(function(p){
+              dev.loc.gps = p.coords.latitude.toFixed(5)+','+p.coords.longitude.toFixed(5);
+              dev.loc.gpsAcc = Math.round(p.coords.accuracy); dev.loc.gpsStatus='ok'; res();
+            }, function(err){
+              dev.loc.gpsStatus = (err&&err.code===1)?'no consentida':'no disponible';
+              dev.loc.gps = 'GPS: '+dev.loc.gpsStatus; res();
+            }, { timeout:5000, maximumAge:600000, enableHighAccuracy:false });
+          }), 6000)); // el GPS NUNCA debe colgar la captura: Permissions-Policy lo bloquea en el iframe
+        }
+        var done = Promise.all(jobs).then(function(){
+          if(!CAPTURE_LOC) dev.loc.source='desactivada';
+          else if(dev.loc.gpsStatus==='ok') dev.loc.source='GPS';
+          else if(dev.loc.ipText) dev.loc.source='IP';
+          else dev.loc.source='zona horaria';
+        }).catch(function(){});
+        return withTimeout(done, 7000).then(function(){ return dev; }); // tope duro: nunca colgar el envío
+      }`;
 }
 
 /**
@@ -2059,7 +2142,7 @@ function freezeFormWaFormula_(loan) {
   const base = webAppBaseUrl_();
   if (!num || !base) return '';
   const name = String((loan && loan.name) || '').trim() || 'cliente';
-  const url = base + '?page=congelar&loan=' + encodeURIComponent(loan.loanId);
+  const url = base + '?page=congelar&loan=' + encodeURIComponent(loan.loanId) + (loan.token ? '&t=' + encodeURIComponent(loan.token) : '');
   const msg = 'Hola ' + name + ' 👋 Tu préstamo ' + loan.loanId + ' está vencido. Si no podés pagar ahora, ' +
     'podés pedir CONGELAR la mora (que deje de crecer) acá, con un plazo de hasta 2 semanas: ' + url + ' — ' + companyName_();
   return '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📲 Congelar")';
@@ -2072,7 +2155,7 @@ function planFormWaFormula_(loan) {
   const base = webAppBaseUrl_();
   if (!num || !base) return '';
   const name = String((loan && loan.name) || '').trim() || 'cliente';
-  const url = base + '?page=plan&loan=' + encodeURIComponent(loan.loanId);
+  const url = base + '?page=plan&loan=' + encodeURIComponent(loan.loanId) + (loan.token ? '&t=' + encodeURIComponent(loan.token) : '');
   const msg = 'Hola ' + name + ' 👋 Tu préstamo ' + loan.loanId + ' llegó al tope de mora. Podés pedir un ' +
     'PLAN DE PAGO (pago único, 4 o 6 cuotas) y frenar la mora acá: ' + url + ' — ' + companyName_();
   return '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📋 Plan de pago")';
@@ -3441,8 +3524,9 @@ function rebuildLateSheet_(ss) {
     // (ya no requiere el 100% de mora; el prestatario elige cuotas y cadencia, el prestamista aprueba).
     const planWa = (!isFrozen) ? (planFormWaFormula_(loan) || '') : '';
     // COBRANZA (mora tardía): mensaje de correo (mailto) + WhatsApp con el detalle y las opciones.
-    const freezeUrl = (!isFrozen && cobWebBase) ? (cobWebBase + '?page=congelar&loan=' + encodeURIComponent(loan.loanId)) : '';
-    const planUrl = (!isFrozen && cobWebBase) ? (cobWebBase + '?page=plan&loan=' + encodeURIComponent(loan.loanId)) : '';
+    const tq = loan.token ? '&t=' + encodeURIComponent(loan.token) : '';
+    const freezeUrl = (!isFrozen && cobWebBase) ? (cobWebBase + '?page=congelar&loan=' + encodeURIComponent(loan.loanId) + tq) : '';
+    const planUrl = (!isFrozen && cobWebBase) ? (cobWebBase + '?page=plan&loan=' + encodeURIComponent(loan.loanId) + tq) : '';
     const cobDaily = round2_(totalDue * feePctFrac);                  // recargo por día = % diario × total
     const capReach = capMax > 0 && cobDaily > 0 ? fmtDate_(addDays_(dueDate, Math.ceil(capMax / cobDaily))) : '';
     const cm = collectionMessage_(loan, { base: base, mora: feeAccum, totalPaid: totalPaid, days: days,
@@ -5148,17 +5232,19 @@ function showWebFormLink() {
 
 function doGet(e) {
   const page = e && e.parameter && e.parameter.page;
+  const loanParam = String((e && e.parameter && e.parameter.loan) || '').trim();
+  const t = String((e && e.parameter && e.parameter.t) || '').trim(); // token de acceso del enlace
   if (page === 'saldo') return HtmlService.createHtmlOutput(balancePageHtml_()).setTitle('Consulta de Saldo')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
-  if (page === 'firmar-congelamiento') return HtmlService.createHtmlOutput(freezeSigningPageHtml_(String((e.parameter.loan) || '').trim()))
+  if (page === 'firmar-congelamiento') return HtmlService.createHtmlOutput(freezeSigningPageHtml_(loanParam, t))
     .setTitle('Firmar Congelamiento').addMetaTag('viewport', 'width=device-width, initial-scale=1');
-  if (page === 'firmar-plan') return HtmlService.createHtmlOutput(planSigningPageHtml_(String((e.parameter.loan) || '').trim()))
+  if (page === 'firmar-plan') return HtmlService.createHtmlOutput(planSigningPageHtml_(loanParam, t))
     .setTitle('Firmar Acuerdo de Plan de Pago').addMetaTag('viewport', 'width=device-width, initial-scale=1');
-  if (page === 'firmar') return HtmlService.createHtmlOutput(signingPageHtml_(String((e.parameter.loan) || '').trim()))
+  if (page === 'firmar') return HtmlService.createHtmlOutput(signingPageHtml_(loanParam, '', t))
     .setTitle('Firmar Contrato').addMetaTag('viewport', 'width=device-width, initial-scale=1');
-  if (page === 'congelar') return HtmlService.createHtmlOutput(freezeRequestFormHtml_(String((e.parameter.loan) || '').trim()))
+  if (page === 'congelar') return HtmlService.createHtmlOutput(freezeRequestFormHtml_(loanParam, t))
     .setTitle('Solicitud de congelamiento').addMetaTag('viewport', 'width=device-width, initial-scale=1');
-  if (page === 'plan') return HtmlService.createHtmlOutput(planRequestFormHtml_(String((e.parameter.loan) || '').trim()))
+  if (page === 'plan') return HtmlService.createHtmlOutput(planRequestFormHtml_(loanParam, t))
     .setTitle('Solicitud de plan de pago').addMetaTag('viewport', 'width=device-width, initial-scale=1');
   // Formulario clásico disponible en ?page=clasico; por defecto se sirve el
   // formulario inteligente (detecta clientes existentes por Correo + DNI).
@@ -5267,6 +5353,7 @@ function intakeHtml_() {
         </div>
         <label class="agree"><input type="checkbox" name="agree" id="agree" required>
           <span>He leído y acepto los <b>Términos y Condiciones</b> del préstamo. <span class="req">*</span></span></label>
+        ${honeypotTrapHtml_()}
         <button type="submit" id="btn">Enviar solicitud</button></form>
       <div id="msg"></div>
     </div>
@@ -5390,6 +5477,7 @@ function intakeHtml_() {
 function submitIntake(form) {
   return guard_('submitIntake', function () {
     if (!acceptingApplications_()) throw new Error('En este momento no estamos aceptando nuevas solicitudes de préstamo.');
+    { if (looksLikeBot_(form && form.website, 0)) throw new Error(BOT_FAIL_MSG); } // anti-bot (honeypot)
     const ss = getSS_(), nb = ss.getSheetByName(CFG.SHEETS.NEW) || setupNew_(ss) || ss.getSheetByName(CFG.SHEETS.NEW);
     const name = String(form.fullName || '').trim(), email = String(form.email || '').trim(),
       dni = String(form.dni || '').trim(),
@@ -5492,9 +5580,11 @@ function balancePageHtml_() {
 }
 function lookupBalance(loanId, dni) {
   return guard_('lookupBalance', function () {
-    const loan = findLoanById_(String(loanId || '').trim());
-    if (!loan || String(loan.dni).replace(/\D/g, '') !== String(dni || '').replace(/\D/g, ''))
-      return { ok: false, html: 'Datos no encontrados. Verifique el ID y el DNI.' };
+    // Consulta de saldo: formulario de autogestión (sin enlace), así que NO exige token;
+    // se protege con anti-fuerza bruta (lockout por préstamo).
+    const acc = verifyLoanAccess_(loanId, dni, null, null, { skipToken: true });
+    if (!acc.ok) return { ok: false, html: acc.msg };
+    const loan = acc.loan;
     const rate = termRate_(loan.term);
     const out = computeOutstanding_(loan.principal, rate, loan.loanDate, loanPayments_(loan.loanId), new Date(), new Date(9999, 0, 1), undefined, undefined, undefined, loanSchedule_(loan));
     return {
@@ -5508,7 +5598,7 @@ function lookupBalance(loanId, dni) {
 /* ===================== SOLICITUD DE CONGELAMIENTO (formulario web) ===================== */
 /** Formulario público para pedir el congelamiento de un préstamo vencido (?page=congelar&loan=…).
  *  Mismo tema e interacción que la página de firma (barra de progreso, pantalla de éxito). */
-function freezeRequestFormHtml_(loanId) {
+function freezeRequestFormHtml_(loanId, token) {
   const lid = esc_(String(loanId || '').trim());
   const pctInt = Math.round(freezeDownPct_() * 100);
   return `<!DOCTYPE html><html lang="es"><head><base target="_top"><meta charset="utf-8"><style>
@@ -5575,7 +5665,7 @@ function freezeRequestFormHtml_(loanId) {
     <div id="done" class="hide" style="text-align:center;padding:8px 0"></div>
 
     <script>
-      var CLIENT_IP='', DEVICE={loc:{}}, PAGE_OPEN=Date.now(), LOANDATA=null;
+      var CLIENT_IP='', DEVICE={loc:{}}, PAGE_OPEN=Date.now(), LOANDATA=null, TOKEN=${JSON.stringify(String(token || ''))};
       function $(id){return document.getElementById(id);}
       function money(n){ n=Math.round((Number(n)||0)*100)/100; try{return '$'+n.toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2});}catch(e){return '$'+n.toFixed(2);} }
       function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -5621,7 +5711,7 @@ function freezeRequestFormHtml_(loanId) {
             '<tr><td class="k">Recargo por mora</td><td>'+money(r.mora)+'</td></tr>'+
             '<tr><td class="k">Saldo con mora (hoy)</td><td class="big">'+money(r.balance)+'</td></tr></table>';
           finishProgress(function(){ $('loadingView').classList.add('hide'); $('planview').classList.remove('hide'); recalc(); revalidate(); });
-        }).withFailureHandler(function(e){ stopProgress(); $('loadingView').classList.add('hide'); $('gate').classList.remove('hide'); gerr((e&&e.message)||e); }).lookupFreezeLoan($('loan').value,$('dni').value);
+        }).withFailureHandler(function(e){ stopProgress(); $('loadingView').classList.add('hide'); $('gate').classList.remove('hide'); gerr((e&&e.message)||e); }).lookupFreezeLoan($('loan').value,$('dni').value,TOKEN);
       }
       /* Barra de progreso (idéntica a la firma del contrato). */
       var progTimer=null, progVal=0;
@@ -5638,7 +5728,7 @@ function freezeRequestFormHtml_(loanId) {
         $('out').style.display='none'; $('btnSend').disabled=true;
         $('planview').classList.add('hide'); $('loadingView').classList.remove('hide'); startProgress();
         var payload={ loanId:$('loan').value, dni:$('dni').value, promisedDate:$('pay').value,
-          alreadyPaid:Number($('paid').value)||0, reason:$('reason').value, agree:true,
+          alreadyPaid:Number($('paid').value)||0, reason:$('reason').value, agree:true, token:TOKEN,
           ip:CLIENT_IP, device:DEVICE, dwellMs:Date.now()-PAGE_OPEN };
         google.script.run.withSuccessHandler(function(r){
           if(r&&r.ok){ finishProgress(function(){ $('loadingView').classList.add('hide'); showDone(r.message); }); }
@@ -5649,11 +5739,11 @@ function freezeRequestFormHtml_(loanId) {
 }
 
 /** Verifica identidad (ID + DNI) y que el préstamo sea congelable; devuelve sus datos NUMÉRICOS para el formulario. */
-function lookupFreezeLoan(loanId, dni) {
+function lookupFreezeLoan(loanId, dni, token) {
   return guard_('lookupFreezeLoan', function () {
-    const loan = findLoanById_(String(loanId || '').trim());
-    if (!loan || String(loan.dni).replace(/\D/g, '') !== String(dni || '').replace(/\D/g, ''))
-      return { ok: false, reason: 'Datos no encontrados. Verificá el ID del préstamo y tu DNI.' };
+    const acc = verifyLoanAccess_(loanId, dni, token);
+    if (!acc.ok) return { ok: false, reason: acc.msg };
+    const loan = acc.loan;
     const fz = loanFreezable_(loan);
     if (!fz.ok) return { ok: false, reason: fz.reason };
     const a = freezeAmounts_(loan, 0);
@@ -5680,9 +5770,9 @@ function hasPendingFreezeRequest_(sh, loanId) {
 function submitFreezeRequest(p) {
   return guard_('submitFreezeRequest', function () {
     p = p || {};
-    const loan = findLoanById_(String(p.loanId || '').trim());
-    if (!loan || String(loan.dni).replace(/\D/g, '') !== String(p.dni || '').replace(/\D/g, ''))
-      return { ok: false, reason: 'Datos no encontrados. Verificá el ID del préstamo y tu DNI.' };
+    const acc = verifyLoanAccess_(p.loanId, p.dni, p.token, p.ip);
+    if (!acc.ok) return { ok: false, reason: acc.msg };
+    const loan = acc.loan;
     const fz = loanFreezable_(loan);
     if (!fz.ok) return { ok: false, reason: fz.reason };
     if (p.agree !== true) return { ok: false, reason: 'Debés aceptar las condiciones para continuar.' };
@@ -5738,7 +5828,7 @@ function submitFreezeRequest(p) {
 /* ===================== SOLICITUD DE PLAN DE PAGO (formulario web) ===================== */
 /** Formulario público para pedir un plan de pago (Acuerdo) de un préstamo al 100% de mora
  *  (?page=plan&loan=…). Mismo tema/interacción que el formulario de congelamiento. */
-function planRequestFormHtml_(loanId) {
+function planRequestFormHtml_(loanId, token) {
   const lid = esc_(String(loanId || '').trim());
   const pctInt = Math.round(planDownPct_() * 100);
   return `<!DOCTYPE html><html lang="es"><head><base target="_top"><meta charset="utf-8"><style>
@@ -5814,7 +5904,7 @@ function planRequestFormHtml_(loanId) {
     <div id="done" class="hide" style="text-align:center;padding:8px 0"></div>
 
     <script>
-      var CLIENT_IP='', DEVICE={loc:{}}, PAGE_OPEN=Date.now(), LOANDATA=null, OPT=0;
+      var CLIENT_IP='', DEVICE={loc:{}}, PAGE_OPEN=Date.now(), LOANDATA=null, OPT=0, TOKEN=${JSON.stringify(String(token || ''))};
       function $(id){return document.getElementById(id);}
       function money(n){ n=Math.round((Number(n)||0)*100)/100; try{return '$'+n.toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2});}catch(e){return '$'+n.toFixed(2);} }
       function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -5873,7 +5963,7 @@ function planRequestFormHtml_(loanId) {
           var due=Math.max(0, Math.round((r.downShort)*100)/100);
           $('due24').textContent = due<=0 ? '✅ ya cubierto' : money(due);
           finishProgress(function(){ $('loadingView').classList.add('hide'); $('planview').classList.remove('hide'); revalidate(); });
-        }).withFailureHandler(function(e){ stopProgress(); $('loadingView').classList.add('hide'); $('gate').classList.remove('hide'); gerr((e&&e.message)||e); }).lookupPlanLoan($('loan').value,$('dni').value);
+        }).withFailureHandler(function(e){ stopProgress(); $('loadingView').classList.add('hide'); $('gate').classList.remove('hide'); gerr((e&&e.message)||e); }).lookupPlanLoan($('loan').value,$('dni').value,TOKEN);
       }
       var progTimer=null, progVal=0;
       function setProgress(p,ph){ progVal=Math.max(0,Math.min(100,Math.round(p))); var f=$('pbarFill'),pc=$('loadPct'),lp=$('loadPhase'); if(f)f.style.width=progVal+'%'; if(pc)pc.textContent=progVal+'%'; if(ph&&lp)lp.textContent=ph; }
@@ -5888,7 +5978,7 @@ function planRequestFormHtml_(loanId) {
       function send(){
         $('out').style.display='none'; $('btnSend').disabled=true;
         $('planview').classList.add('hide'); $('loadingView').classList.remove('hide'); startProgress();
-        var payload={ loanId:$('loan').value, dni:$('dni').value, option:OPT, cadence:($('cad')?$('cad').value:'monthly'), reason:$('reason').value, agree:true,
+        var payload={ loanId:$('loan').value, dni:$('dni').value, option:OPT, cadence:($('cad')?$('cad').value:'monthly'), reason:$('reason').value, agree:true, token:TOKEN,
           ip:CLIENT_IP, device:DEVICE, dwellMs:Date.now()-PAGE_OPEN };
         google.script.run.withSuccessHandler(function(r){
           if(r&&r.ok){ finishProgress(function(){ $('loadingView').classList.add('hide'); showDone(r.message); }); }
@@ -5899,11 +5989,11 @@ function planRequestFormHtml_(loanId) {
 }
 
 /** Verifica identidad (ID+DNI) y que el préstamo esté VENCIDO con saldo; devuelve datos para el plan de pago flexible. */
-function lookupPlanLoan(loanId, dni) {
+function lookupPlanLoan(loanId, dni, token) {
   return guard_('lookupPlanLoan', function () {
-    const loan = findLoanById_(String(loanId || '').trim());
-    if (!loan || String(loan.dni).replace(/\D/g, '') !== String(dni || '').replace(/\D/g, ''))
-      return { ok: false, reason: 'Datos no encontrados. Verificá el ID del préstamo y tu DNI.' };
+    const acc = verifyLoanAccess_(loanId, dni, token);
+    if (!acc.ok) return { ok: false, reason: acc.msg };
+    const loan = acc.loan;
     // Plan de pago FLEXIBLE: disponible para cualquier préstamo VENCIDO con saldo (no requiere el
     // 100% de mora). El prestamista aprueba cada solicitud.
     if (!(loan.dueDate instanceof Date) || daysLate_(loan.dueDate, new Date()) <= 0)
@@ -5933,9 +6023,9 @@ function hasPendingPlanRequest_(sh, loanId) {
 function submitPlanRequest(p) {
   return guard_('submitPlanRequest', function () {
     p = p || {};
-    const loan = findLoanById_(String(p.loanId || '').trim());
-    if (!loan || String(loan.dni).replace(/\D/g, '') !== String(p.dni || '').replace(/\D/g, ''))
-      return { ok: false, reason: 'Datos no encontrados. Verificá el ID del préstamo y tu DNI.' };
+    const acc = verifyLoanAccess_(p.loanId, p.dni, p.token, p.ip);
+    if (!acc.ok) return { ok: false, reason: acc.msg };
+    const loan = acc.loan;
     if (!(loan.dueDate instanceof Date) || daysLate_(loan.dueDate, new Date()) <= 0)
       return { ok: false, reason: 'El plan de pago está disponible para préstamos vencidos.' };
     if (Math.max(0, round2_(loan.totalDue - loanPayments_(loan.loanId).reduce((s, pp) => s + pp.amount, 0))) <= 0.009)
@@ -6025,7 +6115,8 @@ function approveFreezeRequest_(sh, row) {
   if (m['Fecha de aprobación']) sh.getRange(row, m['Fecha de aprobación']).setValue(new Date()).setNumberFormat('yyyy-mm-dd');
   setv('Estado de Firma', 'PENDIENTE');
   const base = webAppBaseUrl_();
-  const url = base ? base + '?page=firmar-congelamiento&loan=' + encodeURIComponent(loanId) : '';
+  const tq = ensureLoanToken_(loanId, false);
+  const url = base ? base + '?page=firmar-congelamiento&loan=' + encodeURIComponent(loanId) + (tq ? '&t=' + encodeURIComponent(tq) : '') : '';
   if (url) setf('Enlace de firma', '=HYPERLINK("' + url + '","✍ Firmar congelamiento")');
   else setv('Enlace de firma', 'Publicá la app web (menú ⑥) para obtener el enlace.');
   // Importes RECALCULADOS a la fecha de aprobación (no se leen de la hoja, para no depender de
@@ -6126,7 +6217,8 @@ function approvePlanRequest_(sh, row) {
   if (m['Fecha de aprobación']) sh.getRange(row, m['Fecha de aprobación']).setValue(new Date()).setNumberFormat('yyyy-mm-dd');
   setv('Estado de Firma', 'PENDIENTE');
   const base = webAppBaseUrl_();
-  const url = base ? base + '?page=firmar-plan&loan=' + encodeURIComponent(loanId) : '';
+  const tq = ensureLoanToken_(loanId, false);
+  const url = base ? base + '?page=firmar-plan&loan=' + encodeURIComponent(loanId) + (tq ? '&t=' + encodeURIComponent(tq) : '') : '';
   if (url) setf('Enlace de firma', '=HYPERLINK("' + url + '","✍ Firmar Acuerdo")');
   else setv('Enlace de firma', 'Publicá la app web (menú ⑥) para obtener el enlace.');
   const downTxt = amt.downMet
@@ -6212,12 +6304,12 @@ function firmaCols_(sh) {
 
 /** Resumen de términos del contrato (HTML seguro) para la página de firma. */
 /** Verifica identidad (ID + DNI) y devuelve el contrato completo a firmar, o el estado "ya firmado". */
-function getContractForSigning(loanId, dni) {
+function getContractForSigning(loanId, dni, token) {
   return guard_('getContractForSigning', function () {
     loanId = String(loanId || '').trim();
-    const loan = findLoanById_(loanId);
-    if (!loan || String(loan.dni).replace(/\D/g, '') !== String(dni || '').replace(/\D/g, ''))
-      return { ok: false, msg: 'Datos no encontrados. Verifique el ID del préstamo y su DNI.' };
+    const acc = verifyLoanAccess_(loanId, dni, token);
+    if (!acc.ok) return { ok: false, msg: acc.msg };
+    const loan = acc.loan;
     const loc = signStatusRow_(loanId);
     const status = loc ? String(loc.sh.getRange(loc.row, firmaCols_(loc.sh).status).getValue() || '').toUpperCase() : '';
     if (status === SIGN.SIGNED)
@@ -6233,12 +6325,12 @@ function hexDigest_(input) {
   const raw = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, bytes);
   return raw.map(b => ('0' + (b & 0xff).toString(16)).slice(-2)).join('');
 }
-function submitSignature(loanId, dni, signatureDataUrl, agree, meta) {
+function submitSignature(loanId, dni, signatureDataUrl, agree, meta, token) {
   return guard_('submitSignature', function () {
     loanId = String(loanId || '').trim();
-    const loan = findLoanById_(loanId);
-    if (!loan || String(loan.dni).replace(/\D/g, '') !== String(dni || '').replace(/\D/g, ''))
-      throw new Error('Datos no encontrados. Verifique el ID del préstamo y su DNI.');
+    const acc = verifyLoanAccess_(loanId, dni, token, meta && meta.ip);
+    if (!acc.ok) throw new Error(acc.msg);
+    const loan = acc.loan;
     if (agree !== true) throw new Error('Debe aceptar los términos del contrato para firmar.');
     const m = /^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i.exec(String(signatureDataUrl || ''));
     if (!m) throw new Error('Falta la firma. Dibuje su firma o cargue una imagen.');
@@ -6312,7 +6404,7 @@ function submitSignature(loanId, dni, signatureDataUrl, agree, meta) {
 
 /* ===================== FIRMA DEL ACUERDO DE CONGELAMIENTO (Parte 2) ===================== */
 /** Página para firmar el acuerdo de congelamiento (reusa la de firma en modo 'freeze'). */
-function freezeSigningPageHtml_(loanId) { return signingPageHtml_(loanId, 'freeze'); }
+function freezeSigningPageHtml_(loanId, token) { return signingPageHtml_(loanId, 'freeze', token); }
 
 /** Ubica la solicitud de congelamiento por ID de préstamo y estado(s). Devuelve {sh,row,m} o null. */
 function findFreezeRequestRow_(loanId, states) {
@@ -6327,12 +6419,12 @@ function findFreezeRequestRow_(loanId, states) {
 }
 
 /** Verifica identidad + solicitud APROBADA; devuelve el acuerdo de congelamiento a firmar. */
-function getFreezeContractForSigning(loanId, dni) {
+function getFreezeContractForSigning(loanId, dni, token) {
   return guard_('getFreezeContractForSigning', function () {
     loanId = String(loanId || '').trim();
-    const loan = findLoanById_(loanId);
-    if (!loan || String(loan.dni).replace(/\D/g, '') !== String(dni || '').replace(/\D/g, ''))
-      return { ok: false, msg: 'Datos no encontrados. Verificá el ID del préstamo y tu DNI.' };
+    const acc = verifyLoanAccess_(loanId, dni, token);
+    if (!acc.ok) return { ok: false, msg: acc.msg };
+    const loan = acc.loan;
     const req = findFreezeRequestRow_(loanId, ['Aprobado', 'Firmado']);
     if (!req) return { ok: false, msg: 'No hay una solicitud de congelamiento aprobada para este préstamo.' };
     const g = h => req.m[h] ? req.sh.getRange(req.row, req.m[h]).getValue() : '';
@@ -6346,12 +6438,12 @@ function getFreezeContractForSigning(loanId, dni) {
 
 /** Recibe la firma del acuerdo: CONGELA el préstamo (hoy), guarda el PDF, registra auditoría,
  *  marca la solicitud como Firmada y suma el congelamiento al historial del cliente. */
-function submitFreezeSignature(loanId, dni, signatureDataUrl, agree, meta) {
+function submitFreezeSignature(loanId, dni, signatureDataUrl, agree, meta, token) {
   return guard_('submitFreezeSignature', function () {
     loanId = String(loanId || '').trim();
-    const loan = findLoanById_(loanId);
-    if (!loan || String(loan.dni).replace(/\D/g, '') !== String(dni || '').replace(/\D/g, ''))
-      throw new Error('Datos no encontrados. Verificá el ID del préstamo y tu DNI.');
+    const acc = verifyLoanAccess_(loanId, dni, token, meta && meta.ip);
+    if (!acc.ok) throw new Error(acc.msg);
+    const loan = acc.loan;
     if (agree !== true) throw new Error('Debés aceptar los términos para firmar.');
     const req = findFreezeRequestRow_(loanId, ['Aprobado', 'Firmado']);
     if (!req) throw new Error('No hay una solicitud de congelamiento aprobada para este préstamo.');
@@ -6525,9 +6617,129 @@ function webAppBaseUrl_() {
   url = url.replace(/\/macros\/u\/\d+\/s\//, '/macros/s/'); // quita el índice de cuenta (/u/1/): rompe los query params y es específico de una cuenta
   return url;
 }
-function signingLink_(loanId) {
+/* ============ ACCESO A ENLACES (token por préstamo + anti-fuerza bruta) ============
+ * Cada préstamo tiene un token aleatorio de 128 bits en "Prestatarios" (columnas "Token de
+ * acceso"/"Token emitido"). Los enlaces que se envían al cliente llevan &t=<token>; el servidor
+ * exige loanId + DNI + token válido y NO vencido. Además, CacheService limita los intentos
+ * fallidos por préstamo (y por IP cuando se conoce) para frenar enumeración/fuerza bruta. */
+const AUTH_FAIL_MSG = 'Datos no encontrados o el enlace venció. Verificá el ID y el DNI, o pedí un enlace nuevo.';
+const AUTH_THROTTLE_MSG = 'Demasiados intentos. Esperá unos minutos e intentá de nuevo.';
+
+/** Token aleatorio de 128 bits en hexadecimal (32 caracteres). */
+function genAccessToken_() { return (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '').slice(0, 32); }
+/** Vigencia del enlace en minutos (Configuración; por defecto 24 h = 1440 min). */
+function linkExpiryMinutes_() { return settingDays_('Vigencia del enlace (minutos)', 1440); }
+/** ¿Exigir token en los enlaces? ("NO" lo desactiva para una transición/rollback de emergencia). */
+function requireToken_() { return String(getSetting_('Exigir token en enlaces (SÍ/NO)') || 'SÍ').trim().toUpperCase() !== 'NO'; }
+/** Intentos fallidos antes de bloquear (Configuración; por defecto 8). */
+function authMaxFails_() { return Math.max(1, Math.round(settingDays_('Intentos antes de bloquear (enlaces)', 8))); }
+/** Duración del bloqueo por intentos, en segundos (Configuración en minutos; por defecto 15 min). */
+function authLockoutSeconds_() { return Math.max(60, Math.round(settingDays_('Bloqueo por intentos (minutos)', 15) * 60)); }
+/** Comparación en tiempo constante (evita oráculos de temporización sobre el token). */
+function constEq_(a, b) { a = String(a); b = String(b); if (a.length !== b.length) return false; let r = 0; for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i); return r === 0; }
+
+/** Asegura (y opcionalmente ROTA) el token de acceso del préstamo; devuelve el token ('' si no se halla). */
+function ensureLoanToken_(loanId, rotate) {
+  loanId = String(loanId || '').trim(); if (!loanId) return '';
+  const bs = getSS_().getSheetByName(CFG.SHEETS.BORROWERS); if (!bs || bs.getLastRow() < 2) return '';
+  const tokC = colByAny_(headerIndex_(bs), ['Token de acceso']) || ensureHeaderColumn_(bs, 'Token de acceso', '#444');
+  const issC = colByAny_(headerIndex_(bs), ['Token emitido']) || ensureHeaderColumn_(bs, 'Token emitido', '#444');
+  const ids = bs.getRange(2, PB.LOAN_ID, bs.getLastRow() - 1, 1).getValues();
+  for (let i = 0; i < ids.length; i++) {
+    if (String(ids[i][0]).trim() === loanId) {
+      const row = i + 2;
+      let tok = String(bs.getRange(row, tokC).getValue() || '').trim();
+      if (!tok || rotate) { tok = genAccessToken_(); bs.getRange(row, tokC).setValue(tok); bs.getRange(row, issC).setValue(new Date()); }
+      return tok;
+    }
+  }
+  return '';
+}
+
+/** Lockout por CacheService (por préstamo y por IP). */
+function authBlocked_(cache, key) { return Number(cache.get(key) || 0) >= authMaxFails_(); }
+function authNoteFail_(cache, key) { cache.put(key, String(Number(cache.get(key) || 0) + 1), authLockoutSeconds_()); }
+
+/**
+ * ÚNICA puerta de acceso de los endpoints por préstamo: valida loanId + DNI + token (salvo
+ * opts.skipToken para la consulta de saldo) y aplica anti-fuerza bruta. Devuelve {ok:true, loan}
+ * o {ok:false, msg}. No revela cuál de los tres factores falló (mensaje genérico).
+ */
+function verifyLoanAccess_(loanId, dni, token, ip, opts) {
+  opts = opts || {};
+  loanId = String(loanId || '').trim();
+  const cache = CacheService.getScriptCache();
+  const kLoan = 'authfail:loan:' + loanId.slice(0, 40);
+  const kIp = ip ? 'authfail:ip:' + String(ip).slice(0, 60) : '';
+  if (authBlocked_(cache, kLoan) || (kIp && authBlocked_(cache, kIp))) return { ok: false, msg: AUTH_THROTTLE_MSG };
+  const loan = findLoanById_(loanId);
+  const dniOk = !!loan && String(loan.dni).replace(/\D/g, '') === String(dni || '').replace(/\D/g, '');
+  let tokenOk = true;
+  if (!opts.skipToken && requireToken_()) {
+    const stored = loan ? String(loan.token || '').trim() : '';
+    const issued = loan ? loan.tokenIssued : null;
+    const fresh = (issued instanceof Date) && (Date.now() - issued.getTime()) <= linkExpiryMinutes_() * 60000;
+    tokenOk = !!stored && constEq_(String(token || ''), stored) && fresh;
+  }
+  if (!loan || !dniOk || !tokenOk) {
+    authNoteFail_(cache, kLoan); if (kIp) authNoteFail_(cache, kIp);
+    return { ok: false, msg: AUTH_FAIL_MSG };
+  }
+  cache.remove(kLoan);
+  return { ok: true, loan: loan };
+}
+
+/** Rellena los tokens de acceso faltantes en "Prestatarios" (CORRER UNA VEZ tras instalar,
+ *  desde el editor de Apps Script). Idempotente: sólo crea tokens donde falten. */
+function instalarTokensDeAcceso() {
+  return guard_('instalarTokensDeAcceso', function () {
+    const bs = getSS_().getSheetByName(CFG.SHEETS.BORROWERS);
+    if (!bs || bs.getLastRow() < 2) return 'No hay préstamos.';
+    const tokC = colByAny_(headerIndex_(bs), ['Token de acceso']) || ensureHeaderColumn_(bs, 'Token de acceso', '#444');
+    const issC = colByAny_(headerIndex_(bs), ['Token emitido']) || ensureHeaderColumn_(bs, 'Token emitido', '#444');
+    const n = bs.getLastRow() - 1;
+    const ids = bs.getRange(2, PB.LOAN_ID, n, 1).getValues();
+    const toks = bs.getRange(2, tokC, n, 1).getValues();
+    let created = 0;
+    for (let i = 0; i < ids.length; i++) {
+      if (!/^L-/i.test(String(ids[i][0]).trim())) continue;
+      if (String(toks[i][0]).trim()) continue;
+      bs.getRange(i + 2, tokC).setValue(genAccessToken_());
+      bs.getRange(i + 2, issC).setValue(new Date());
+      created++;
+    }
+    try { getSS_().toast(created + ' token(s) de acceso generados.', '🔐 Tokens', 6); } catch (e) {}
+    return created + ' tokens generados.';
+  });
+}
+
+/* ========================= ANTI-BOT (honeypot + tiempo de llenado) =========================
+ * Sin servicios externos ni claves: funciona dentro del iframe de Apps Script. Dos señales:
+ *  1) Campo trampa (honeypot) invisible para humanos; si llega con valor → bot.
+ *  2) Tiempo en página demasiado corto para ser humano (dwellMs), cuando se conoce. */
+const BOT_FAIL_MSG = 'No pudimos procesar tu envío. Recargá la página e intentá de nuevo.';
+const BOT_MIN_DWELL_MS = 2500; // menos de ~2,5 s llenando el formulario = casi seguro un bot
+
+/** Campo trampa oculto para incrustar en un formulario público (los bots lo completan, los humanos no). */
+function honeypotTrapHtml_() {
+  return '<div aria-hidden="true" style="position:absolute!important;left:-9999px!important;top:-9999px!important;height:0;width:0;overflow:hidden">' +
+    '<label>Sitio web (no completar)<input type="text" name="website" id="website" tabindex="-1" autocomplete="off"></label></div>';
+}
+
+/** ¿El envío parece de un bot? true si la trampa viene con valor o el formulario se envió demasiado rápido. */
+function looksLikeBot_(trap, dwellMs) {
+  if (String(trap || '').trim() !== '') return true;              // honeypot completado
+  const d = Number(dwellMs) || 0;
+  if (d > 0 && d < BOT_MIN_DWELL_MS) return true;                 // enviado demasiado rápido (si se conoce dwell)
+  return false;
+}
+
+/** Enlace de firma del contrato (?page=firmar&loan=…&t=…). Asegura el token si no se pasa. */
+function signingLink_(loanId, token) {
   const base = webAppBaseUrl_();
-  return base ? base + '?page=firmar&loan=' + encodeURIComponent(loanId) : '';
+  if (!base) return '';
+  const t = token || ensureLoanToken_(loanId, false);
+  return base + '?page=firmar&loan=' + encodeURIComponent(loanId) + (t ? '&t=' + encodeURIComponent(t) : '');
 }
 
 /** Correo al prestatario pidiéndole que firme (con enlace) + copia sin firmar para revisión. */
@@ -6595,6 +6807,7 @@ function resendSigningLink_() {
   if (st === SIGN.SIGNED && ui.alert('Este contrato ya figura FIRMADO. ¿Reenviar el enlace igualmente?', ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
   try {
     if (st !== SIGN.SIGNED) sh.getRange(row, statusCol).setValue(SIGN.PENDING);
+    ensureLoanToken_(loanId, true); // rota el token: el enlace anterior deja de funcionar
     let file = null; try { file = makeAgreementFile_(loan); } catch (e) { logError_('resendSigningLink_:pdf', e); }
     emailSigningRequest_(loan, file);
     ss.toast('Enlace de firma reenviado a ' + loan.email, 'Listo', 5);
@@ -6604,7 +6817,7 @@ function resendSigningLink_() {
 /** Página web independiente para firmar el contrato (?page=firmar&loan=L-0001). */
 /* ===================== FIRMA DEL ACUERDO DE PLAN DE PAGO ===================== */
 /** Página para firmar el Acuerdo de plan de pago (reusa la página de firma en modo 'plan'). */
-function planSigningPageHtml_(loanId) { return signingPageHtml_(loanId, 'plan'); }
+function planSigningPageHtml_(loanId, token) { return signingPageHtml_(loanId, 'plan', token); }
 
 /** Ubica la solicitud de plan por ID de préstamo y estado(s). Devuelve {sh,row,m} o null. */
 function findPlanRequestRow_(loanId, states) {
@@ -6619,12 +6832,12 @@ function findPlanRequestRow_(loanId, states) {
 }
 
 /** Verifica identidad + solicitud APROBADA; devuelve el Acuerdo de plan de pago a firmar. */
-function getPlanContractForSigning(loanId, dni) {
+function getPlanContractForSigning(loanId, dni, token) {
   return guard_('getPlanContractForSigning', function () {
     loanId = String(loanId || '').trim();
-    const loan = findLoanById_(loanId);
-    if (!loan || String(loan.dni).replace(/\D/g, '') !== String(dni || '').replace(/\D/g, ''))
-      return { ok: false, msg: 'Datos no encontrados. Verificá el ID del préstamo y tu DNI.' };
+    const acc = verifyLoanAccess_(loanId, dni, token);
+    if (!acc.ok) return { ok: false, msg: acc.msg };
+    const loan = acc.loan;
     const req = findPlanRequestRow_(loanId, ['Aprobado', 'Firmado']);
     if (!req) return { ok: false, msg: 'No hay una solicitud de plan de pago aprobada para este préstamo.' };
     const g = h => req.m[h] ? req.sh.getRange(req.row, req.m[h]).getValue() : '';
@@ -6638,12 +6851,12 @@ function getPlanContractForSigning(loanId, dni) {
 
 /** Recibe la firma del Acuerdo: ACTIVA el plan (suspende mora, reemplaza cuotas, marca "Plan desde"),
  *  guarda el PDF, registra auditoría (Firmas/Dispositivos) y marca la solicitud como Firmada. */
-function submitPlanSignature(loanId, dni, signatureDataUrl, agree, meta) {
+function submitPlanSignature(loanId, dni, signatureDataUrl, agree, meta, token) {
   return guard_('submitPlanSignature', function () {
     loanId = String(loanId || '').trim();
-    const loan = findLoanById_(loanId);
-    if (!loan || String(loan.dni).replace(/\D/g, '') !== String(dni || '').replace(/\D/g, ''))
-      throw new Error('Datos no encontrados. Verificá el ID del préstamo y tu DNI.');
+    const acc = verifyLoanAccess_(loanId, dni, token, meta && meta.ip);
+    if (!acc.ok) throw new Error(acc.msg);
+    const loan = acc.loan;
     if (agree !== true) throw new Error('Debés aceptar los términos para firmar.');
     const req = findPlanRequestRow_(loanId, ['Aprobado', 'Firmado']);
     if (!req) throw new Error('No hay una solicitud de plan de pago aprobada para este préstamo.');
@@ -6815,7 +7028,7 @@ function planAgreementHtml_(loan, req, sig) {
   </body></html>`;
 }
 
-function signingPageHtml_(loanId, mode) {
+function signingPageHtml_(loanId, mode, token) {
   const freeze = (mode === 'freeze'), plan = (mode === 'plan');
   const TITLE = plan ? 'Firmar Acuerdo de Plan de Pago' : (freeze ? 'Firmar Congelamiento' : 'Firmar Contrato');
   const FN_GET = plan ? 'getPlanContractForSigning' : (freeze ? 'getFreezeContractForSigning' : 'getContractForSigning');
@@ -6888,6 +7101,7 @@ function signingPageHtml_(loanId, mode) {
 
     <script>
       var LOAN_ID = ${JSON.stringify(String(loanId))};
+      var TOKEN = ${JSON.stringify(String(token || ''))};
       var DNI = '', TAB = 'draw', uploaded = '', drew = false, cv, ctx, drawing = false, CLIENT_IP = '';
       var PAGE_OPEN = Date.now(), CAPTURE_LOC = true, STROKES = 0, DRAW_START = 0, DRAW_END = 0;
       function $(id){return document.getElementById(id);}
@@ -6902,7 +7116,7 @@ function signingPageHtml_(loanId, mode) {
           CAPTURE_LOC = (r.captureLocation !== false);
           $('terms').srcdoc = r.contractHtml; PAGE_OPEN = Date.now();
           $('gate').classList.add('hide'); $('signview').classList.remove('hide'); setupCanvas();
-        }).withFailureHandler(function(e){ gerr(e.message||e); }).${FN_GET}($('loan').value, DNI);
+        }).withFailureHandler(function(e){ gerr(e.message||e); }).${FN_GET}($('loan').value, DNI, TOKEN);
       }
       function gerr(m){ var g=$('gerr'); g.textContent=m; g.style.display='block'; }
       function showTab(t){ TAB=t;
@@ -6984,7 +7198,7 @@ function signingPageHtml_(loanId, mode) {
             }
           }).catch(function(){}), 4000));
           // Nivel 1: GPS (con permiso del navegador; timeout 5 s; nunca bloquea).
-          jobs.push(new Promise(function(res){
+          jobs.push(withTimeout(new Promise(function(res){
             if(!navigator.geolocation){ dev.loc.gpsStatus='no disponible'; return res(); }
             navigator.geolocation.getCurrentPosition(function(p){
               dev.loc.gps = p.coords.latitude.toFixed(5)+','+p.coords.longitude.toFixed(5);
@@ -6993,7 +7207,7 @@ function signingPageHtml_(loanId, mode) {
               dev.loc.gpsStatus = (err&&err.code===1)?'no consentida':'no disponible';
               dev.loc.gps = 'GPS: '+dev.loc.gpsStatus; res();
             }, { timeout:5000, maximumAge:600000, enableHighAccuracy:false });
-          }));
+          }), 6000)); // el GPS NUNCA debe colgar la captura: Permissions-Policy lo bloquea en el iframe
         }
         return Promise.all(jobs).then(function(){
           // Origen = mejor nivel disponible (GPS > IP > zona horaria).
@@ -7020,7 +7234,7 @@ function signingPageHtml_(loanId, mode) {
             else { stopProgress(); $('loadingView').classList.add('hide'); $('signview').classList.remove('hide'); $('go').disabled=false; msg((r&&r.message)||'No se pudo firmar.', true); }
           }).withFailureHandler(function(e){
             stopProgress(); $('loadingView').classList.add('hide'); $('signview').classList.remove('hide'); $('go').disabled=false; msg(e.message||e, true);
-          }).${FN_SUB}(LOAN_ID, DNI, data, true, meta);
+          }).${FN_SUB}(LOAN_ID, DNI, data, true, meta, TOKEN);
         });
       }
       function msg(m, isErr){ var o=$('out'); o.className=isErr?'err':'ok'; o.textContent=m; o.style.display='block'; }
@@ -8747,6 +8961,28 @@ function setSheetFieldByHeader_(sh, row, header, value) {
   sh.getRange(row, col).setValue(value);
   return col;
 }
+/** PERF: igual que setSheetFieldByHeader_ pero para VARIOS campos a la vez. Lee el encabezado UNA
+ *  vez, crea las columnas faltantes UNA vez y escribe todo con UN solo setValues (en lugar de N
+ *  lecturas de encabezado + N setValue). Devuelve {encabezado: columna}. */
+function setSheetFieldsByHeader_(sh, row, obj) {
+  const keys = Object.keys(obj || {}).filter(k => obj[k] !== undefined);
+  if (!keys.length) return {};
+  const m = headerMap_(sh);
+  let lastCol = sh.getLastColumn();
+  const cols = {};
+  keys.forEach(h => {
+    let c = m[h];
+    if (!c) { c = ++lastCol; sh.getRange(1, c).setValue(h).setFontWeight('bold').setBackground('#b45f06').setFontColor('#fff').setWrap(true); m[h] = c; }
+    cols[h] = c;
+  });
+  const idxs = keys.map(h => cols[h]);
+  const minC = Math.min.apply(null, idxs), maxC = Math.max.apply(null, idxs);
+  const rng = sh.getRange(row, minC, 1, maxC - minC + 1);
+  const vals = rng.getValues()[0];
+  keys.forEach(h => { vals[cols[h] - minC] = obj[h]; });
+  rng.setValues([vals]);
+  return cols;
+}
 /** Escribe un campo "extra" del cliente por nombre de encabezado (creando la columna si falta). */
 function setClienteFieldByHeader_(clienteId, header, value) {
   if (value == null || String(value).trim() === '') return;
@@ -8754,6 +8990,29 @@ function setClienteFieldByHeader_(clienteId, header, value) {
   const row = clienteRowById_(sh, clienteId); if (!row) return;
   const col = clientesHeaderCol_(sh, header, true);
   sh.getRange(row, col).setValue(value);
+  invalidateClientesCache_();
+}
+/** PERF: escribe VARIOS campos extra del cliente en UN solo setValues (resuelve la fila y los
+ *  encabezados una vez, invalida el caché una sola vez). Omite valores vacíos. */
+function setClienteFieldsByHeader_(clienteId, obj) {
+  const keys = Object.keys(obj || {}).filter(k => { const v = obj[k]; return v != null && String(v).trim() !== ''; });
+  if (!keys.length) return;
+  const sh = getSS_().getSheetByName(CFG.SHEETS.CLIENTS); if (!sh) return;
+  const row = clienteRowById_(sh, clienteId); if (!row) return;
+  const m = headerMap_(sh);
+  let lastCol = sh.getLastColumn();
+  const cols = {};
+  keys.forEach(h => {
+    let c = m[h];
+    if (!c) { c = ++lastCol; sh.getRange(1, c).setValue(h).setFontWeight('bold').setBackground('#0b5394').setFontColor('#fff').setWrap(true); m[h] = c; }
+    cols[h] = c;
+  });
+  const idxs = keys.map(h => cols[h]);
+  const minC = Math.min.apply(null, idxs), maxC = Math.max.apply(null, idxs);
+  const rng = sh.getRange(row, minC, 1, maxC - minC + 1);
+  const vals = rng.getValues()[0];
+  keys.forEach(h => { vals[cols[h] - minC] = obj[h]; });
+  rng.setValues([vals]);
   invalidateClientesCache_();
 }
 function invalidateClientesCache_() {
@@ -8847,6 +9106,9 @@ function borrowerLoanCols_(H) {
     tdniC: col(['DNI del titular'], 0),
     temailC: col(['Correo del titular'], 0),
     tphoneC: col(['Teléfono del titular'], 0),
+    // Token de acceso por préstamo (seguridad de enlaces): opcionales (0 si la columna no existe).
+    tokC: col(['Token de acceso'], 0),
+    tokIssC: col(['Token emitido'], 0),
   };
 }
 // Igual que readLoan_, pero sobre una FILA YA leída (v = valores de la fila completa, columna c → v[c-1]).
@@ -8875,6 +9137,8 @@ function parseLoanRow_(v, H, cols) {
     interest: interest, totalDue: totalDue,
     thirdParty: thirdParty, holderName: gh(cols.titC), holderDni: gh(cols.tdniC),
     holderEmail: gh(cols.temailC), holderPhone: gh(cols.tphoneC),
+    token: gh(cols.tokC),
+    tokenIssued: (cols.tokIssC && cols.tokIssC <= v.length) ? g(cols.tokIssC) : null,
   };
 }
 function readLoan_(sh, row) {
@@ -8884,7 +9148,7 @@ function readLoan_(sh, row) {
   const H = headerIndex_(sh);
   const cols = borrowerLoanCols_(H);
   const lastCol = Math.max(cols.idC, cols.cliC, cols.capC, cols.plzC, cols.tasC, cols.fecC, cols.venC, cols.intC, cols.totC,
-    cols.propC || 0, cols.titC || 0, cols.tdniC || 0, cols.temailC || 0, cols.tphoneC || 0);
+    cols.propC || 0, cols.titC || 0, cols.tdniC || 0, cols.temailC || 0, cols.tphoneC || 0, cols.tokC || 0, cols.tokIssC || 0);
   const v = sh.getRange(row, 1, 1, lastCol).getValues()[0];
   return parseLoanRow_(v, H, cols);
 }
@@ -8935,8 +9199,15 @@ function spreadsheetParentFolder_() {
   return p.hasNext() ? p.next() : DriveApp.getRootFolder();
 }
 function borrowerMainFolder_() {
+  // PERF: el id de la carpeta madre se cachea en Script Properties → getFolderById (1 round-trip)
+  // en vez de getParents()+getFoldersByName (3) en cada solicitud. Si el id quedó obsoleto, se re-resuelve.
+  const props = PropertiesService.getScriptProperties();
+  const cachedId = props.getProperty('MAIN_FOLDER_ID');
+  if (cachedId) { try { return DriveApp.getFolderById(cachedId); } catch (e) { /* obsoleto → re-resolver */ } }
   const parent = spreadsheetParentFolder_(), it = parent.getFoldersByName(CFG.MAIN_FOLDER);
-  return it.hasNext() ? it.next() : parent.createFolder(CFG.MAIN_FOLDER);
+  const folder = it.hasNext() ? it.next() : parent.createFolder(CFG.MAIN_FOLDER);
+  try { props.setProperty('MAIN_FOLDER_ID', folder.getId()); } catch (e) {}
+  return folder;
 }
 function borrowerFolder_(folderName) {
   if (TEST_MODE) return _fakeFolder_(folderName);

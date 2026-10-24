@@ -536,7 +536,12 @@ function fmtAmount_(n) { return fmtMoney_(n); }
  */
 function submitIntakeSmart(form) {
   return guard_('submitIntakeSmart', function () {
+    // El formulario tiene inputs de archivo → DEBE ser el único parámetro de google.script.run.
+    // Por eso los datos de dispositivo viajan en un campo oculto "deviceMeta" (JSON) del formulario.
+    let meta = {};
+    try { meta = JSON.parse(String(form.deviceMeta || '{}')) || {}; } catch (e) { meta = {}; }
     if (!acceptingApplications_()) throw new Error('En este momento no estamos aceptando nuevas solicitudes de préstamo.');
+    { if (looksLikeBot_(form && form.website, meta && meta.dwellMs)) throw new Error(BOT_FAIL_MSG); } // anti-bot (honeypot)
 
     const mode = String(form.mode || 'new').trim();
     const emV = vEmail_(form.email);
@@ -711,59 +716,50 @@ function submitIntakeSmart(form) {
     const rowVals = [new Date(), safeCell_(name), emV.norm, dnV.norm, phone, amount, term, safeCell_(notes), dniUrl, cuilUrl,
       false, false, 'Pendiente de verificación', false, 'DNI', cuil];
     const row = nbAppend_(nb, rowVals);
-    // Forma de pago: en NB por nombre de encabezado, y en el cliente (para el contrato).
-    try { setSheetFieldByHeader_(nb, row, 'Forma de Pago', safeCell_(payMethodFull)); } catch (e) { logError_('submitIntakeSmart:payMethodNb', e); }
-    try { setClienteFieldByHeader_(clientId, CLIENTE_PAY_HEADER, safeCell_(payMethodFull)); } catch (e) { logError_('submitIntakeSmart:payMethod', e); }
-    nb.getRange(row, 1).setNumberFormat('yyyy-mm-dd hh:mm');
-    nb.getRange(row, 6).setNumberFormat(CFG.CURRENCY_FMT);
-    // Dirección: columna adicional (se resuelve por nombre; se crea si falta en hojas anteriores).
+    // PERF: TODOS los campos extra de "Nuevos Prestatarios" en UN solo setValues (forma de pago,
+    // dirección, referencias, compromiso y datos de la cuenta de destino / titular). Antes eran ~16
+    // setSheetFieldByHeader_ (cada uno releía el encabezado + 1 setValue). El formato de fecha/monto
+    // ya viene de la columna (setupNew_), así que no hace falta setNumberFormat por fila.
     try {
-      const nbMap = headerMap_(nb);
-      let dirCol = nbMap['Dirección'];
-      if (!dirCol) {
-        dirCol = nb.getLastColumn() + 1;
-        nb.getRange(1, dirCol).setValue('Dirección').setFontWeight('bold').setBackground('#1c4587').setFontColor('#fff');
-      }
-      nb.getRange(row, dirCol).setValue(safeCell_(address));
-    } catch (e) { logError_('submitIntakeSmart:direccion', e); }
-
-    // Referencias + compromiso: en "Nuevos Prestatarios" (para revisar) y en "Clientes"
-    // (persisten tras aprobar, cuando se borra la fila de la solicitud → útiles para cobranza).
-    try {
-      setSheetFieldByHeader_(nb, row, 'Ref 1 Nombre', safeCell_(ref1Name));
-      setSheetFieldByHeader_(nb, row, 'Ref 1 Vínculo', safeCell_(ref1Rel));
-      setSheetFieldByHeader_(nb, row, 'Ref 1 Teléfono', ref1PhoneN);
-      setSheetFieldByHeader_(nb, row, 'Ref 2 Nombre', safeCell_(ref2Name));
-      setSheetFieldByHeader_(nb, row, 'Ref 2 Vínculo', safeCell_(ref2Rel));
-      setSheetFieldByHeader_(nb, row, 'Ref 2 Teléfono', ref2PhoneN);
-      setSheetFieldByHeader_(nb, row, 'Compromiso aceptado', new Date());
-    } catch (e) { logError_('submitIntakeSmart:referenciasNb', e); }
-    // Cuenta de destino / titular: queda registrado en "Nuevos Prestatarios" para su revisión
-    // y para que, al aprobar, se notifique al titular con una copia del contrato (V-36).
-    try {
-      setSheetFieldByHeader_(nb, row, '¿Cuenta propia?', isThirdParty ? 'No (tercero)' : 'Sí');
+      const nbFields = {
+        'Forma de Pago': safeCell_(payMethodFull),
+        'Dirección': safeCell_(address),
+        'Ref 1 Nombre': safeCell_(ref1Name), 'Ref 1 Vínculo': safeCell_(ref1Rel), 'Ref 1 Teléfono': ref1PhoneN,
+        'Ref 2 Nombre': safeCell_(ref2Name), 'Ref 2 Vínculo': safeCell_(ref2Rel), 'Ref 2 Teléfono': ref2PhoneN,
+        'Compromiso aceptado': new Date(),
+        '¿Cuenta propia?': isThirdParty ? 'No (tercero)' : 'Sí',
+      };
       if (isThirdParty) {
-        setSheetFieldByHeader_(nb, row, 'Titular de la cuenta', safeCell_(holderName));
-        setSheetFieldByHeader_(nb, row, 'DNI del titular', holderDniN);
-        setSheetFieldByHeader_(nb, row, 'Correo del titular', holderEmailN);
-        setSheetFieldByHeader_(nb, row, 'Teléfono del titular', holderPhoneN);
-        setSheetFieldByHeader_(nb, row, 'DNI titular (frente)', holderFrontUrl);
-        setSheetFieldByHeader_(nb, row, 'DNI titular (dorso)', holderBackUrl);
-        // Enlace de WhatsApp (en la hoja) para pedirle al TITULAR su conformidad.
-        try {
-          const waCol = setSheetFieldByHeader_(nb, row, 'Avisar al titular 📲', '');
-          if (waCol && holderWaUrl) nb.getRange(row, waCol).setFormula('=HYPERLINK("' + holderWaUrl + '","📲 Avisar al titular")');
-        } catch (e) { logError_('submitIntakeSmart:waTitular', e); }
+        nbFields['Titular de la cuenta'] = safeCell_(holderName);
+        nbFields['DNI del titular'] = holderDniN;
+        nbFields['Correo del titular'] = holderEmailN;
+        nbFields['Teléfono del titular'] = holderPhoneN;
+        nbFields['DNI titular (frente)'] = holderFrontUrl;
+        nbFields['DNI titular (dorso)'] = holderBackUrl;
+        nbFields['Avisar al titular 📲'] = '';
       }
-    } catch (e) { logError_('submitIntakeSmart:titular', e); }
+      const nbCols = setSheetFieldsByHeader_(nb, row, nbFields);
+      if (isThirdParty && holderWaUrl && nbCols['Avisar al titular 📲'])
+        nb.getRange(row, nbCols['Avisar al titular 📲']).setFormula('=HYPERLINK("' + holderWaUrl + '","📲 Avisar al titular")');
+    } catch (e) { logError_('submitIntakeSmart:nbFields', e); }
+    // PERF: campos extra del cliente (forma de pago + referencias) en UN solo setValues.
     try {
-      setClienteFieldByHeader_(clientId, 'Ref 1 Nombre', safeCell_(ref1Name));
-      setClienteFieldByHeader_(clientId, 'Ref 1 Vínculo', safeCell_(ref1Rel));
-      setClienteFieldByHeader_(clientId, 'Ref 1 Teléfono', ref1PhoneN);
-      setClienteFieldByHeader_(clientId, 'Ref 2 Nombre', safeCell_(ref2Name));
-      setClienteFieldByHeader_(clientId, 'Ref 2 Vínculo', safeCell_(ref2Rel));
-      setClienteFieldByHeader_(clientId, 'Ref 2 Teléfono', ref2PhoneN);
-    } catch (e) { logError_('submitIntakeSmart:referenciasCliente', e); }
+      const cliFields = {
+        'Ref 1 Nombre': safeCell_(ref1Name), 'Ref 1 Vínculo': safeCell_(ref1Rel), 'Ref 1 Teléfono': ref1PhoneN,
+        'Ref 2 Nombre': safeCell_(ref2Name), 'Ref 2 Vínculo': safeCell_(ref2Rel), 'Ref 2 Teléfono': ref2PhoneN,
+      };
+      cliFields[CLIENTE_PAY_HEADER] = safeCell_(payMethodFull);
+      setClienteFieldsByHeader_(clientId, cliFields);
+    } catch (e) { logError_('submitIntakeSmart:clienteFields', e); }
+
+    // Dispositivo del solicitante: se registra en "Dispositivos" (best-effort), con la misma huella
+    // y ubicación que se captura en la firma. Un fallo acá NUNCA interrumpe la solicitud.
+    try {
+      const devMeta = meta || {};
+      devMeta.deviceFp = (typeof deviceFingerprint_ === 'function') ? deviceFingerprint_(devMeta.device || {}) : '';
+      if (typeof logDeviceInfo_ === 'function')
+        logDeviceInfo_({ loanId: '(solicitud)', clientId: clientId, dni: dnV.norm, name: name, email: emV.norm, direccion: address }, clientId, devMeta);
+    } catch (e) { logError_('submitIntakeSmart:dispositivo', e); }
 
     // Correo de confirmación al solicitante.
     try {
@@ -1458,6 +1454,7 @@ function intakeSmartHtml_() {
           <input type="hidden" name="mode" id="mode" value="new">
           <input type="hidden" name="clientId" id="clientId" value="">
           <input type="hidden" name="reuseRefs" id="reuseRefs" value="">
+          <input type="hidden" name="deviceMeta" id="deviceMeta" value="">
           <div id="stepper">
             <div class="schip active" data-goto="1"><span class="snum">1</span><span class="slbl">Identificación</span></div>
             <div class="schip" data-goto="2"><span class="snum">2</span><span class="slbl">Tus datos</span></div>
@@ -1587,21 +1584,25 @@ function intakeSmartHtml_() {
             </div>
             <small class="fieldErr" id="e_acctOwn"></small>
             <div id="thirdParty" style="display:none">
-              <div style="margin:10px 0;padding:9px 12px;background:#fff4e5;border:1px solid #f0b357;border-radius:8px;color:#7a4a00;font-size:13px;line-height:1.5">
-                ⚠️ <b>El titular de la cuenta será notificado y recibirá una copia del contrato.</b> Si no completás estos datos, el préstamo no puede procesarse.</div>
-              <label>Nombre completo del titular <span class="req">*</span><input name="holderName" id="holderName" autocomplete="off" placeholder="Nombre y apellido del titular"></label>
+              <div style="margin:10px 0;padding:11px 13px;background:#fff4e5;border:1px solid #f0b357;border-left:4px solid #e08600;border-radius:8px;color:#7a4a00;font-size:13px;line-height:1.55">
+                <div style="font-weight:bold;font-size:14px;margin-bottom:4px">👤 Datos de la OTRA persona (el titular de la cuenta)</div>
+                Completá los datos de la <b>persona dueña de la cuenta</b> donde vas a recibir el dinero — <b>NO los tuyos</b>.
+                Esa persona <b>será notificada y recibirá una copia del contrato</b>.
+                <b style="color:#a50e0e">La información debe ser EXACTA y verdadera: si es incorrecta, el préstamo NO se aprueba.</b>
+                Sin estos datos, la solicitud no puede procesarse.</div>
+              <label>Nombre y apellido del titular <span class="hint">— la OTRA persona, dueña de la cuenta</span> <span class="req">*</span><input name="holderName" id="holderName" autocomplete="off" placeholder="Nombre y apellido de la otra persona"></label>
               <small class="fieldErr" id="e_holderName"></small>
               <div class="row2">
-                <div><label>DNI del titular <span class="req">*</span><input name="holderDni" id="holderDni" inputmode="numeric" autocomplete="off" placeholder="XX.XXX.XXX"></label>
+                <div><label>DNI del titular <span class="req">*</span><input name="holderDni" id="holderDni" inputmode="numeric" autocomplete="off" placeholder="DNI de la otra persona"></label>
                   <small class="fieldErr" id="e_holderDni"></small></div>
-                <div><label>Correo del titular <span class="req">*</span><input name="holderEmail" id="holderEmail" type="email" autocomplete="off" placeholder="correo@ejemplo.com"></label>
+                <div><label>Correo del titular <span class="req">*</span><input name="holderEmail" id="holderEmail" type="email" autocomplete="off" placeholder="correo de la otra persona"></label>
                   <small class="fieldErr" id="e_holderEmail"></small></div>
               </div>
-              <label>Teléfono del titular (WhatsApp) <span class="req">*</span><input name="holderPhone" id="holderPhone" inputmode="tel" autocomplete="off" placeholder="11 XXXX XXXX"></label>
+              <label>Teléfono del titular (WhatsApp) <span class="req">*</span><input name="holderPhone" id="holderPhone" inputmode="tel" autocomplete="off" placeholder="WhatsApp de la otra persona"></label>
               <small class="fieldErr" id="e_holderPhone"></small>
-              <label>Foto del frente del DNI del titular <span class="req">*</span> <span class="hint">— imagen o PDF, nítida</span><input name="holderDniFront" id="holderDniFront" type="file" accept="image/*,.pdf" capture="environment"></label>
+              <label>Foto del frente del DNI del titular <span class="req">*</span> <span class="hint">— el DNI de la OTRA persona, imagen o PDF nítida</span><input name="holderDniFront" id="holderDniFront" type="file" accept="image/*,.pdf" capture="environment"></label>
               <small class="fieldErr" id="e_holderDniFront"></small>
-              <label>Foto del dorso del DNI del titular <span class="req">*</span> <span class="hint">— imagen o PDF, nítida</span><input name="holderDniBack" id="holderDniBack" type="file" accept="image/*,.pdf" capture="environment"></label>
+              <label>Foto del dorso del DNI del titular <span class="req">*</span> <span class="hint">— el DNI de la OTRA persona, imagen o PDF nítida</span><input name="holderDniBack" id="holderDniBack" type="file" accept="image/*,.pdf" capture="environment"></label>
               <small class="fieldErr" id="e_holderDniBack"></small>
             </div>
           </div>
@@ -1651,6 +1652,7 @@ function intakeSmartHtml_() {
           <label class="agree" id="agreeLabel"><input type="checkbox" name="agree" id="agree" required>
             <span>He leído y acepto los <b>Términos y Condiciones</b> del préstamo. <span class="req">*</span></span></label>
           <small class="fieldErr" id="e_agree"></small>
+          ${honeypotTrapHtml_()}
           <button type="submit" id="btn">Enviar solicitud</button>
           </div><!-- /paso 6 -->
 
@@ -1680,7 +1682,48 @@ function intakeSmartHtml_() {
     <div id="successView"></div>
     </div>
     <script>
+      ${deviceCaptureJs_()}
       var f=document.getElementById('f'),btn=document.getElementById('btn'),msg=document.getElementById('msg'),calc=document.getElementById('calc');
+      // PERF: comprime/achica cada foto en el navegador ANTES de subir (canvas → JPEG). Un DNI de
+      // teléfono de ~5 MB baja a ~0,3 MB → la subida y el guardado en Drive son mucho más rápidos.
+      function compressImageFile(file, maxEdge, quality){
+        return new Promise(function(resolve){
+          try{
+            if(!file || !file.type || file.type.indexOf('image/')!==0){ resolve(file); return; } // PDF/otros: sin cambios
+            var url=URL.createObjectURL(file), img=new Image();
+            img.onload=function(){
+              try{
+                var w=img.naturalWidth||img.width, h=img.naturalHeight||img.height;
+                var scale=Math.min(1, maxEdge/Math.max(w, h||1));
+                var nw=Math.max(1,Math.round(w*scale)), nh=Math.max(1,Math.round(h*scale));
+                var cv=document.createElement('canvas'); cv.width=nw; cv.height=nh;
+                cv.getContext('2d').drawImage(img,0,0,nw,nh);
+                try{ URL.revokeObjectURL(url); }catch(e){}
+                cv.toBlob(function(blob){
+                  if(!blob || blob.size>=file.size){ resolve(file); return; } // no mejoró → original
+                  var nm=(file.name||'foto').replace(/\.[^.]+$/,'')+'.jpg';
+                  try{ resolve(new File([blob], nm, {type:'image/jpeg'})); }catch(e){ resolve(file); }
+                },'image/jpeg', quality);
+              }catch(e){ try{URL.revokeObjectURL(url);}catch(_){ } resolve(file); }
+            };
+            img.onerror=function(){ try{URL.revokeObjectURL(url);}catch(e){} resolve(file); };
+            img.src=url;
+          }catch(e){ resolve(file); }
+        });
+      }
+      function compressFormImages(ids){
+        return Promise.all(ids.map(function(id){
+          var input=document.getElementById(id);
+          if(!input || !input.files || !input.files.length) return Promise.resolve();
+          return compressImageFile(input.files[0], 1600, 0.72).then(function(out){
+            try{
+              if(out && (out instanceof File) && out!==input.files[0] && typeof DataTransfer!=='undefined'){
+                var dt=new DataTransfer(); dt.items.add(out); input.files=dt.files;
+              }
+            }catch(e){}
+          }).catch(function(){});
+        })).catch(function(){ return null; });
+      }
       var formView=document.getElementById('formView'),loadingView=document.getElementById('loadingView'),successView=document.getElementById('successView');
       var step1=document.getElementById('step1'),rest=document.getElementById('rest'),lookupMsg=document.getElementById('lookupMsg');
       var emailEl=document.getElementById('email'),dniEl=document.getElementById('dni'),modeEl=document.getElementById('mode'),clientIdEl=document.getElementById('clientId');
@@ -2123,7 +2166,26 @@ function intakeSmartHtml_() {
         confirmOverlay.style.display='none';
         msg.style.display='none';btn.disabled=true;btn.textContent='Subiendo…';formView.style.display='none';loadingView.style.display='block';
         startProgress();
-        google.script.run.withSuccessHandler(onSuccess).withFailureHandler(onFail).submitIntakeSmart(f);
+        // El envío NUNCA debe quedar colgado por la captura de dispositivo: se corre con un tope de
+        // 4 s y, pase lo que pase, se envía (con los datos que haya o vacío). Si la llamada al
+        // servidor falla al serializar el formulario, se MUESTRA el error en vez de quedar en 96%.
+        var sent=false;
+        function enviar(device){ if(sent)return; sent=true;
+          try{ var meta = { userAgent: navigator.userAgent, ip: CLIENT_IP, device: device||{}, dwellMs: Date.now()-PAGE_OPEN };
+            var dm=document.getElementById('deviceMeta'); if(dm) dm.value=JSON.stringify(meta); }catch(e){}
+          try{ setProgress(45,'Optimizando las fotos…'); }catch(e){}
+          // Comprime las fotos en el navegador ANTES de subir; luego el formulario (con archivos) se
+          // envía SOLO (sin 2º parámetro), con deviceMeta/honeypot dentro del propio form.
+          compressFormImages(['dniPhoto','cuilPhoto','holderDniFront','holderDniBack']).then(function(){
+            try{ setProgress(62,'Subiendo la solicitud…'); }catch(e){}
+            try{ google.script.run.withSuccessHandler(onSuccess).withFailureHandler(onFail).submitIntakeSmart(f); }
+            catch(err){ onFail(err); }
+          });
+        }
+        Promise.race([
+          collectDeviceInfo().catch(function(){ return {}; }),
+          new Promise(function(res){ setTimeout(function(){ res({}); }, 4000); })
+        ]).then(enviar);
       });
       f.addEventListener('submit',function(e){
         e.preventDefault();
