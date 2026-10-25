@@ -35,7 +35,7 @@ const CFG = {
     PANEL: 'Panel', STATS: 'Estadísticas', LATE: 'Pagos Atrasados', PLAN: 'En Plan', CLEARED: 'Saldados', REJECTED: 'Rechazados', ERRORS: 'Errores', HELP: 'Instrucciones',
     SIGN: 'Firmas', CLIENTS: 'Clientes', INSTALLMENTS: 'Cuotas', LEVELS: 'Niveles de Clientes',
     DEVICES: 'Dispositivos', FREEZE_REQ: 'Solicitudes de Congelamiento', PLAN_REQ: 'Solicitudes de Plan de Pago',
-    PAYFORM: 'Registrar Pago', DNI_CHECK: 'Verificación de DNI',
+    PAYFORM: 'Registrar Pago', DNI_CHECK: 'Verificación de DNI', PROSPECTS: 'Prospectos',
   },
 };
 const ST = { ACTIVE: 'ACTIVO', OVERDUE: 'VENCIDO', PAID: 'PAGADO', CLEARED: 'SALDADO', PLAN: 'EN PLAN', FROZEN: 'CONGELADO' };
@@ -407,7 +407,7 @@ function setup() {
   PropertiesService.getScriptProperties().setProperty('SS_ID', ss.getId());
   setupSettings_(ss); setupClientes_(ss); setupBorrowers_(ss); setupPayments_(ss); setupCuotas_(ss); setupSummary_(ss);
   setupAgreement_(ss); setupStatements_(ss); setupPaymentForm_(ss); setupReminders_(ss); setupNew_(ss); setupPanel_(ss); setupStats_(ss); setupLate_(ss); setupCleared_(ss); setupRejected_(ss);
-  setupErrors_(ss); setupHelp_(ss); setupFirmas_(ss); setupDispositivos_(ss); setupFreezeRequests_(ss); setupPlanRequests_(ss);
+  setupErrors_(ss); setupHelp_(ss); setupFirmas_(ss); setupDispositivos_(ss); setupProspectos_(ss); setupFreezeRequests_(ss); setupPlanRequests_(ss);
   rebuildLateSheet_(ss);
   ensureTriggers_();
   const s1 = ss.getSheetByName('Sheet1') || ss.getSheetByName('Hoja 1');
@@ -632,6 +632,9 @@ function applyFeatureUpdates() {
     //    reconstrucción reafirma los encabezados nuevos y recalcula el % del tope.
     try { rebuildLateSheet_(ss); done.push('columnas «Tope de mora» + «Plan de pago 📅» en «Pagos Atrasados»'); }
     catch (e) { logError_('applyFeatureUpdates:pagosAtrasados', e); }
+    // 9) Hoja "Prospectos" (interesados cuando no hay fondos). No destructivo: crea la hoja si falta.
+    try { setupProspectos_(ss); done.push('hoja «Prospectos» (formulario ?page=prospecto)'); }
+    catch (e) { logError_('applyFeatureUpdates:prospectos', e); }
     // El onEdit (casillas que envían correos) requiere el disparador instalable.
     try { if (typeof ensureTriggers_ === 'function') ensureTriggers_(); } catch (e) { logError_('applyFeatureUpdates:triggers', e); }
     ui.alert('Novedades aplicadas',
@@ -1206,6 +1209,110 @@ function setupDispositivos_(ss) {
   return sh;
 }
 
+/**
+ * Hoja de "Prospectos" (interesados cuando NO estamos prestando). Capta nombre, CUIL y
+ * teléfono de quienes dejan sus datos para que los contactemos cuando haya fondos.
+ * IMPORTANTE: "Nombre" DEBE ser la columna B — nbAppend_ busca la primera fila vacía
+ * mirando la columna B, por lo que esa columna nunca debe quedar vacía.
+ */
+const PROSPECTOS_HEADERS = ['Fecha de Captura', 'Nombre', 'CUIL', 'Teléfono', 'Estado', 'Contactado?', 'Nota', 'Aprobar y avisar 📲', 'Rechazar?', 'WhatsApp 📲'];
+function setupProspectos_(ss) {
+  ss = ss || getSS_();
+  const sh = getOrCreate_(ss, CFG.SHEETS.PROSPECTS);
+  // No destructivo: solo escribe el encabezado si falta o cambió; nunca borra filas.
+  const head = sh.getLastRow() >= 1 ? sh.getRange(1, 1, 1, PROSPECTOS_HEADERS.length).getValues()[0].map(h => String(h).trim()) : [];
+  if (head.join('|') !== PROSPECTOS_HEADERS.join('|')) {
+    sh.getRange(1, 1, 1, PROSPECTOS_HEADERS.length).setValues([PROSPECTOS_HEADERS])
+      .setFontWeight('bold').setBackground('#1c4587').setFontColor('#fff').setWrap(true);
+    [150, 220, 140, 140, 110, 110, 260, 160, 110, 180].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+    sh.getRange(2, 1, CFG.MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd hh:mm');
+  }
+  const cb = SpreadsheetApp.newDataValidation().requireCheckbox().build();
+  // Botón de APROBAR (casilla de acción): al tildarla, el onEdit abre WhatsApp con un mensaje
+  // amable + el enlace al formulario de solicitud y marca el prospecto APROBADO. Idempotente.
+  const apCol = PROSPECTOS_HEADERS.indexOf('Aprobar y avisar 📲') + 1;
+  if (apCol > 0) {
+    sh.getRange(2, apCol, CFG.MAX_ROWS, 1).setDataValidation(cb);
+    sh.getRange(1, apCol).setNote('Tildá para APROBAR: se abre WhatsApp con un mensaje amable y el enlace al formulario de solicitud, y queda el enlace en «WhatsApp 📲». La casilla se destilda sola.');
+  }
+  // Botón de RECHAZAR (casilla de acción): al tildarla, el onEdit marca el prospecto RECHAZADO.
+  const rjCol = PROSPECTOS_HEADERS.indexOf('Rechazar?') + 1;
+  if (rjCol > 0) {
+    sh.getRange(2, rjCol, CFG.MAX_ROWS, 1).setDataValidation(cb);
+    sh.getRange(1, rjCol).setNote('Tildá para RECHAZAR el prospecto (Estado = RECHAZADO). No envía nada. La casilla se destilda sola.');
+  }
+  const waCol = PROSPECTOS_HEADERS.indexOf('WhatsApp 📲') + 1;
+  if (waCol > 0) sh.getRange(1, waCol).setNote('Enlace de WhatsApp (se completa al aprobar). Tocalo para reenviar el mensaje con el formulario de solicitud.');
+  sh.setFrozenRows(1);
+  return sh;
+}
+
+/**
+ * Crea SOLO la hoja "Prospectos" sin tocar el resto del libro (idempotente y NO destructivo).
+ * Pensada para ejecutarse sola desde el editor de Apps Script o el menú: si la hoja ya existe
+ * no borra filas — solo verifica/repara el encabezado. Deja la hoja visible y activa.
+ */
+function crearHojaProspectos() {
+  return guard_('crearHojaProspectos', function () {
+    const ss = getSS_();
+    const existed = !!ss.getSheetByName(CFG.SHEETS.PROSPECTS);
+    const sh = setupProspectos_(ss);
+    try { sh.showSheet(); sh.activate(); } catch (e) { }
+    try {
+      ss.toast(existed
+        ? 'La hoja «Prospectos» ya existía; se verificó el encabezado (no se borró nada).'
+        : 'Se creó la hoja «Prospectos».', 'Prospectos', 5);
+    } catch (e) { }
+    return sh;
+  });
+}
+
+/**
+ * Aprueba un prospecto (fila de "Prospectos"): lo marca APROBADO/Contactado, arma el mensaje de
+ * WhatsApp con un saludo amable + el enlace al formulario de solicitud (webAppBaseUrl_), deja el
+ * enlace clickeable en «WhatsApp 📲» y abre WhatsApp en un diálogo. El número sale del teléfono
+ * del prospecto (wa.me con el 9 móvil, vía waNumberAR_). Lanza error si no hay teléfono válido.
+ */
+function aprobarProspecto_(sh, row) {
+  const H = headerMap_(sh);
+  const name = String((H['Nombre'] ? sh.getRange(row, H['Nombre']).getValue() : '') || '').trim();
+  const phone = String((H['Teléfono'] ? sh.getRange(row, H['Teléfono']).getValue() : '') || '').trim();
+  if (H['Estado']) sh.getRange(row, H['Estado']).setValue('APROBADO');
+  if (H['Contactado?']) sh.getRange(row, H['Contactado?']).setValue('Sí');
+  const num = waNumberAR_(phone), waColC = H['WhatsApp 📲'];
+  if (!num) {
+    if (waColC) sh.getRange(row, waColC).setValue('sin teléfono');
+    throw new Error('Prospecto marcado APROBADO, pero no tiene un teléfono válido para WhatsApp.');
+  }
+  const firstName = name.split(/\s+/)[0] || name || 'Hola';
+  const empresa = companyName_(), url = webAppBaseUrl_(), nl = '\n';
+  const msg = '¡Hola ' + firstName + '! 👋 Te escribimos de ' + empresa + '.' + nl +
+    '¡Buenas noticias! Ya tenemos cupo disponible y te invitamos a solicitar tu préstamo. 🎉' + nl +
+    'Completá tu solicitud acá:' + nl + (url || '(falta configurar la URL de la app web en Configuración)') + nl +
+    'Cualquier duda, respondé este mensaje. ¡Gracias por tu paciencia! 💛';
+  const waUrl = 'https://wa.me/' + num + '?text=' + encodeURIComponent(msg);
+  if (waColC) sh.getRange(row, waColC).setFormula('=HYPERLINK("' + waUrl + '","📲 Enviar solicitud")');
+  try { openWhatsAppDialog_(waUrl, firstName); } catch (e) { logError_('aprobarProspecto_:dialog', e); }
+  try { getSS_().toast('Prospecto «' + (name || firstName) + '» aprobado. Se abrió WhatsApp (o tocá «WhatsApp 📲»).', '✅ Prospecto aprobado', 6); } catch (e) { }
+}
+
+/**
+ * Diálogo que abre WhatsApp con el mensaje ya armado: intenta auto-abrir la pestaña y ofrece un
+ * botón manual por si el navegador bloquea el popup. Best-effort: si no hay contexto de interfaz
+ * (p. ej. edición sin la hoja abierta), el llamador lo ignora y queda el enlace en la celda.
+ */
+function openWhatsAppDialog_(waUrl, name) {
+  const html = '<!DOCTYPE html><html><head><base target="_blank">' +
+    '<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;text-align:center;padding:18px;color:#1f2733}' +
+    'a.btn{display:inline-block;margin-top:10px;background:#25D366;color:#fff;text-decoration:none;font-weight:700;padding:12px 18px;border-radius:10px;font-size:15px}' +
+    'p{color:#555;font-size:14px;line-height:1.5}</style></head><body>' +
+    '<p>Mensaje de WhatsApp para <b>' + esc_(name || '') + '</b> listo.<br>Si no se abrió solo, tocá el botón:</p>' +
+    '<a class="btn" href="' + esc_(waUrl) + '" target="_blank" onclick="setTimeout(google.script.host.close,500)">📲 Abrir WhatsApp</a>' +
+    '<script>try{window.open(' + JSON.stringify(waUrl) + ',"_blank");}catch(e){}</script></body></html>';
+  const out = HtmlService.createHtmlOutput(html).setWidth(360).setHeight(190);
+  SpreadsheetApp.getUi().showModalDialog(out, 'Enviar solicitud por WhatsApp');
+}
+
 /** ¿Capturar ubicación en la firma? Interruptor de "Configuración" (default: SÍ). */
 function locationFlag_() {
   const v = String(getSetting_('Capturar ubicación en la firma (SÍ/NO)') || 'SÍ').trim().toUpperCase();
@@ -1271,11 +1378,39 @@ function logDeviceInfo_(loan, clientId, meta) {
 function deviceCaptureJs_() {
   const cap = locationFlag_() ? 'true' : 'false';
   return `
-      var CLIENT_IP='', PAGE_OPEN=Date.now(), CAPTURE_LOC=${cap};
+      var CLIENT_IP='', PAGE_OPEN=Date.now(), CAPTURE_LOC=${cap}, DEV_INFO=null;
       try{ fetch('https://api.ipify.org?format=json').then(function(r){return r.json();}).then(function(j){ CLIENT_IP=(j&&j.ip)||''; }).catch(function(){}); }catch(e){}
       function withTimeout(p, ms){ return Promise.race([p, new Promise(function(res){ setTimeout(res, ms); })]); }
+      // Respaldo SIN backslash en regex (como el resto del formulario): cuando NO hay User-Agent
+      // Client Hints (Firefox, Safari, navegadores viejos) deduce SO / navegador / modelo del userAgent.
+      function uaFill(dev){
+        var ua = (dev && dev.userAgent) || ''; if(!ua) return; var m;
+        if(!dev.browser){
+          if((m=ua.match(/Firefox[/]([0-9.]+)/))) dev.browser='Firefox '+m[1];
+          else if((m=ua.match(/Edg[/]([0-9.]+)/))) dev.browser='Edge '+m[1];
+          else if((m=ua.match(/SamsungBrowser[/]([0-9.]+)/))) dev.browser='Samsung Internet '+m[1];
+          else if((m=ua.match(/OPR[/]([0-9.]+)/))) dev.browser='Opera '+m[1];
+          else if((m=ua.match(/(?:CriOS|Chrome)[/]([0-9.]+)/))) dev.browser='Chrome '+m[1];
+          else if(ua.indexOf('Safari')>=0 && (m=ua.match(/Version[/]([0-9.]+)/))) dev.browser='Safari '+m[1];
+        }
+        var os='';
+        if((m=ua.match(/Android ([0-9.]+)/))) os='Android '+m[1];
+        else if((m=ua.match(/OS ([0-9_]+) like Mac/))) os='iOS '+m[1].split('_').join('.');
+        else if(ua.indexOf('iPhone')>=0||ua.indexOf('iPad')>=0) os='iOS';
+        else if((m=ua.match(/Windows NT ([0-9.]+)/))){ var W={'10.0':'10/11','6.3':'8.1','6.2':'8','6.1':'7'}; os='Windows '+(W[m[1]]||m[1]); }
+        else if((m=ua.match(/Mac OS X ([0-9_]+)/))) os='macOS '+m[1].split('_').join('.');
+        else if(ua.indexOf('CrOS')>=0) os='ChromeOS';
+        else if(ua.indexOf('Linux')>=0) os='Linux';
+        var plat=(navigator&&navigator.platform)||'';
+        if(os && (!dev.os || dev.os===plat)) dev.os=os;
+        if(!dev.model){
+          var mo=ua.match(/Android[^;]*; ([^;)]+?)(?: Build|[;)])/);
+          if(mo){ var cand=mo[1].trim(); if(cand && cand!=='Mobile' && cand!=='Tablet' && cand!=='K') dev.model=cand; }
+        }
+      }
       function collectDeviceInfo(){
         var dev = { loc: { source:'desactivada', ipText:'', gps:'', gpsAcc:null, gpsStatus:'' } };
+        DEV_INFO = dev; // expuesto: si el envío vence el tope de espera, se manda lo YA recolectado (no {})
         try {
           var s = window.screen||{}, n = navigator||{};
           dev.screen = (s.width||'')+'x'+(s.height||'');
@@ -1292,6 +1427,7 @@ function deviceCaptureJs_() {
           dev.os = n.platform||''; dev.browser=''; dev.model=''; dev.arch='';
           dev.userAgent = n.userAgent||'';
         } catch(e){}
+        try { uaFill(dev); } catch(e){} // respaldo por userAgent (UA-CH lo sobrescribe luego si existe)
         var jobs = [];
         try {
           if (navigator.userAgentData && navigator.userAgentData.getHighEntropyValues) {
@@ -5219,6 +5355,7 @@ function showWebFormLink() {
     const cfg = String(getSetting_('URL de la app web (enlaces a clientes)') || '').trim();
     SpreadsheetApp.getUi().alert('Formulario de solicitud (compartir con solicitantes):\n' + url +
       '\n\nConsulta de saldo (para prestatarios):\n' + url + '?page=saldo' +
+      '\n\nFormulario de prospectos (interesados — se comparte haya fondos o no):\n' + url + '?page=prospecto' +
       '\n\nIMPORTANTE: para que los enlaces de FIRMA que se envían a los clientes usen la URL correcta, ' +
       'pegue la URL de su implementación (la que termina en /exec) en:\n' +
       'Configuración ▸ "URL de la app web (enlaces a clientes)".' +
@@ -5246,6 +5383,10 @@ function doGet(e) {
     .setTitle('Solicitud de congelamiento').addMetaTag('viewport', 'width=device-width, initial-scale=1');
   if (page === 'plan') return HtmlService.createHtmlOutput(planRequestFormHtml_(loanParam, t))
     .setTitle('Solicitud de plan de pago').addMetaTag('viewport', 'width=device-width, initial-scale=1');
+  // Formulario de prospectos (interesados): SIEMPRE disponible, haya fondos o no.
+  // No depende de acceptingApplications_() ni de ninguna otra condición.
+  if (page === 'prospecto') return HtmlService.createHtmlOutput(prospectoFormHtml_())
+    .setTitle('Sumate a Impulso Crédito').addMetaTag('viewport', 'width=device-width, initial-scale=1');
   // Formulario clásico disponible en ?page=clasico; por defecto se sirve el
   // formulario inteligente (detecta clientes existentes por Correo + DNI).
   if (page === 'clasico') return HtmlService.createHtmlOutput(acceptingApplications_() ? intakeHtml_() : closedHtml_())
@@ -7256,6 +7397,29 @@ function onEditInstallable(e) {
     const sh = e.range.getSheet(), name = sh.getName();
     const c0 = e.range.getColumn(), cN = c0 + e.range.getNumColumns() - 1;
     const r0 = Math.max(e.range.getRow(), 2), rN = e.range.getRow() + e.range.getNumRows() - 1;
+    // Prospectos: casilla "Aprobar y avisar 📲" → marca APROBADO y abre WhatsApp con el enlace al
+    // formulario de solicitud. Es una acción (se destilda) y deja el enlace en «WhatsApp 📲».
+    if (name === CFG.SHEETS.PROSPECTS) {
+      const PH = headerMap_(sh), apCol = PH['Aprobar y avisar 📲'] || 0, rjCol = PH['Rechazar?'] || 0;
+      if (apCol && apCol >= c0 && apCol <= cN) {
+        for (let row = rN; row >= r0; row--) {
+          if (sh.getRange(row, apCol).getValue() !== true) continue;
+          sh.getRange(row, apCol).setValue(false); // acción: se destilda
+          try { aprobarProspecto_(sh, row); }
+          catch (err) { logError_('onEdit:PROSPECTOS:aprobar', err); try { getSS_().toast(err.message || String(err), '⚠ Aprobar prospecto', 8); } catch (e2) { } }
+        }
+      }
+      if (rjCol && rjCol >= c0 && rjCol <= cN) {
+        for (let row = rN; row >= r0; row--) {
+          if (sh.getRange(row, rjCol).getValue() !== true) continue;
+          sh.getRange(row, rjCol).setValue(false); // acción: se destilda
+          if (PH['Estado']) sh.getRange(row, PH['Estado']).setValue('RECHAZADO');
+          const nm = PH['Nombre'] ? String(sh.getRange(row, PH['Nombre']).getValue() || '').trim() : '';
+          try { getSS_().toast('Prospecto' + (nm ? (' «' + nm + '»') : '') + ' marcado RECHAZADO.', '🚫 Prospecto', 5); } catch (e3) { }
+        }
+      }
+      return;
+    }
     if (name === CFG.SHEETS.PAYMENTS) {
       // Al elegir un ID Préstamo (B): autogenerar el ID Pago (A) si falta,
       // autocompletar Nombre (G) y DNI (H), y preparar la Fecha de Pago (C):

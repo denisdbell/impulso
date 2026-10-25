@@ -1444,7 +1444,127 @@ function intakeSmartHtml_() {
     #prevBtn{background:#fff;color:var(--brand);border:1px solid var(--field);box-shadow:none;flex:0 0 auto;width:auto;padding:14px 18px;margin-top:0}
     #prevBtn:hover{background:#f5f8fd}
     #nextBtn{margin-top:0}
-    @media(prefers-reduced-motion:reduce){.wstep{animation:none}}</style></head><body>
+    @media(prefers-reduced-motion:reduce){.wstep{animation:none}}
+    /* ===== Splash: arranque seguro empresarial ===== */
+    #splash{position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;
+      align-items:center;justify-content:center;overflow:hidden;
+      background:radial-gradient(130% 120% at 50% 40%,#20467f 0,#163a66 44%,#0f2744 80%,#0b1d35 100%);
+      transition:opacity .55s cubic-bezier(.4,0,.2,1),transform .55s cubic-bezier(.4,0,.2,1)}
+    #splash.hide{opacity:0;transform:scale(1.045);pointer-events:none}
+    #splash .sb-field{position:absolute;inset:-28%;z-index:0;opacity:.42;pointer-events:none;
+      background-image:radial-gradient(rgba(255,255,255,.13) 1px,transparent 1.4px);
+      background-size:36px 36px;transform:translate3d(0,0,0);animation:sbDrift 32s linear infinite}
+    #splash .sb-field.sb-near{opacity:.22;background-size:76px 76px;
+      background-image:radial-gradient(rgba(232,163,61,.17) 1.4px,transparent 2px);animation:sbDriftNear 44s linear infinite}
+    #splash .sb-vignette{position:absolute;inset:0;z-index:1;pointer-events:none;
+      background:radial-gradient(72% 62% at 50% 46%,transparent 0,transparent 52%,rgba(8,20,38,.6) 100%)}
+    .sb-stage{position:relative;z-index:2;display:flex;flex-direction:column;align-items:center;text-align:center;padding:0 24px}
+    .sb-ring{position:relative;width:138px;height:138px;display:flex;align-items:center;justify-content:center;border-radius:50%}
+    .sb-ring::before,.sb-ring::after{content:"";position:absolute;inset:0;border-radius:50%}
+    .sb-ring::before{border:1px solid rgba(255,255,255,.16)}
+    .sb-bloom{position:absolute;z-index:0;width:196px;height:196px;border-radius:50%;pointer-events:none;
+      background:radial-gradient(closest-side,rgba(232,163,61,.4),rgba(232,163,61,.12) 55%,transparent 72%);
+      opacity:0;transform:scale(.6);animation:sbBloom 1s cubic-bezier(.22,.9,.26,1) 300ms both}
+    .sb-ring::after{
+      background:conic-gradient(from -90deg,rgba(255,255,255,0) 0deg,rgba(255,255,255,0) 210deg,rgba(255,255,255,.22) 300deg,rgba(255,255,255,.78) 348deg,rgba(255,255,255,.78) 360deg);
+      -webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 2px));
+      mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 2px));
+      opacity:0;transform:rotate(0deg);will-change:transform,opacity;animation:sbSweep 1150ms cubic-bezier(.3,.7,.2,1) 120ms both}
+    .sb-logo{position:relative;z-index:2;display:inline-flex;align-items:center;justify-content:center;
+      line-height:0;opacity:0;transform:scale(.92);filter:blur(5px);will-change:transform,opacity,filter;
+      animation:sbLogoIn 560ms cubic-bezier(.2,.8,.2,1) 220ms both}
+    .sb-logo>*{position:relative;z-index:1}
+    .sb-logo img,.sb-logo span{display:block}
+    .sb-sheen{position:absolute;top:-45%;left:-60%;width:52%;height:190%;z-index:2;pointer-events:none;
+      border-radius:14px;opacity:0;transform:translateX(0) rotate(18deg);
+      background:linear-gradient(90deg,rgba(255,255,255,0) 0,rgba(255,255,255,.12) 38%,rgba(255,255,255,.62) 50%,rgba(255,255,255,.12) 62%,rgba(255,255,255,0) 100%);
+      mix-blend-mode:screen;animation:sbSheen 1s cubic-bezier(.42,0,.2,1) 980ms both}
+    .sb-brk{position:absolute;width:24px;height:24px;border:1.6px solid rgba(255,255,255,.7);opacity:0;will-change:transform,opacity}
+    .sb-brk.tl{top:-15px;left:-15px;border-right:0;border-bottom:0;transform:translate(-16px,-16px);animation:sbBrk 600ms cubic-bezier(.2,.8,.2,1) 1180ms both}
+    .sb-brk.tr{top:-15px;right:-15px;border-left:0;border-bottom:0;transform:translate(16px,-16px);animation:sbBrk 600ms cubic-bezier(.2,.8,.2,1) 1240ms both}
+    .sb-brk.bl{bottom:-15px;left:-15px;border-right:0;border-top:0;transform:translate(-16px,16px);animation:sbBrk 600ms cubic-bezier(.2,.8,.2,1) 1300ms both}
+    .sb-brk.br{bottom:-15px;right:-15px;border-left:0;border-top:0;transform:translate(16px,16px);animation:sbBrk 600ms cubic-bezier(.2,.8,.2,1) 1360ms both}
+    .sb-wordmark{margin-top:20px;opacity:0;transform:translateY(12px);animation:sbRise 560ms cubic-bezier(.2,.8,.2,1) 900ms both}
+    .sb-wordmark span{color:#fff !important}
+    .sb-wordmark span+span{color:#e8a33d !important}
+    .sb-tag{margin-top:8px;font-size:13px;letter-spacing:.02em;color:rgba(234,241,251,.74);
+      opacity:0;transform:translateY(10px);animation:sbRise 560ms cubic-bezier(.2,.8,.2,1) 1020ms both}
+    .sb-track{margin-top:26px;width:216px;max-width:62vw;height:3px;border-radius:3px;
+      background:rgba(255,255,255,.14);overflow:hidden;opacity:0;animation:sbFadeIn 420ms ease 1120ms both}
+    .sb-fill{height:100%;width:100%;border-radius:3px;background:linear-gradient(90deg,#3f6fb0,#e8a33d);
+      transform:scaleX(0);transform-origin:left center;will-change:transform}
+    .sb-status{margin-top:13px;height:17px;display:flex;align-items:center;gap:8px;
+      font-size:12.5px;font-weight:600;letter-spacing:.01em;color:rgba(234,241,251,.86);
+      opacity:0;animation:sbFadeIn 420ms ease 1180ms both}
+    .sb-glyph{position:relative;width:14px;height:14px;flex:0 0 14px}
+    .sb-glyph svg{display:block;width:14px;height:14px}
+    .sb-ico{opacity:0;transform:scale(.6);transition:opacity .22s ease,transform .22s cubic-bezier(.2,.9,.3,1);position:absolute;inset:0}
+    .sb-ico.on{opacity:1;transform:scale(1)}
+    .sb-ico path,.sb-ico rect{stroke:rgba(234,241,251,.9);stroke-width:1.7;fill:none;stroke-linecap:round;stroke-linejoin:round}
+    .sb-tick path{stroke:#e8a33d;stroke-dasharray:22;stroke-dashoffset:22;transition:stroke-dashoffset .32s ease}
+    .sb-ico.on .sb-tick-draw{stroke-dashoffset:0}
+    .sb-label{transition:opacity .24s ease}
+    .sb-status.swap .sb-label{opacity:0}
+    .sb-sep{color:rgba(234,241,251,.4)}
+    .sb-pct{color:#e8a33d;font-weight:700;font-variant-numeric:tabular-nums;min-width:36px;text-align:right}
+    #card{opacity:0;transform:translateY(22px) scale(.986);
+      transition:opacity .55s cubic-bezier(.22,.9,.26,1),transform .55s cubic-bezier(.22,.9,.26,1)}
+    #card.sb-reveal{opacity:1;transform:translateY(0) scale(1)}
+    @keyframes sbDrift{0%{transform:translate3d(0,0,0)}100%{transform:translate3d(-36px,-36px,0)}}
+    @keyframes sbDriftNear{0%{transform:translate3d(0,0,0)}100%{transform:translate3d(76px,38px,0)}}
+    @keyframes sbSweep{0%{opacity:0;transform:rotate(-20deg)}12%{opacity:1}88%{opacity:1}100%{opacity:0;transform:rotate(345deg)}}
+    @keyframes sbBloom{0%{opacity:0;transform:scale(.6)}55%{opacity:1;transform:scale(1.04)}100%{opacity:.78;transform:scale(1)}}
+    @keyframes sbLogoIn{0%{opacity:0;transform:scale(.92);filter:blur(5px)}60%{opacity:1;filter:blur(0)}100%{opacity:1;transform:scale(1);filter:blur(0)}}
+    @keyframes sbSheen{0%{opacity:0;transform:translateX(0) rotate(18deg)}12%{opacity:1}88%{opacity:1}100%{opacity:0;transform:translateX(330%) rotate(18deg)}}
+    @keyframes sbBrk{0%{opacity:0}100%{opacity:1;transform:translate(0,0)}}
+    @keyframes sbRise{0%{opacity:0;transform:translateY(12px)}100%{opacity:1;transform:translateY(0)}}
+    @keyframes sbFadeIn{0%{opacity:0}100%{opacity:1}}
+    @media(prefers-reduced-motion:reduce){
+      #splash{transition:opacity .3s ease;background:radial-gradient(120% 120% at 50% 42%,#20467f,#0f2744)}
+      #splash.hide{transform:none}
+      #splash .sb-field,.sb-bloom,.sb-ring::after,.sb-sheen,.sb-brk{animation:none}
+      #splash .sb-field,#splash .sb-field.sb-near{opacity:0}
+      .sb-ring::after,.sb-sheen{opacity:0}
+      .sb-bloom{opacity:.55;transform:none}
+      .sb-brk{opacity:1;transform:translate(0,0)}
+      .sb-logo{animation:none;opacity:1;transform:none;filter:none}
+      .sb-wordmark,.sb-tag,.sb-track,.sb-status{animation:none;opacity:1;transform:none}
+      .sb-fill{transform:scaleX(1)}
+      .sb-ico{transition:none}.sb-tick path{transition:none}.sb-label{transition:none}
+      #card{transition:opacity .3s ease}
+      #card,#card.sb-reveal{transform:none}
+      button:active{transform:none}}
+    </style></head><body>
+    <div id="splash" role="presentation">
+      <div class="sb-field" aria-hidden="true"></div>
+      <div class="sb-field sb-near" aria-hidden="true"></div>
+      <div class="sb-vignette" aria-hidden="true"></div>
+      <div class="sb-stage">
+        <div class="sb-ring">
+          <div class="sb-bloom" aria-hidden="true"></div>
+          <div class="sb-logo">
+            <div class="sb-sheen" aria-hidden="true"></div>
+            <span class="sb-brk tl" aria-hidden="true"></span>
+            <span class="sb-brk tr" aria-hidden="true"></span>
+            <span class="sb-brk bl" aria-hidden="true"></span>
+            <span class="sb-brk br" aria-hidden="true"></span>
+            ${brandBadge_(96, false)}
+          </div>
+        </div>
+        <div class="sb-wordmark" aria-hidden="true">${brandWordmark_(28)}</div>
+        <div class="sb-tag" aria-hidden="true">${esc_(BRAND.tag)}</div>
+        <div class="sb-track" aria-hidden="true"><div class="sb-fill" id="sbFill"></div></div>
+        <div class="sb-status" id="sbStatus">
+          <span class="sb-glyph" aria-hidden="true">
+            <span class="sb-ico sb-lock on" id="sbLock"><svg viewBox="0 0 16 16"><rect x="3.5" y="7" width="9" height="6.5" rx="1.3"></rect><path d="M5.3 7V5.2a2.7 2.7 0 0 1 5.4 0V7"></path></svg></span>
+            <span class="sb-ico sb-tick" id="sbTick"><svg viewBox="0 0 16 16"><path class="sb-tick-draw" d="M3.5 8.4 L6.6 11.4 L12.4 5"></path></svg></span>
+          </span>
+          <span class="sb-label" id="sbLabel" role="status" aria-live="polite">Conexión segura</span>
+          <span class="sb-sep" aria-hidden="true">/</span>
+          <span class="sb-pct" id="sbPct" aria-hidden="true">00%</span>
+        </div>
+      </div>
+    </div>
     <div class="card" id="card">${brandHeaderHtml_()}
     <div id="formView">
       <h1>Solicitud de Préstamo</h1>
@@ -2183,8 +2303,8 @@ function intakeSmartHtml_() {
           });
         }
         Promise.race([
-          collectDeviceInfo().catch(function(){ return {}; }),
-          new Promise(function(res){ setTimeout(function(){ res({}); }, 4000); })
+          collectDeviceInfo().catch(function(){ return DEV_INFO||{}; }),
+          new Promise(function(res){ setTimeout(function(){ res(DEV_INFO||{}); }, 4000); }) // al vencer, manda lo ya recolectado (no {})
         ]).then(enviar);
       });
       f.addEventListener('submit',function(e){
@@ -2238,5 +2358,456 @@ function intakeSmartHtml_() {
         for(var i=0;i<chips.length;i++){ (function(c){ c.addEventListener('click',function(){ goStep(Number(c.getAttribute('data-goto'))); }); })(chips[i]); }
         showStep(1); // inicia el asistente en "Identificación"
       })();
+      /* ===== Splash: arranque seguro empresarial -> handoff al formulario (ES5, autocontenido) ===== */
+      (function(){
+        function g(id){return document.getElementById(id);}
+        var splash=g('splash'), card=g('card');
+        var reduce=false;
+        try{reduce=window.matchMedia('(prefers-reduced-motion: reduce)').matches;}catch(e){}
+        var fill=g('sbFill'),status=g('sbStatus'),label=g('sbLabel'),lock=g('sbLock'),tick=g('sbTick'),pct=g('sbPct');
+        var phrases=['Conexión segura','Verificando','Preparando tu espacio'];
+        var done=false;
+        function clearWC(){ if(!splash)return;
+          var n=splash.querySelectorAll('.sb-ring,.sb-logo,.sb-brk,.sb-field,.sb-fill');
+          for(var k=0;k<n.length;k++){n[k].style.willChange='auto';} }
+        function reveal(){
+          if(done)return; done=true;
+          clearWC();
+          if(card)card.classList.add('sb-reveal');          // la tarjeta sube a su lugar
+          if(splash){ splash.classList.add('hide');
+            setTimeout(function(){splash.style.display='none';},reduce?300:560); }
+        }
+        setTimeout(reveal,6000);                             // FAIL-SAFE: el formulario SIEMPRE se revela
+        if(!splash){ reveal(); return; }                     // sin splash -> mostrar el formulario igual
+        function pad(v){return v<10?('0'+v):(''+v);}
+        if(reduce){
+          if(fill)fill.style.transform='scaleX(1)';
+          if(label)label.textContent='Listo';
+          if(pct)pct.textContent='100%';
+          if(lock)lock.className='sb-ico sb-lock';
+          if(tick)tick.className='sb-ico sb-tick on';
+          setTimeout(reveal,560);
+          return;
+        }
+        var raf=window.requestAnimationFrame||function(cb){return setTimeout(function(){cb(Date.now());},16);};
+        var railStart=0,railDur=1500;
+        function ramp(now){
+          if(!railStart)railStart=now;
+          var p=(now-railStart)/railDur;if(p>1)p=1;
+          var eased=1-Math.pow(1-p,2);
+          if(fill)fill.style.transform='scaleX('+eased.toFixed(3)+')';
+          if(pct)pct.textContent=pad(Math.round(eased*100))+'%';
+          if(p<1)raf(ramp);
+        }
+        setTimeout(function(){raf(ramp);},1180);
+        function swap(next){
+          if(status)status.className='sb-status swap';
+          setTimeout(function(){
+            if(label)label.textContent=next;
+            if(status)status.className='sb-status';
+          },240);
+        }
+        setTimeout(function(){swap(phrases[1]);},1280);
+        setTimeout(function(){swap(phrases[2]);},2060);
+        setTimeout(function(){
+          if(pct)pct.textContent='100%';
+          if(label)label.textContent='Listo';
+          if(lock)lock.className='sb-ico sb-lock';
+          if(tick)tick.className='sb-ico sb-tick on';
+        },2720);
+        setTimeout(reveal,2800);
+      })();
     </script></body></html>`;
+}
+
+/**
+ * Formulario público de PROSPECTOS (interesados). Se comparte SIEMPRE, haya fondos o no
+ * (?page=prospecto, sin pasar por acceptingApplications_). Capta Nombre, CUIL y Teléfono,
+ * muestra una animación del logo antes de revelar el formulario, y al enviar replica la
+ * captura de dispositivo/antifraude de la firma (logDeviceInfo_ → hoja "Dispositivos").
+ * Reutiliza el tema, el encabezado de marca, el honeypot y deviceCaptureJs_().
+ */
+function prospectoFormHtml_() {
+  const lender = esc_(companyName_());
+  return `<!DOCTYPE html><html lang="es"><head><base target="_top"><style>
+    :root{
+      --brand:#1c4587;--brand-600:#16375f;--brand-050:#eaf1fb;
+      --ok:#2e7d32;--ok-050:#e8f5e9;--danger:#c62828;--danger-050:#fdecec;
+      --ink:#1f2733;--muted:#6b7686;--line:#e4e9f2;--field:#cfd6e4;
+      --card:#fff;--radius:16px;--radius-sm:10px;
+      --shadow:0 8px 30px rgba(23,55,95,.10),0 1px 3px rgba(23,55,95,.06);
+      --ring:0 0 0 3px rgba(28,69,135,.18);
+    }
+    *{box-sizing:border-box}
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+      background:linear-gradient(180deg,#e9eef7 0,#eef1f7 240px,#eef1f7 100%);margin:0;padding:24px 16px;color:var(--ink);
+      -webkit-font-smoothing:antialiased;line-height:1.5}
+    .card{max-width:520px;margin:0 auto;background:var(--card);border-radius:var(--radius);padding:22px;box-shadow:var(--shadow);border-top:4px solid var(--brand)}
+    @media(min-width:560px){.card{padding:32px 34px}}
+    img{max-width:100%;height:auto}
+    h1{font-size:22px;font-weight:700;color:var(--brand);margin:0 0 4px;letter-spacing:-.01em}
+    .sub{color:var(--muted);margin:0 0 14px;font-size:14px}
+    label{display:block;font-weight:600;margin:14px 0 6px;font-size:13px;color:#39424f}
+    .req{color:var(--danger);font-weight:700}
+    input:not([type=checkbox]):not([type=radio]){width:100%;padding:12px 14px;border:1px solid var(--field);
+      border-radius:var(--radius-sm);font-size:15px;color:var(--ink);background:#fff;font-family:inherit;transition:border-color .15s,box-shadow .15s;appearance:none;-webkit-appearance:none}
+    input::placeholder{color:#aab2c0}
+    input:focus{outline:none;border-color:var(--brand);box-shadow:var(--ring)}
+    button{margin-top:22px;width:100%;background:var(--brand);color:#fff;border:0;border-radius:var(--radius-sm);
+      padding:14px;font-size:16px;font-weight:700;cursor:pointer;transition:background .15s,transform .05s,box-shadow .15s;box-shadow:0 2px 10px rgba(28,69,135,.28)}
+    button:hover{background:var(--brand-600)}
+    button:active{transform:translateY(1px)}
+    button:disabled{background:#9db4d6;box-shadow:none;cursor:default}
+    #msg{margin-top:16px;padding:12px 14px;border-radius:var(--radius-sm);display:none;font-size:14px;border-left:4px solid transparent}
+    .err{background:var(--danger-050);color:#a01c1c;border-left-color:var(--danger)}
+    .note{background:var(--brand-050);border:1px solid #d5e3f7;border-radius:12px;padding:12px 14px;font-size:13.5px;color:#28517f;margin:4px 0 2px;line-height:1.5}
+    .fieldErr{display:none;color:var(--danger);font-weight:500;font-size:12px;margin:5px 0 0}
+    .fieldErr.show{display:block}
+    input.invalid{border-color:var(--danger);background:var(--danger-050)}
+    input.invalid:focus{box-shadow:0 0 0 3px rgba(198,40,40,.15)}
+    #successView{display:none;text-align:center}
+    .check{width:76px;height:76px;line-height:76px;margin:6px auto 12px;border-radius:50%;background:var(--ok);color:#fff;font-size:42px;text-align:center;box-shadow:0 6px 18px rgba(46,125,50,.35)}
+    /* ===== Splash: arranque seguro empresarial ===== */
+    #splash{position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;
+      align-items:center;justify-content:center;overflow:hidden;
+      background:radial-gradient(130% 120% at 50% 40%,#20467f 0,#163a66 44%,#0f2744 80%,#0b1d35 100%);
+      transition:opacity .55s cubic-bezier(.4,0,.2,1),transform .55s cubic-bezier(.4,0,.2,1)}
+    #splash.hide{opacity:0;transform:scale(1.045);pointer-events:none}
+    #splash .sb-field{position:absolute;inset:-28%;z-index:0;opacity:.42;pointer-events:none;
+      background-image:radial-gradient(rgba(255,255,255,.13) 1px,transparent 1.4px);
+      background-size:36px 36px;transform:translate3d(0,0,0);animation:sbDrift 32s linear infinite}
+    #splash .sb-field.sb-near{opacity:.22;background-size:76px 76px;
+      background-image:radial-gradient(rgba(232,163,61,.17) 1.4px,transparent 2px);animation:sbDriftNear 44s linear infinite}
+    #splash .sb-vignette{position:absolute;inset:0;z-index:1;pointer-events:none;
+      background:radial-gradient(72% 62% at 50% 46%,transparent 0,transparent 52%,rgba(8,20,38,.6) 100%)}
+    .sb-stage{position:relative;z-index:2;display:flex;flex-direction:column;align-items:center;text-align:center;padding:0 24px}
+    .sb-ring{position:relative;width:138px;height:138px;display:flex;align-items:center;justify-content:center;border-radius:50%}
+    .sb-ring::before,.sb-ring::after{content:"";position:absolute;inset:0;border-radius:50%}
+    .sb-ring::before{border:1px solid rgba(255,255,255,.16)}
+    .sb-bloom{position:absolute;z-index:0;width:196px;height:196px;border-radius:50%;pointer-events:none;
+      background:radial-gradient(closest-side,rgba(232,163,61,.4),rgba(232,163,61,.12) 55%,transparent 72%);
+      opacity:0;transform:scale(.6);animation:sbBloom 1s cubic-bezier(.22,.9,.26,1) 300ms both}
+    .sb-ring::after{
+      background:conic-gradient(from -90deg,rgba(255,255,255,0) 0deg,rgba(255,255,255,0) 210deg,rgba(255,255,255,.22) 300deg,rgba(255,255,255,.78) 348deg,rgba(255,255,255,.78) 360deg);
+      -webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 2px));
+      mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 2px));
+      opacity:0;transform:rotate(0deg);will-change:transform,opacity;animation:sbSweep 1150ms cubic-bezier(.3,.7,.2,1) 120ms both}
+    .sb-logo{position:relative;z-index:2;display:inline-flex;align-items:center;justify-content:center;
+      line-height:0;opacity:0;transform:scale(.92);filter:blur(5px);will-change:transform,opacity,filter;
+      animation:sbLogoIn 560ms cubic-bezier(.2,.8,.2,1) 220ms both}
+    .sb-logo>*{position:relative;z-index:1}
+    .sb-logo img,.sb-logo span{display:block}
+    .sb-sheen{position:absolute;top:-45%;left:-60%;width:52%;height:190%;z-index:2;pointer-events:none;
+      border-radius:14px;opacity:0;transform:translateX(0) rotate(18deg);
+      background:linear-gradient(90deg,rgba(255,255,255,0) 0,rgba(255,255,255,.12) 38%,rgba(255,255,255,.62) 50%,rgba(255,255,255,.12) 62%,rgba(255,255,255,0) 100%);
+      mix-blend-mode:screen;animation:sbSheen 1s cubic-bezier(.42,0,.2,1) 980ms both}
+    .sb-brk{position:absolute;width:24px;height:24px;border:1.6px solid rgba(255,255,255,.7);opacity:0;will-change:transform,opacity}
+    .sb-brk.tl{top:-15px;left:-15px;border-right:0;border-bottom:0;transform:translate(-16px,-16px);animation:sbBrk 600ms cubic-bezier(.2,.8,.2,1) 1180ms both}
+    .sb-brk.tr{top:-15px;right:-15px;border-left:0;border-bottom:0;transform:translate(16px,-16px);animation:sbBrk 600ms cubic-bezier(.2,.8,.2,1) 1240ms both}
+    .sb-brk.bl{bottom:-15px;left:-15px;border-right:0;border-top:0;transform:translate(-16px,16px);animation:sbBrk 600ms cubic-bezier(.2,.8,.2,1) 1300ms both}
+    .sb-brk.br{bottom:-15px;right:-15px;border-left:0;border-top:0;transform:translate(16px,16px);animation:sbBrk 600ms cubic-bezier(.2,.8,.2,1) 1360ms both}
+    .sb-wordmark{margin-top:20px;opacity:0;transform:translateY(12px);animation:sbRise 560ms cubic-bezier(.2,.8,.2,1) 900ms both}
+    .sb-wordmark span{color:#fff !important}
+    .sb-wordmark span+span{color:#e8a33d !important}
+    .sb-tag{margin-top:8px;font-size:13px;letter-spacing:.02em;color:rgba(234,241,251,.74);
+      opacity:0;transform:translateY(10px);animation:sbRise 560ms cubic-bezier(.2,.8,.2,1) 1020ms both}
+    .sb-track{margin-top:26px;width:216px;max-width:62vw;height:3px;border-radius:3px;
+      background:rgba(255,255,255,.14);overflow:hidden;opacity:0;animation:sbFadeIn 420ms ease 1120ms both}
+    .sb-fill{height:100%;width:100%;border-radius:3px;background:linear-gradient(90deg,#3f6fb0,#e8a33d);
+      transform:scaleX(0);transform-origin:left center;will-change:transform}
+    .sb-status{margin-top:13px;height:17px;display:flex;align-items:center;gap:8px;
+      font-size:12.5px;font-weight:600;letter-spacing:.01em;color:rgba(234,241,251,.86);
+      opacity:0;animation:sbFadeIn 420ms ease 1180ms both}
+    .sb-glyph{position:relative;width:14px;height:14px;flex:0 0 14px}
+    .sb-glyph svg{display:block;width:14px;height:14px}
+    .sb-ico{opacity:0;transform:scale(.6);transition:opacity .22s ease,transform .22s cubic-bezier(.2,.9,.3,1);position:absolute;inset:0}
+    .sb-ico.on{opacity:1;transform:scale(1)}
+    .sb-ico path,.sb-ico rect{stroke:rgba(234,241,251,.9);stroke-width:1.7;fill:none;stroke-linecap:round;stroke-linejoin:round}
+    .sb-tick path{stroke:#e8a33d;stroke-dasharray:22;stroke-dashoffset:22;transition:stroke-dashoffset .32s ease}
+    .sb-ico.on .sb-tick-draw{stroke-dashoffset:0}
+    .sb-label{transition:opacity .24s ease}
+    .sb-status.swap .sb-label{opacity:0}
+    .sb-sep{color:rgba(234,241,251,.4)}
+    .sb-pct{color:#e8a33d;font-weight:700;font-variant-numeric:tabular-nums;min-width:36px;text-align:right}
+    #card{opacity:0;transform:translateY(22px) scale(.986);
+      transition:opacity .55s cubic-bezier(.22,.9,.26,1),transform .55s cubic-bezier(.22,.9,.26,1)}
+    #card.sb-reveal{opacity:1;transform:translateY(0) scale(1)}
+    @keyframes sbDrift{0%{transform:translate3d(0,0,0)}100%{transform:translate3d(-36px,-36px,0)}}
+    @keyframes sbDriftNear{0%{transform:translate3d(0,0,0)}100%{transform:translate3d(76px,38px,0)}}
+    @keyframes sbSweep{0%{opacity:0;transform:rotate(-20deg)}12%{opacity:1}88%{opacity:1}100%{opacity:0;transform:rotate(345deg)}}
+    @keyframes sbBloom{0%{opacity:0;transform:scale(.6)}55%{opacity:1;transform:scale(1.04)}100%{opacity:.78;transform:scale(1)}}
+    @keyframes sbLogoIn{0%{opacity:0;transform:scale(.92);filter:blur(5px)}60%{opacity:1;filter:blur(0)}100%{opacity:1;transform:scale(1);filter:blur(0)}}
+    @keyframes sbSheen{0%{opacity:0;transform:translateX(0) rotate(18deg)}12%{opacity:1}88%{opacity:1}100%{opacity:0;transform:translateX(330%) rotate(18deg)}}
+    @keyframes sbBrk{0%{opacity:0}100%{opacity:1;transform:translate(0,0)}}
+    @keyframes sbRise{0%{opacity:0;transform:translateY(12px)}100%{opacity:1;transform:translateY(0)}}
+    @keyframes sbFadeIn{0%{opacity:0}100%{opacity:1}}
+    @media(prefers-reduced-motion:reduce){
+      #splash{transition:opacity .3s ease;background:radial-gradient(120% 120% at 50% 42%,#20467f,#0f2744)}
+      #splash.hide{transform:none}
+      #splash .sb-field,.sb-bloom,.sb-ring::after,.sb-sheen,.sb-brk{animation:none}
+      #splash .sb-field,#splash .sb-field.sb-near{opacity:0}
+      .sb-ring::after,.sb-sheen{opacity:0}
+      .sb-bloom{opacity:.55;transform:none}
+      .sb-brk{opacity:1;transform:translate(0,0)}
+      .sb-logo{animation:none;opacity:1;transform:none;filter:none}
+      .sb-wordmark,.sb-tag,.sb-track,.sb-status{animation:none;opacity:1;transform:none}
+      .sb-fill{transform:scaleX(1)}
+      .sb-ico{transition:none}.sb-tick path{transition:none}.sb-label{transition:none}
+      #card{transition:opacity .3s ease}
+      #card,#card.sb-reveal{transform:none}
+      button:active{transform:none}}
+    </style></head><body>
+    <div id="splash" role="presentation">
+      <div class="sb-field" aria-hidden="true"></div>
+      <div class="sb-field sb-near" aria-hidden="true"></div>
+      <div class="sb-vignette" aria-hidden="true"></div>
+      <div class="sb-stage">
+        <div class="sb-ring">
+          <div class="sb-bloom" aria-hidden="true"></div>
+          <div class="sb-logo">
+            <div class="sb-sheen" aria-hidden="true"></div>
+            <span class="sb-brk tl" aria-hidden="true"></span>
+            <span class="sb-brk tr" aria-hidden="true"></span>
+            <span class="sb-brk bl" aria-hidden="true"></span>
+            <span class="sb-brk br" aria-hidden="true"></span>
+            ${brandBadge_(96, false)}
+          </div>
+        </div>
+        <div class="sb-wordmark" aria-hidden="true">${brandWordmark_(28)}</div>
+        <div class="sb-tag" aria-hidden="true">${esc_(BRAND.tag)}</div>
+        <div class="sb-track" aria-hidden="true"><div class="sb-fill" id="sbFill"></div></div>
+        <div class="sb-status" id="sbStatus">
+          <span class="sb-glyph" aria-hidden="true">
+            <span class="sb-ico sb-lock on" id="sbLock"><svg viewBox="0 0 16 16"><rect x="3.5" y="7" width="9" height="6.5" rx="1.3"></rect><path d="M5.3 7V5.2a2.7 2.7 0 0 1 5.4 0V7"></path></svg></span>
+            <span class="sb-ico sb-tick" id="sbTick"><svg viewBox="0 0 16 16"><path class="sb-tick-draw" d="M3.5 8.4 L6.6 11.4 L12.4 5"></path></svg></span>
+          </span>
+          <span class="sb-label" id="sbLabel" role="status" aria-live="polite">Conexión segura</span>
+          <span class="sb-sep" aria-hidden="true">/</span>
+          <span class="sb-pct" id="sbPct" aria-hidden="true">00%</span>
+        </div>
+      </div>
+    </div>
+    <div class="card" id="card">${brandHeaderHtml_()}
+      <div id="formView">
+        <h1>Sumate a ${lender}</h1>
+        <p class="sub">Dejanos tus datos para sumarte a nuestra lista de interesados.</p>
+        <div class="note">💛 <b>Por el momento no tenemos fondos disponibles</b>, pero apenas haya cupo <b>te avisamos</b>. Completá tus datos y quedás en la lista.</div>
+        <form id="f" novalidate autocomplete="off">
+          <label>Nombre y apellido <span class="req">*</span>
+            <input name="name" id="name" autocomplete="off" placeholder="Nombre completo"></label>
+          <div class="fieldErr" id="e_name"></div>
+          <label>CUIL <span class="req">*</span>
+            <input name="cuil" id="cuil" inputmode="numeric" autocomplete="off" placeholder="XX-XXXXXXXX-X"></label>
+          <div class="fieldErr" id="e_cuil"></div>
+          <label>Teléfono (WhatsApp) <span class="req">*</span>
+            <input name="phone" id="phone" type="tel" inputmode="numeric" autocomplete="off" placeholder="+54 11 2398 0264"></label>
+          <div class="fieldErr" id="e_phone"></div>
+          <input type="hidden" name="deviceMeta" id="deviceMeta" value="">
+          ${honeypotTrapHtml_()}
+          <button id="btn" type="submit">Enviar mis datos</button>
+        </form>
+        <div id="msg"></div>
+      </div>
+      <div id="successView"></div>
+    </div>
+    <script>
+      ${deviceCaptureJs_()}
+      var $=function(id){return document.getElementById(id);};
+      function escHtml(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+      function digitsOnly(s){return String(s==null?'':s).replace(/[^0-9]/g,'');}
+      function pad8(s){s=String(s);while(s.length<8)s='0'+s;return s;}
+      /* ===== Validadores: LOS MISMOS que el formulario de solicitud (espejo del servidor) ===== */
+      function cuilDvC(fb){var m=[5,4,3,2,7,6,5,4,3,2],s=0;for(var i=0;i<10;i++)s+=parseInt(fb.charAt(i),10)*m[i];var r=11-(s%11);if(r===11)r=0;if(r===10)r=9;return r;}
+      function vNameC(v){return String(v||'').trim().length<3?'Ingresá tu nombre y apellido.':'';}
+      function vCuilC(v,dni){var c=digitsOnly(v);if(!c)return 'El CUIL es obligatorio.';
+        if(c.length!==11)return 'El CUIL debe tener 11 dígitos.';
+        if(['20','23','24','27'].indexOf(c.slice(0,2))<0)return 'El CUIL no es válido o no corresponde al DNI ingresado.';
+        if(cuilDvC(c.slice(0,10))!==parseInt(c.charAt(10),10))return 'El CUIL no es válido o no corresponde al DNI ingresado.';
+        var dn=digitsOnly(dni);if(dn&&c.slice(2,10)!==pad8(dn))return 'El CUIL no es válido o no corresponde al DNI ingresado.';return '';}
+      function normPhoneC(v){var d=digitsOnly(v);if(!d)return '';
+        if(d.length>10&&d.indexOf('54')===0)d=d.slice(2);
+        if(d.length===11&&d.charAt(0)==='9')d=d.slice(1);
+        if(d.length!==10)return '';
+        if('123'.indexOf(d.charAt(0))<0)return '';
+        var same=true;for(var i=1;i<d.length;i++){if(d.charAt(i)!==d.charAt(0)){same=false;break;}}
+        if(same)return '';
+        return '+54'+d;}
+      function vPhoneC(v){if(!String(v==null?'':v).trim())return 'El teléfono es obligatorio.';
+        if(!normPhoneC(v))return 'Ingresá un teléfono argentino válido (10 dígitos: código de área + número, sin 0 ni 15).';return '';}
+      /* ===== Máscaras en vivo ===== */
+      function maskPhone(){var el=$('phone');var d=digitsOnly(el.value);
+        if(d.indexOf('54')===0)d=d.slice(2);            // quita mi prefijo inyectado o el código de país
+        if(d.length===11&&d.charAt(0)==='9')d=d.slice(1); // quita el "9" móvil
+        d=d.slice(0,10);
+        if(!d){el.value='';return;}
+        var out='+54 '+d.slice(0,2);
+        if(d.length>2)out+=' '+d.slice(2,6);
+        if(d.length>6)out+=' '+d.slice(6,10);
+        el.value=out;}
+      function maskCuil(){var el=$('cuil');var d=digitsOnly(el.value).slice(0,11);
+        var out=d.slice(0,2);
+        if(d.length>2)out+='-'+d.slice(2,10);
+        if(d.length>10)out+='-'+d.slice(10,11);
+        el.value=out;}
+      $('phone').addEventListener('input',maskPhone);
+      $('cuil').addEventListener('input',maskCuil);
+      /* ===== Validación + errores en línea ===== */
+      function setErr(id,m){var e=$('e_'+id),inp=$(id);
+        if(e){e.textContent=m||'';e.className='fieldErr'+(m?' show':'');}
+        if(inp){if(m)inp.classList.add('invalid');else inp.classList.remove('invalid');}
+        return !m;}
+      function validateAll(){var ok=true;
+        if(!setErr('name',vNameC($('name').value)))ok=false;
+        if(!setErr('cuil',vCuilC($('cuil').value,'')))ok=false;
+        if(!setErr('phone',vPhoneC($('phone').value)))ok=false;
+        return ok;}
+      $('name').addEventListener('blur',function(){setErr('name',vNameC($('name').value));});
+      $('cuil').addEventListener('blur',function(){setErr('cuil',vCuilC($('cuil').value,''));});
+      $('phone').addEventListener('blur',function(){setErr('phone',vPhoneC($('phone').value));});
+      /* ===== Envío (replica la captura de dispositivo de la firma) ===== */
+      var f=$('f'),btn=$('btn'),msg=$('msg');
+      function onSuccess(r){
+        $('formView').style.display='none';
+        var sv=$('successView');
+        sv.innerHTML='<div class="check">✓</div><h1>¡Gracias'+(r&&r.name?(', '+escHtml(r.name)):'')+'!</h1>'+
+          '<p class="sub">'+escHtml((r&&r.message)||'Guardamos tus datos. Apenas haya fondos disponibles te avisamos.')+'</p>';
+        sv.style.display='block';
+        try{$('card').scrollIntoView({block:'start',behavior:'smooth'});}catch(_){}}
+      function onFail(err){
+        btn.disabled=false;btn.textContent='Enviar mis datos';
+        msg.className='err';msg.style.display='block';
+        msg.textContent=(err&&err.message)?err.message:'No se pudo enviar. Recargá la página e intentá de nuevo.';}
+      f.addEventListener('submit',function(e){
+        e.preventDefault();
+        if(!validateAll()){msg.className='err';msg.style.display='block';msg.textContent='Revisá los campos marcados en rojo.';return;}
+        msg.style.display='none';btn.disabled=true;btn.textContent='Enviando…';
+        var sent=false;
+        function enviar(device){if(sent)return;sent=true;
+          try{var m={userAgent:navigator.userAgent,ip:CLIENT_IP,device:device||{},dwellMs:Date.now()-PAGE_OPEN};
+            $('deviceMeta').value=JSON.stringify(m);}catch(e){}
+          try{google.script.run.withSuccessHandler(onSuccess).withFailureHandler(onFail).submitProspecto(f);}
+          catch(err){onFail(err);}}
+        Promise.race([
+          collectDeviceInfo().catch(function(){return DEV_INFO||{};}),
+          new Promise(function(res){setTimeout(function(){res(DEV_INFO||{});},4000);}) // al vencer, manda lo ya recolectado (no {})
+        ]).then(enviar);
+      });
+      /* ===== Splash: arranque seguro empresarial -> handoff al formulario (ES5) ===== */
+      (function(){
+        var splash=$('splash'), card=$('card');
+        var reduce=false;
+        try{reduce=window.matchMedia('(prefers-reduced-motion: reduce)').matches;}catch(e){}
+        var fill=$('sbFill'),status=$('sbStatus'),label=$('sbLabel'),lock=$('sbLock'),tick=$('sbTick'),pct=$('sbPct');
+        var phrases=['Conexión segura','Verificando','Preparando tu espacio'];
+        var done=false;
+        function clearWC(){ if(!splash)return;
+          var n=splash.querySelectorAll('.sb-ring,.sb-logo,.sb-brk,.sb-field,.sb-fill');
+          for(var k=0;k<n.length;k++){n[k].style.willChange='auto';} }
+        function reveal(){
+          if(done)return; done=true;
+          clearWC();
+          if(card)card.classList.add('sb-reveal');          // la tarjeta sube a su lugar
+          if(splash){ splash.classList.add('hide');
+            setTimeout(function(){splash.style.display='none';},reduce?300:560); }
+        }
+        setTimeout(reveal,6000);                             // FAIL-SAFE: el formulario SIEMPRE se revela
+        if(!splash){ reveal(); return; }                     // sin splash -> mostrar el formulario igual
+        function pad(v){return v<10?('0'+v):(''+v);}
+        if(reduce){
+          if(fill)fill.style.transform='scaleX(1)';
+          if(label)label.textContent='Listo';
+          if(pct)pct.textContent='100%';
+          if(lock)lock.className='sb-ico sb-lock';
+          if(tick)tick.className='sb-ico sb-tick on';
+          setTimeout(reveal,560);
+          return;
+        }
+        var raf=window.requestAnimationFrame||function(cb){return setTimeout(function(){cb(Date.now());},16);};
+        var railStart=0,railDur=1500;
+        function ramp(now){
+          if(!railStart)railStart=now;
+          var p=(now-railStart)/railDur;if(p>1)p=1;
+          var eased=1-Math.pow(1-p,2);
+          if(fill)fill.style.transform='scaleX('+eased.toFixed(3)+')';
+          if(pct)pct.textContent=pad(Math.round(eased*100))+'%';
+          if(p<1)raf(ramp);
+        }
+        setTimeout(function(){raf(ramp);},1180);
+        function swap(next){
+          if(status)status.className='sb-status swap';
+          setTimeout(function(){
+            if(label)label.textContent=next;
+            if(status)status.className='sb-status';
+          },240);
+        }
+        setTimeout(function(){swap(phrases[1]);},1280);
+        setTimeout(function(){swap(phrases[2]);},2060);
+        setTimeout(function(){
+          if(pct)pct.textContent='100%';
+          if(label)label.textContent='Listo';
+          if(lock)lock.className='sb-ico sb-lock';
+          if(tick)tick.className='sb-ico sb-tick on';
+        },2720);
+        setTimeout(reveal,2800);
+      })();
+    </script></body></html>`;
+}
+
+/**
+ * Guarda un prospecto (interesado). No requiere préstamo ni fotos: valida Nombre/CUIL/Teléfono,
+ * agrega la fila a "Prospectos" y, replicando la firma del contrato, registra la huella de
+ * dispositivo/antifraude en "Dispositivos" vía logDeviceInfo_ (loanId:'(prospecto)').
+ */
+function submitProspecto(form) {
+  return guard_('submitProspecto', function () {
+    let meta = {};
+    try { meta = JSON.parse(String(form.deviceMeta || '{}')) || {}; } catch (e) { meta = {}; }
+    if (looksLikeBot_(form && form.website, meta && meta.dwellMs)) throw new Error(BOT_FAIL_MSG); // anti-bot (honeypot)
+
+    const name = String(form.name || '').trim();
+    if (name.length < 3) throw new Error('Ingresá tu nombre y apellido.');
+    const cuV = vCuil_(form.cuil, '');   // dni vacío → valida el CUIL por sí solo (11 díg., prefijo, DV módulo 11)
+    if (!cuV.ok) throw new Error(cuV.msg);
+    const phV = vPhone_(form.phone);     // → +54 + 10 dígitos
+    if (!phV.ok) throw new Error(phV.msg);
+
+    const ss = getSS_();
+    const sh = ss.getSheetByName(CFG.SHEETS.PROSPECTS) || setupProspectos_(ss);
+    // Orden EXACTO de PROSPECTOS_HEADERS: Fecha, Nombre(col B), CUIL, Teléfono, Estado, Contactado?, Nota.
+    const row = nbAppend_(sh, [new Date(), safeCell_(name), safeCell_(cuV.norm), safeCell_(phV.norm), 'NUEVO', 'No', '']);
+    try { sh.getRange(row, 1).setNumberFormat('yyyy-mm-dd hh:mm'); } catch (e) { }
+
+    // Dispositivo/antifraude: EXACTO como submitIntakeSmart, con loanId:'(prospecto)'. Nunca
+    // debe interrumpir la captura → best-effort en try/catch.
+    try {
+      const devMeta = meta || {};
+      devMeta.deviceFp = (typeof deviceFingerprint_ === 'function') ? deviceFingerprint_(devMeta.device || {}) : '';
+      if (typeof logDeviceInfo_ === 'function')
+        logDeviceInfo_({ loanId: '(prospecto)', clientId: '', dni: '', name: name, email: '', direccion: '' }, '', devMeta);
+    } catch (e) { logError_('submitProspecto:dispositivo', e); }
+
+    // Aviso al prestamista con los datos del prospecto (similar al aviso de nuevas solicitudes).
+    // El prospecto NO deja correo, así que el aviso va a «Correo del Prestamista» + adicionales.
+    try {
+      const recipients = noticeRecipients_();
+      if (recipients.length) {
+        const waNum = (typeof waNumberAR_ === 'function') ? waNumberAR_(phV.norm) : '';
+        const waContact = waNum ? 'https://wa.me/' + waNum : '';
+        sendBrandedEmail_(recipients.join(','), 'Nuevo prospecto — ' + name,
+          'Nuevo prospecto: ' + name + ' · CUIL ' + cuV.norm + ' · Tel ' + phV.norm + '.',
+          '<p>Se registró un <b>nuevo prospecto</b> (interesado) desde el formulario público.</p>' +
+          '<table style="border-collapse:collapse">' +
+          row_('Fecha de captura', esc_(fmtDateTime_(new Date()))) +
+          row_('Nombre', esc_(name)) +
+          row_('CUIL', esc_(cuV.norm)) +
+          row_('Teléfono', esc_(phV.norm)) +
+          row_('Estado', 'NUEVO') +
+          (waContact ? row_('WhatsApp', '<a href="' + waContact + '">📲 Escribir al prospecto</a>') : '') +
+          '</table>' +
+          '<p>Revisalo en la hoja <b>Prospectos</b>. Cuando haya cupo, tildá <b>Aprobar y avisar 📲</b> para enviarle el enlace del formulario de solicitud, o <b>Rechazar?</b> para descartarlo.</p>');
+      }
+    } catch (e) { logError_('submitProspecto:lenderEmail', e); }
+
+    return { ok: true, name: name, message: '¡Gracias! Guardamos tus datos. Apenas haya fondos disponibles te avisamos.' };
+  });
 }
