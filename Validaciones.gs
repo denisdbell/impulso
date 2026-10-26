@@ -1566,6 +1566,7 @@ function intakeSmartHtml_() {
       </div>
     </div>
     <div class="card" id="card">${brandHeaderHtml_()}
+    ${clientThemeCss_()}
     <div id="formView">
       <h1>Solicitud de Préstamo</h1>
       <p class="sub">${lender} — ingresá tu <b>correo</b> y <b>DNI</b> para empezar. Si ya sos cliente, completamos tus datos automáticamente (solo faltarán las fotos).</p>
@@ -1660,24 +1661,24 @@ function intakeSmartHtml_() {
           <!-- Datos del préstamo (todos) -->
           <div id="loanData">
           <div class="secTitle">Datos del préstamo</div>
-          <div style="font-size:13px;color:#4a5563;line-height:1.6;margin:2px 0 10px">
-            <div style="margin-bottom:5px;color:#39424f">El plazo se calcula según el monto:</div>
+          <div style="font-size:13px;line-height:1.6;margin:2px 0 10px">
+            <div style="margin-bottom:5px">El plazo se calcula según el monto:</div>
             <ul id="tierList" style="margin:0;padding-left:18px">
-              <li id="tierLi1">Hasta <b>${fmtMoney_(tier1Max_())}</b>: elegís <b style="color:#1c4587">15 días (25%)</b> o <b style="color:#1c4587">30 días (50%)</b> — <b>1 pago</b>.</li>
-              <li id="tierLi2">De <b>${fmtMoney_(tier1Max_())}</b> a <b>${fmtMoney_(tier2Max_() - 1)}</b>: <b style="color:#1c4587">30 días (50%)</b> — <b>1 pago</b>.</li>
-              <li id="tierLi3">De <b>${fmtMoney_(tier2Max_())}</b> a <b>${fmtMoney_(loanMax_())}</b>: <b style="color:#1c4587">90 días (100%)</b> — <b>de 3 a 6 cuotas mensuales</b> según el monto (cada cuota ≈ ≤ <b>${fmtMoney_(settingMoney_('Cuota manejable objetivo (tramo grande)', 150000))}</b>).</li>
+              <li id="tierLi1">Hasta <b>${fmtMoney_(tier1Max_())}</b>: elegís <b class="thl">15 días (25%)</b> o <b class="thl">30 días (50%)</b> — <b>1 pago</b>.</li>
+              <li id="tierLi2">De <b>${fmtMoney_(tier1Max_())}</b> a <b>${fmtMoney_(tier2Max_() - 1)}</b>: <b class="thl">30 días (50%)</b> — <b>1 pago</b>.</li>
+              <li id="tierLi3">De <b>${fmtMoney_(tier2Max_())}</b> a <b>${fmtMoney_(loanMax_())}</b>: <b class="thl">90 días (100%)</b> — <b>de 3 a 6 cuotas mensuales</b> según el monto (cada cuota ≈ ≤ <b>${fmtMoney_(settingMoney_('Cuota manejable objetivo (tramo grande)', 150000))}</b>).</li>
             </ul>
             <div id="maxBanner" style="margin-top:7px;padding:7px 11px;background:#fff4e5;border:1px solid #f0b357;border-radius:8px;color:#7a4a00">⚠️ <b>Monto máximo por préstamo: ${fmtMoney_(loanMax_())}</b></div>
             <div id="levelInfo" style="display:none;margin-top:7px"></div>
           </div>
           <label>Monto solicitado (ARS) <span class="req">*</span><input name="amount" id="amount" type="text" inputmode="numeric" autocomplete="off" placeholder="Ej: 100.000" required style="font-size:20px;font-weight:bold;height:auto;padding:12px"></label>
-          <div id="amountWords" style="display:none;margin:6px 0 2px;font-size:19px;font-weight:bold;color:#1c4587;line-height:1.35"></div>
+          <div id="amountWords" style="display:none;margin:6px 0 2px;font-size:19px;font-weight:bold;color:#f0c070;line-height:1.35"></div>
           <small class="fieldErr" id="e_amount"></small>
           <input type="hidden" name="term" id="term" value="">
           <label>Plazo <span class="hint">— según el monto (en montos chicos podés elegir)</span></label>
-          <div id="termView" style="padding:12px 14px;border:1px solid #cfd6e4;border-radius:10px;background:#eef1f6;color:#5b6675;font-weight:600">Ingresá el monto para ver el plazo y las cuotas.</div>
+          <div id="termView" style="padding:12px 14px;border:1px solid rgba(255,255,255,.18);border-radius:10px;background:rgba(255,255,255,.05);color:#9fb2d0;font-weight:600">Ingresá el monto para ver el plazo y las cuotas.</div>
           <div id="termChoice" style="display:none;margin-top:8px">
-            <span style="font-weight:600;font-size:13px;color:#39424f">Elegí el plazo:</span>
+            <span style="font-weight:600;font-size:13px;color:#cdd9ee">Elegí el plazo:</span>
             <select id="term15o30" style="width:auto;display:inline-block;margin-left:8px">
               <option value="15">15 días (25% de interés)</option>
               <option value="30">30 días (50% de interés)</option>
@@ -1708,7 +1709,7 @@ function intakeSmartHtml_() {
                 <div style="font-weight:bold;font-size:14px;margin-bottom:4px">👤 Datos de la OTRA persona (el titular de la cuenta)</div>
                 Completá los datos de la <b>persona dueña de la cuenta</b> donde vas a recibir el dinero — <b>NO los tuyos</b>.
                 Esa persona <b>será notificada y recibirá una copia del contrato</b>.
-                <b style="color:#a50e0e">La información debe ser EXACTA y verdadera: si es incorrecta, el préstamo NO se aprueba.</b>
+                <b style="color:#ff9a9a">La información debe ser EXACTA y verdadera: si es incorrecta, el préstamo NO se aprueba.</b>
                 Sin estos datos, la solicitud no puede procesarse.</div>
               <label>Nombre y apellido del titular <span class="hint">— la OTRA persona, dueña de la cuenta</span> <span class="req">*</span><input name="holderName" id="holderName" autocomplete="off" placeholder="Nombre y apellido de la otra persona"></label>
               <small class="fieldErr" id="e_holderName"></small>
@@ -2109,8 +2110,8 @@ function intakeSmartHtml_() {
       function recalc(){
         var a=parseAmount(amountEl.value), tv=el_('termView'), tc=el_('termChoice'), sel=el_('term15o30');
         var al=allowedDays(a);
-        if(al&&al.length===0){ termEl.value=''; tc.style.display='none'; tv.style.display='block'; calc.style.display='none'; tv.textContent='Ingresá el monto para ver el plazo y las cuotas.'; tv.style.color='#5b6675'; return; }
-        if(al===null){ termEl.value=''; tc.style.display='none'; tv.style.display='block'; calc.style.display='none'; tv.textContent=(MAXAMT<LOANMAX?'Tu límite actual es ':'El monto máximo por préstamo es ')+fmt(MAXAMT)+'.'; tv.style.color='#c62828'; return; }
+        if(al&&al.length===0){ termEl.value=''; tc.style.display='none'; tv.style.display='block'; calc.style.display='none'; tv.textContent='Ingresá el monto para ver el plazo y las cuotas.'; tv.style.color='#9fb2d0'; return; }
+        if(al===null){ termEl.value=''; tc.style.display='none'; tv.style.display='block'; calc.style.display='none'; tv.textContent=(MAXAMT<LOANMAX?'Tu límite actual es ':'El monto máximo por préstamo es ')+fmt(MAXAMT)+'.'; tv.style.color='#ff8f8f'; return; }
         var days;
         if(al.length>1){ // tramo chico: el cliente elige 15 o 30
           tc.style.display='block'; tv.style.display='none';
@@ -2119,7 +2120,7 @@ function intakeSmartHtml_() {
         } else { // forzado
           tc.style.display='none'; tv.style.display='block';
           days=al[0];
-          tv.textContent='Plazo: '+days+' días ('+Math.round(infoForDays(days).rate*100)+'% de interés)'; tv.style.color='#1c4587';
+          tv.textContent='Plazo: '+days+' días ('+Math.round(infoForDays(days).rate*100)+'% de interés)'; tv.style.color='#f0c070';
         }
         termEl.value=String(days);
         var ti=infoForDays(days, a), total=a*(1+ti.rate), cuota=total/ti.cuotas;
@@ -2189,21 +2190,21 @@ function intakeSmartHtml_() {
           status=(r.found?'Estás en el nivel inicial.':'¡Bienvenido/a! Empezás en el nivel inicial.');
           action='Devolviendo a tiempo un préstamo de al menos '+proveTxt+' subís de nivel y accedés a montos y plazos mayores (muchos préstamos chicos no suman).';
         }
-        var pal={bad:['#fdeaea','#b3261e'],warn:['#fdf0dd','#8a5a00'],good:['#e7f4ea','#1e7a34'],max:['#e7f4ea','#1e7a34'],neutral:['#eef1f6','#44506a']};
+        var pal={bad:['rgba(255,107,107,.18)','#ff9a9a'],warn:['rgba(232,163,61,.18)','#f0c070'],good:['rgba(53,199,90,.18)','#7ee29a'],max:['rgba(53,199,90,.18)','#7ee29a'],neutral:['rgba(255,255,255,.1)','#cdd9ee']};
         var p=pal[tone]||pal.neutral;
         var rules='Tu <b>límite</b> crece con tu historial: devolvé a tiempo y subís de nivel (más monto y mejores plazos). '+
           'Si pagás tarde, tu nivel cambia según cuánto te atrases: hasta <b>'+LVL_FREEZE+' días</b> se <b>congela</b>, de <b>'+(LVL_FREEZE+1)+' a '+LVL_RESET+' días</b> <b>baja uno</b> (recuperable), '+
           'más de <b>'+LVL_RESET+' días</b> o una <b>deuda vencida</b> te devuelven al <b>inicial</b>. El recargo por mora corre aparte, desde el primer día.';
         box.innerHTML=
-          '<div style="border:1px solid #dbe3f0;background:#f7f9fc;border-radius:10px;padding:9px 12px">'+
+          '<div style="border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.05);border-radius:10px;padding:9px 12px">'+
             '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'+
               '<span style="display:inline-block;padding:2px 10px;border-radius:999px;background:'+p[0]+';color:'+p[1]+';font-weight:700;font-size:12px">'+esc(badge)+'</span>'+
-              '<span style="color:#5b6675;font-size:13px">Límite actual: <b style="color:#1c4587">'+fmt(MAXAMT)+'</b></span>'+
+              '<span style="color:#9fb2d0;font-size:13px">Límite actual: <b style="color:#e8a33d">'+fmt(MAXAMT)+'</b></span>'+
             '</div>'+
             '<div style="margin-top:6px;font-size:13px;line-height:1.5;color:'+p[1]+';font-weight:600">'+esc(status)+'</div>'+
-            '<div style="margin-top:2px;font-size:13px;line-height:1.5;color:#5b6675">'+esc(action)+'</div>'+
-            '<details style="margin-top:7px"><summary style="cursor:pointer;color:#1c4587;font-weight:600;font-size:12px">¿Cómo funcionan los niveles?</summary>'+
-              '<div style="margin-top:5px;font-size:12.5px;line-height:1.55;color:#5b6675">'+rules+'</div>'+
+            '<div style="margin-top:2px;font-size:13px;line-height:1.5;color:#c7d4e8">'+esc(action)+'</div>'+
+            '<details style="margin-top:7px"><summary style="cursor:pointer;color:#e8a33d;font-weight:600;font-size:12px">¿Cómo funcionan los niveles?</summary>'+
+              '<div style="margin-top:5px;font-size:12.5px;line-height:1.55;color:#9fb2d0">'+rules+'</div>'+
             '</details>'+
           '</div>';
         box.style.display='block';
@@ -2588,6 +2589,7 @@ function prospectoFormHtml_() {
       </div>
     </div>
     <div class="card" id="card">${brandHeaderHtml_()}
+      ${clientThemeCss_()}
       <div id="formView">
         <h1>Sumate a ${lender}</h1>
         <p class="sub">Dejanos tus datos para sumarte a nuestra lista de interesados.</p>

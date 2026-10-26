@@ -394,6 +394,91 @@ function brandHeaderHtml_() {
     '<div style="font-size:12px;color:#888">' + esc_(BRAND.tag) + '</div></div>';
 }
 
+/**
+ * Tema OSCURO «arranque seguro» para las páginas públicas (solicitud, prospectos, saldo, firma,
+ * congelamiento, plan, cerrado, clásico). Devuelve un <style> autónomo que se inyecta en el
+ * <body> de cada página; usa !important (incluidas las variables :root) para que NO dependa del
+ * orden ni de la especificidad de los estilos propios de cada página. Solo cambia la ESTÉTICA;
+ * no toca la funcionalidad. Mantiene el lienzo de firma BLANCO (la firma debe verse y capturarse)
+ * y la tilde de éxito VERDE. Paleta igual al splash: navy #0b1d35→#20467f + acento ámbar #e8a33d.
+ */
+function clientThemeCss_() {
+  return `<style>
+    :root{
+      --brand:#e8a33d!important;--brand-600:#f0b45a!important;--brand-050:rgba(63,111,176,.16)!important;
+      --ok:#35c75a!important;--ok-050:rgba(53,199,90,.14)!important;--danger:#ff6b6b!important;--danger-050:rgba(255,107,107,.14)!important;
+      --warn-bg:rgba(232,163,61,.12)!important;--warn-bd:rgba(232,163,61,.5)!important;--warn-tx:#f0c070!important;
+      --ink:#eaf1fb!important;--muted:#9fb2d0!important;--line:rgba(255,255,255,.12)!important;--field:rgba(255,255,255,.18)!important;
+      --card:#122a4d!important;--shadow:0 18px 50px rgba(5,14,30,.5)!important;--ring:0 0 0 3px rgba(232,163,61,.28)!important;
+    }
+    html{background:#0b1d35!important}
+    body{background:radial-gradient(130% 120% at 50% 40%,#20467f 0,#163a66 44%,#0f2744 80%,#0b1d35 100%)!important;
+      background-attachment:fixed!important;min-height:100vh!important;color:#eaf1fb!important}
+    .card{background:#122a4d!important;color:#eaf1fb!important;border:1px solid rgba(255,255,255,.08)!important;
+      border-top:4px solid #e8a33d!important;box-shadow:0 18px 50px rgba(5,14,30,.5)!important}
+    h1,h2,h3{color:#fff!important}
+    p,.sub,.hint,.muted{color:#9fb2d0!important}
+    label{color:#cdd9ee!important}
+    .secTitle{color:#e8a33d!important}
+    a,.link{color:#e8a33d!important}
+    .amount-words,#calc b{color:#e8a33d!important}
+    input,textarea,select{background:rgba(255,255,255,.05)!important;color:#eaf1fb!important;border-color:rgba(255,255,255,.18)!important}
+    input::placeholder,textarea::placeholder{color:#8094b4!important}
+    input[readonly]{background:rgba(255,255,255,.03)!important;color:#9fb2d0!important}
+    input[type=file]{background:rgba(255,255,255,.05)!important;border-color:rgba(255,255,255,.22)!important;color:#9fb2d0!important}
+    input[type=file]::file-selector-button{background:rgba(232,163,61,.18)!important;color:#f0c070!important}
+    input:focus,textarea:focus,select:focus{border-color:#e8a33d!important;box-shadow:0 0 0 3px rgba(232,163,61,.28)!important}
+    select{background-image:url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239fb2d0' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpath d='M6 9l6 6 6-6'/%3e%3c/svg%3e")!important;background-repeat:no-repeat!important;background-position:right 12px center!important;background-size:18px!important}
+    button{background:#e8a33d!important;color:#0b1d35!important;box-shadow:0 2px 14px rgba(232,163,61,.25)!important}
+    button:hover{background:#f0b45a!important}
+    button:disabled{background:#6b5a3a!important;color:#b9c4d8!important;box-shadow:none!important}
+    button.sec,.tabs button,#prevBtn,#confirmCancel{background:rgba(255,255,255,.1)!important;color:#eaf1fb!important;box-shadow:none!important}
+    .tabs button.on{background:#e8a33d!important;color:#0b1d35!important}
+    #calc,.note,.welcome,.welcome.newc,.welcome.ret,#identity,#references,#photos,#loanData,.terms,.summary{
+      background:rgba(255,255,255,.04)!important;border-color:rgba(255,255,255,.1)!important;color:#cdd9ee!important}
+    .note{color:#cfe0ff!important}
+    .terms h2,.summary td.k,.terms td.k{background:rgba(255,255,255,.05)!important;color:#dfe8f6!important}
+    .terms .body{color:#b9c6dd!important}
+    .terms li{color:#b9c6dd!important}.terms li.mora{color:#f0c070!important}.terms li.mora b{color:#ffcf87!important}
+    .summary td,.terms td{border-color:rgba(255,255,255,.12)!important;color:#dfe8f6!important}
+    .terms td.big{color:#fff!important}
+    .schip{background:rgba(255,255,255,.05)!important;border-color:rgba(255,255,255,.12)!important;color:#9fb2d0!important}
+    .schip .snum{background:rgba(255,255,255,.12)!important;color:#dfe8f6!important}
+    .schip.active{background:#e8a33d!important;border-color:#e8a33d!important;color:#0b1d35!important}
+    .schip.active .snum{background:#0b1d35!important;color:#e8a33d!important}
+    .schip.done{background:rgba(53,199,90,.16)!important;border-color:rgba(53,199,90,.4)!important;color:#9fe6b4!important}
+    .schip.done .snum{background:#35c75a!important;color:#06240f!important}
+    #progress,.pbar-track{background:rgba(255,255,255,.12)!important}
+    #progressFill{background:#e8a33d!important}
+    .ok,#out.ok{background:rgba(53,199,90,.14)!important;color:#b7f0c6!important}
+    .err,#out.err,#gerr{background:rgba(255,107,107,.14)!important;color:#ffc2c2!important}
+    .warn,.warnbox{background:rgba(232,163,61,.12)!important;border-color:rgba(232,163,61,.5)!important;color:#f0c070!important}
+    .warnbox b{color:#ffcf87!important}
+    .badge{background:rgba(255,107,107,.16)!important;color:#ffb3b3!important}
+    .agree{background:rgba(255,255,255,.04)!important;border-color:rgba(255,255,255,.1)!important;color:#dfe8f6!important}
+    .agree.invalid{background:rgba(255,107,107,.14)!important;border-color:#ff6b6b!important;color:#ffc2c2!important}
+    input.invalid,select.invalid,textarea.invalid{border-color:#ff6b6b!important;background:rgba(255,107,107,.12)!important}
+    .fieldErr{color:#ff8f8f!important}
+    .spinner{border-color:rgba(255,255,255,.18)!important;border-top-color:#e8a33d!important}
+    canvas{background:#fff!important;border-color:rgba(255,255,255,.4)!important}
+    #prev{border-color:rgba(255,255,255,.25)!important}
+    #confirmOverlay>div{background:#122a4d!important;box-shadow:0 18px 50px rgba(5,14,30,.6)!important}
+    #confirmBody,#confirmBody *{color:#dfe8f6!important}
+    #confirmBody b{color:#fff!important}
+    #confirmBody td{background:rgba(255,255,255,.05)!important;border-color:rgba(255,255,255,.12)!important}
+    #tierList,#tierList li{color:#cdd9ee!important}
+    #tierList b{color:#fff!important}
+    #tierList b.thl{color:#f0c070!important}
+    #maxBanner{background:rgba(232,163,61,.14)!important;border-color:rgba(232,163,61,.5)!important;color:#f0c070!important}
+    #maxBanner b{color:#ffcf87!important}
+    #amountWords{color:#f0c070!important}
+    #termView{background:rgba(255,255,255,.05)!important;border-color:rgba(255,255,255,.18)!important}
+    #termChoice,#termChoice span{color:#cdd9ee!important}
+    #loadPhase,#loadPct{color:#e8a33d!important}
+    #levelInfo>div{background:rgba(255,255,255,.05)!important;border-color:rgba(255,255,255,.12)!important}
+  </style>`;
+}
+
 /* ============================ SETUP ============================ */
 function setupConfirm() {
   const ui = SpreadsheetApp.getUi();
@@ -5404,7 +5489,7 @@ function closedHtml_() {
     h1{font-size:20px;color:#1c4587;margin:8px 0}
     .badge{display:inline-block;background:#fce8e6;color:#a50e0e;font-weight:bold;padding:8px 16px;border-radius:999px;margin:8px 0 4px}
     p{color:#555;line-height:1.5}</style></head><body>
-    <div class="card">${brandHeaderHtml_()}
+    <div class="card">${brandHeaderHtml_()}${clientThemeCss_()}
       <div class="badge">Solicitudes cerradas</div>
       <h1>Por el momento no hay préstamos disponibles</h1>
       <p>Gracias por su interés. En este momento <b>no estamos aceptando nuevas solicitudes de préstamo</b>.
@@ -5453,7 +5538,7 @@ function intakeHtml_() {
     .terms li.mora{color:#7a5200}.terms li.mora b{color:#b45309}
     .agree{display:flex;align-items:flex-start;gap:9px;margin:14px 0 0;font-weight:normal;font-size:13.5px;cursor:pointer}
     .agree input{width:18px;height:18px;flex:0 0 auto;margin-top:1px}</style></head><body>
-    <div class="card" id="card">${brandHeaderHtml_()}
+    <div class="card" id="card">${brandHeaderHtml_()}${clientThemeCss_()}
     <div id="formView">
       <h1>Solicitud de Préstamo</h1>
       <p class="sub">${lender} — todos los campos son obligatorios. Su solicitud será revisada y verificada.</p>
@@ -5707,7 +5792,7 @@ function balancePageHtml_() {
     input{width:100%;box-sizing:border-box;padding:9px;border:1px solid #ccc;border-radius:6px}
     button{margin-top:16px;width:100%;background:#674ea7;color:#fff;border:0;border-radius:6px;padding:12px;font-weight:bold;cursor:pointer}
     #out{margin-top:16px;padding:12px;border-radius:6px;display:none}.ok{background:#e9e2f5}.err{background:#f4cccc}</style></head><body>
-    <div class="card">${brandHeaderHtml_()}<h1>Consulta de Saldo</h1>
+    <div class="card">${brandHeaderHtml_()}${clientThemeCss_()}<h1>Consulta de Saldo</h1>
     <label>ID Préstamo</label><input id="loan" placeholder="L-0001">
     <label>DNI</label><input id="dni">
     <button onclick="go()">Consultar</button><div id="out"></div>
@@ -5767,7 +5852,7 @@ function freezeRequestFormHtml_(loanId, token) {
     .check{width:72px;height:72px;line-height:72px;margin:6px auto 10px;border-radius:50%;background:#38761d;color:#fff;font-size:40px;font-weight:bold;text-align:center}
     .sub{color:#555;margin:0 0 8px;line-height:1.45}.hint{font-size:12px;color:#888}
     .hide{display:none}</style></head><body>
-    <div class="card">${brandHeaderHtml_()}<h1>Solicitud de congelamiento</h1>
+    <div class="card">${brandHeaderHtml_()}${clientThemeCss_()}<h1>Solicitud de congelamiento</h1>
 
     <div id="gate">
       <p class="hint">Si tu préstamo está <b>vencido</b>, podés pedir <b>congelar la mora</b> (que deje de crecer) mientras acordás un pago. Ingresá tu DNI para ver tu préstamo.</p>
@@ -5999,7 +6084,7 @@ function planRequestFormHtml_(loanId, token) {
     .check{width:72px;height:72px;line-height:72px;margin:6px auto 10px;border-radius:50%;background:#38761d;color:#fff;font-size:40px;font-weight:bold;text-align:center}
     .sub{color:#555;margin:0 0 8px;line-height:1.45}.hint{font-size:12px;color:#888}
     .hide{display:none}</style></head><body>
-    <div class="card">${brandHeaderHtml_()}<h1>Solicitud de plan de pago</h1>
+    <div class="card">${brandHeaderHtml_()}${clientThemeCss_()}<h1>Solicitud de plan de pago</h1>
 
     <div id="gate">
       <p class="hint">Si estás <b>atrasado/a</b> y no podés pagar todo junto, podés acordar un <b>plan de pago en cuotas</b> (semanal, quincenal o mensual) y frenar la mora. Ingresá tu DNI para ver tu préstamo.</p>
@@ -7200,7 +7285,7 @@ function signingPageHtml_(loanId, mode, token) {
     .check{width:72px;height:72px;line-height:72px;margin:6px auto 10px;border-radius:50%;background:#38761d;color:#fff;font-size:40px;font-weight:bold;text-align:center}
     .sub{color:#555;margin:0 0 8px;line-height:1.45}
     .hide{display:none}</style></head><body>
-    <div class="card">${brandHeaderHtml_()}<h1>${TITLE}</h1>
+    <div class="card">${brandHeaderHtml_()}${clientThemeCss_()}<h1>${TITLE}</h1>
 
     <div id="gate">
       <p class="hint">Ingrese su DNI para ver y firmar el contrato <b>${esc_(loanId)}</b>.</p>
