@@ -102,8 +102,8 @@ const NB = ['Fecha de Envío', 'Nombre completo', 'Correo', 'DNI', 'Teléfono', 
   'Plazo (meses)', 'Notas / Motivo', 'Foto del frente del DNI', 'Foto del dorso del DNI', 'Verificado?', 'Rechazar?', 'Resultado',
   'Verificar BCRA?', 'Parámetro BCRA', 'CUIL', 'Nombre BCRA', 'Peor Situación', '% al día', 'Decisión', 'Puntaje BCRA', 'Calificación de Riesgo', 'Resumen BCRA', 'Dirección', 'Forma de Pago',
   'Anular límites',
-  'Ref 1 Nombre', 'Ref 1 Vínculo', 'Ref 1 Teléfono', 'Ref 1 Validada?',
-  'Ref 2 Nombre', 'Ref 2 Vínculo', 'Ref 2 Teléfono', 'Ref 2 Validada?', 'Compromiso aceptado',
+  'Ref 1 Nombre', 'Ref 1 Vínculo', 'Ref 1 Teléfono', 'Avisar Ref 1 📲', 'Ref 1 Validada?',
+  'Ref 2 Nombre', 'Ref 2 Vínculo', 'Ref 2 Teléfono', 'Avisar Ref 2 📲', 'Ref 2 Validada?', 'Compromiso aceptado',
   '¿Cuenta propia?', 'Titular de la cuenta', 'DNI del titular', 'Correo del titular', 'Teléfono del titular',
   'DNI titular (frente)', 'DNI titular (dorso)', 'Titular acepta?', 'Avisar al titular 📲'];
 
@@ -748,9 +748,24 @@ function ensureIntakeRefColumns_(ss) {
       const c = clientesHeaderCol_(nb, h, true);
       if (c > 0) { nb.getRange(2, c, CFG.MAX_ROWS, 1).setDataValidation(cb); nb.setColumnWidth(c, 100); nb.getRange(1, c).setNote('Tildá cuando hayas contactado y verificado esta referencia.'); }
     });
+    // Columnas "Avisar Ref 1/2 📲": enlace de WhatsApp JUNTO al teléfono de cada referencia. Se
+    // INSERTAN (no se agregan al final) para que queden al lado del número; es no destructivo
+    // (agrega una columna vacía y corre los datos existentes a la derecha, intactos).
+    [['Avisar Ref 1 📲', 'Ref 1 Teléfono'], ['Avisar Ref 2 📲', 'Ref 2 Teléfono']].forEach(function (p) {
+      const H = headerMap_(nb);                 // se relee: la 1.ª inserción corre las columnas
+      if (H[p[0]]) return;                       // ya existe
+      const tel = H[p[1]]; if (!tel) return;     // columna del teléfono de esa referencia
+      nb.insertColumnAfter(tel);
+      const c = tel + 1;
+      nb.getRange(1, c).setValue(p[0]).setFontWeight('bold').setBackground('#b45f06').setFontColor('#fff').setWrap(true);
+      nb.setColumnWidth(c, 150);
+      nb.getRange(1, c).setNote('Abre WhatsApp con un mensaje para preguntarle a esta referencia si conoce al solicitante. Luego tildá «Ref X Validada?».');
+    });
     // Uniforma el color de los encabezados nuevos con el resto de la hoja (no toca datos).
     nb.getRange(1, 1, 1, nb.getLastColumn()).setFontWeight('bold').setBackground('#b45f06').setFontColor('#fff').setWrap(true);
-    done.push('referencias + compromiso + casillas de validación en «Nuevos Prestatarios»');
+    if (typeof invalidateHeaderIndexCache_ === 'function') invalidateHeaderIndexCache_();
+    let nRefWa = 0; try { nRefWa = fillRefWaLinks_(ss); } catch (e) { logError_('ensureIntakeRefColumns_:refWa', e); }
+    done.push('referencias + compromiso + casillas de validación + «Avisar Ref 1/2 📲»' + (nRefWa ? (' (' + nRefWa + ' fila(s))') : '') + ' en «Nuevos Prestatarios»');
   }
   const cs = ss.getSheetByName(CFG.SHEETS.CLIENTS);
   if (cs) {
@@ -2611,6 +2626,56 @@ function fillPaymentWaLinks_(ss) {
   return out.length;
 }
 
+/** Fórmula «=HYPERLINK» que abre WhatsApp con un mensaje amable a una REFERENCIA: la saluda, nombra
+ *  al solicitante (y el vínculo declarado) y le pregunta si lo/la conoce y confirma que es de
+ *  confianza. '' si la referencia no tiene un teléfono válido. El número sale del teléfono guardado
+ *  (E.164 «+54…»), convertido a «549…» por waNumberAR_. */
+function refWaFormula_(refName, refPhone, refRel, applicantName) {
+  const num = waNumberAR_(refPhone);
+  if (!num) return '';
+  const who = String(applicantName || '').trim() || 'un solicitante';
+  const r = String(refName || '').trim() || 'Hola';
+  const rel = String(refRel || '').trim();
+  const msg = '¡Hola ' + r + '! 👋 Te escribimos de ' + companyName_() + '. ' + who +
+    ' te dio como referencia para pedir un préstamo' + (rel ? ' (vínculo: ' + rel + ')' : '') +
+    '. ¿Lo/la conocés y nos confirmás que es una persona de confianza? ¡Gracias por tu ayuda! 🙌';
+  return '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📲 Preguntar")';
+}
+
+/** (Re)completa «Avisar Ref 1/2 📲» de TODA la hoja Nuevos Prestatarios con el enlace de WhatsApp a
+ *  cada referencia (mensaje que nombra al solicitante y pregunta si lo/la conoce). «sin teléfono» si
+ *  la referencia tiene nombre pero sin número válido; vacío si no hay referencia. Resuelve columnas
+ *  por nombre de encabezado (funciona sea cual sea su posición). Devuelve la cantidad de filas. */
+function fillRefWaLinks_(ss) {
+  ss = ss || getSS_();
+  const sh = ss.getSheetByName(CFG.SHEETS.NEW); if (!sh) return 0;
+  const m = headerMap_(sh);
+  const nameCol = m['Nombre completo'];
+  const refs = [
+    { wa: m['Avisar Ref 1 📲'], n: m['Ref 1 Nombre'], tel: m['Ref 1 Teléfono'], rel: m['Ref 1 Vínculo'] },
+    { wa: m['Avisar Ref 2 📲'], n: m['Ref 2 Nombre'], tel: m['Ref 2 Teléfono'], rel: m['Ref 2 Vínculo'] },
+  ];
+  if (!refs.some(r => r.wa)) return 0;
+  const last = sh.getLastRow(); if (last < 2) return 0;
+  const vals = sh.getRange(2, 1, last - 1, sh.getLastColumn()).getValues();
+  refs.forEach(function (r) {
+    if (!r.wa || !r.n || !r.tel) return;
+    const out = [];
+    for (let i = 0; i < vals.length; i++) {
+      const rn = String(vals[i][r.n - 1] || '').trim();
+      const rp = String(vals[i][r.tel - 1] || '').trim();
+      const rl = r.rel ? String(vals[i][r.rel - 1] || '').trim() : '';
+      const who = nameCol ? String(vals[i][nameCol - 1] || '').trim() : '';
+      if (!rn && !rp) { out.push(['']); continue; }   // fila sin esa referencia
+      const f = refWaFormula_(rn, rp, rl, who);
+      out.push([f || 'sin teléfono']);                 // tiene nombre pero sin número válido
+    }
+    sh.getRange(2, r.wa, out.length, 1).setValues(out);
+    sh.setColumnWidth(r.wa, 150);
+  });
+  return last - 1;
+}
+
 /** Crea únicamente la hoja "Estudio de Recordatorios" sin tocar Prestatarios ni Pagos. */
 function createRemindersSheet_() {
   const ss = getSS_();
@@ -2804,6 +2869,11 @@ function setupNew_(ss) {
     ['Correo del titular', 200], ['Teléfono del titular', 130], ['DNI titular (frente)', 160],
     ['DNI titular (dorso)', 160], ['Titular acepta?', 120], ['Avisar al titular 📲', 150]]
     .forEach(function (p) { const c = NB.indexOf(p[0]) + 1; if (c > 0) sh.setColumnWidth(c, p[1]); });
+  // Columnas "Avisar Ref 1/2 📲" (enlace de WhatsApp JUNTO al teléfono de cada referencia).
+  [['Avisar Ref 1 📲', 150], ['Avisar Ref 2 📲', 150]].forEach(function (p) {
+    const c = NB.indexOf(p[0]) + 1;
+    if (c > 0) { sh.setColumnWidth(c, p[1]); sh.getRange(1, c).setNote('Abre WhatsApp con un mensaje para preguntarle a esta referencia si conoce al solicitante. Luego tildá «Ref X Validada?».'); }
+  });
   // Casilla "Titular acepta?" (cuenta de terceros): el titular confirmó que acepta recibir el dinero.
   const taCol = NB.indexOf('Titular acepta?') + 1;
   if (taCol > 0) { sh.getRange(2, taCol, CFG.MAX_ROWS, 1).setDataValidation(cb); sh.getRange(1, taCol).setNote('Tildá SOLO cuando el titular de la cuenta (cuenta de terceros) confirmó —por WhatsApp o teléfono— que acepta recibir el dinero. Obligatorio para aprobar; NO se anula con «Anular límites». Usá «Avisar al titular 📲» para pedir su conformidad.'); }

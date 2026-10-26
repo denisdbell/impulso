@@ -741,6 +741,12 @@ function submitIntakeSmart(form) {
       const nbCols = setSheetFieldsByHeader_(nb, row, nbFields);
       if (isThirdParty && holderWaUrl && nbCols['Avisar al titular 📲'])
         nb.getRange(row, nbCols['Avisar al titular 📲']).setFormula('=HYPERLINK("' + holderWaUrl + '","📲 Avisar al titular")');
+      // Enlaces de WhatsApp a las referencias (preguntar si conocen al solicitante). Solo si las
+      // columnas ya existen (creadas junto al teléfono por setupNew_/«Aplicar novedades»); si no,
+      // las completa luego fillRefWaLinks_. Vale para referencias nuevas y reutilizadas.
+      const refWaH = headerMap_(nb);
+      if (refWaH['Avisar Ref 1 📲']) { const fr1 = refWaFormula_(ref1Name, ref1PhoneN, ref1Rel, name); if (fr1) nb.getRange(row, refWaH['Avisar Ref 1 📲']).setFormula(fr1); }
+      if (refWaH['Avisar Ref 2 📲']) { const fr2 = refWaFormula_(ref2Name, ref2PhoneN, ref2Rel, name); if (fr2) nb.getRange(row, refWaH['Avisar Ref 2 📲']).setFormula(fr2); }
     } catch (e) { logError_('submitIntakeSmart:nbFields', e); }
     // PERF: campos extra del cliente (forma de pago + referencias) en UN solo setValues.
     try {
