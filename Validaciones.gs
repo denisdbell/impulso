@@ -367,6 +367,7 @@ function updateClienteEmail_(row, email) {
   if (cEmailN) sh.getRange(row, cEmailN).setValue(emV.norm);
   if (cValid) sh.getRange(row, cValid).setValue(emV.ok ? 'SÍ' : 'NO');
   invalidateClientesHdrCache_();
+  invalidateClientesRows_();
   if (typeof invalidateClientesCache_ === 'function') invalidateClientesCache_();
 }
 /** Guarda / actualiza el CUIL de un cliente en la fila dada. */
@@ -517,6 +518,7 @@ function lookupClienteForIntake(email, dni) {
         ref2Name: cByDni.ref2Name || '', ref2Rel: cByDni.ref2Rel || '', ref2Phone: cByDni.ref2Phone || '' };
       // ¿Ya tiene DOS referencias completas registradas? → se reutilizan (no re-pedir).
       res.hasRefs = !!(cByDni.ref1Name && cByDni.ref1Phone && cByDni.ref2Name && cByDni.ref2Phone);
+      res.activeLoans = clientLoanCount_(cByDni.id);
       return res;
     }
     if (cByDni) { res.conflict = true; res.conflictField = 'dni'; return res; }     // DNI usado con otro correo
@@ -556,12 +558,17 @@ function submitIntakeSmart(form) {
 
     const existing = clienteByDni_(dnV.norm);
     const emailOwner = clientesRows_().filter(o => o.emailNorm === emV.norm)[0] || null;
-    // Cliente existente = el DNI y el correo pertenecen al MISMO registro → se precarga.
-    const isReturning = !!existing && normEmail_(existing.email) === emV.norm;
-    // Conflictos (respaldo del bloqueo del formulario): DNI o correo ya usados por otro.
-    if (!isReturning) {
-      if (existing) throw new Error('Ese DNI ya está registrado con otro correo. Si ya sos cliente, ingresá el correo registrado.');
-      if (emailOwner) throw new Error('Ese correo ya está registrado con otro DNI.');
+    // El DNI es la identidad del cliente: si existe, es un cliente que vuelve, aunque haya
+    // cambiado el correo desde la última vez (se actualiza más abajo con updateClienteEmail_).
+    const isReturning = !!existing;
+    // Conflictos de correo (respaldo del bloqueo del formulario):
+    //  • cliente que vuelve y cambia el correo → solo si el nuevo NO pertenece ya a otro cliente;
+    //  • DNI nuevo cuyo correo ya está tomado por otro DNI.
+    if (isReturning) {
+      if (normEmail_(existing.email) !== emV.norm && emailOwner && emailOwner.row !== existing.row)
+        throw new Error('Ese correo ya está registrado con otro DNI.');
+    } else if (emailOwner) {
+      throw new Error('Ese correo ya está registrado con otro DNI.');
     }
 
     // Identidad: cliente existente → se toma de "Clientes"; nuevo → del formulario.
@@ -1610,6 +1617,8 @@ function intakeSmartHtml_() {
 
           <div id="identity">
             <div class="secTitle">Tus datos</div>
+            <label>Correo electrónico <span class="req">*</span><input type="email" id="email2" autocomplete="email" placeholder="tucorreo@ejemplo.com"></label>
+            <small class="fieldErr" id="e_email2"></small>
             <label>Nombre completo <span class="req" id="rqName">*</span><input name="fullName" id="fullName" minlength="10" autocomplete="off"></label>
             <small class="fieldErr" id="e_fullName"></small>
             <div class="row2">
@@ -1948,6 +1957,7 @@ function intakeSmartHtml_() {
       function checkField(key){
         switch(key){
           case 'email':return setErr('email',vEmailC(emailEl.value),emailEl);
+          case 'email2':{var v2=String(el_('email2').value||'').trim();emailEl.value=v2;return setErr('email2',vEmailC(v2),el_('email2'));}
           case 'dni':return setErr('dni',vDniC(dniEl.value),dniEl);
           case 'fullName':return setErr('fullName',vNameC(el_('fullName').value),el_('fullName'));
           case 'phone':return setErr('phone',vPhoneC(el_('phone').value),el_('phone'));
@@ -1995,6 +2005,8 @@ function intakeSmartHtml_() {
         el.addEventListener('change',function(){checkField(key);});
         el.addEventListener('input',function(){var e=document.getElementById('e_'+key);if(e&&e.classList.contains('show'))checkField(key);});}
       ['email','dni'].forEach(function(k){bindLive(k,el_(k==='email'?'email':'dni'));});
+      bindLive('email2',el_('email2'));
+      (function(){var e2=el_('email2');if(e2)e2.addEventListener('input',function(){emailEl.value=e2.value;});})(); // "Tus datos" → mantiene sincronizado el correo que se envía (#email)
       bindLive('fullName',el_('fullName'));bindLive('phone',el_('phone'));bindLive('cuil',el_('cuil'));bindLive('address',el_('address'));
       bindLive('amount',amountEl);bindLive('term',termEl);bindLive('notes',el_('notes'));
       bindLive('dniPhoto',el_('dniPhoto'));bindLive('cuilPhoto',el_('cuilPhoto'));
@@ -2027,21 +2039,24 @@ function intakeSmartHtml_() {
       // Requerido dinámico por modo.
       function setRequired(el,on){if(!el)return;if(on)el.setAttribute('required','required');else el.removeAttribute('required');}
       function markReqStars(on){['rqName','rqPhone','rqCuil','rqAddr','rqDni','rqDorso'].forEach(function(id){var e=document.getElementById(id);if(e)e.style.display=on?'inline':'none';});}
-      // Referencias: si el cliente ya tiene DOS referencias en archivo, se reutilizan (se ocultan y no se piden).
+      // Referencias: pre-rellena los campos con los datos guardados; siempre editables.
       function applyRefs(r){
         var refs=el_('references'),note=el_('refsNote');
+        refs.style.display='';el_('reuseRefs').value='';
         if(r&&r.found&&r.hasRefs&&r.client){
-          refs.style.display='none';el_('reuseRefs').value='1';
-          clearErrors(['ref1Name','ref1Rel','ref1Phone','ref2Name','ref2Rel','ref2Phone']);
           var c=r.client;
+          el_('ref1Name').value=c.ref1Name||'';el_('ref1Rel').value=c.ref1Rel||'';el_('ref1Phone').value=c.ref1Phone||'';
+          el_('ref2Name').value=c.ref2Name||'';el_('ref2Rel').value=c.ref2Rel||'';el_('ref2Phone').value=c.ref2Phone||'';
           note.style.display='block';
-          note.innerHTML='<b>Referencias en archivo</b> — no hace falta cargarlas de nuevo:<br>'+
-            '1) '+esc(c.ref1Name)+(c.ref1Rel?' ('+esc(c.ref1Rel)+')':'')+' · '+esc(c.ref1Phone)+'<br>'+
-            '2) '+esc(c.ref2Name)+(c.ref2Rel?' ('+esc(c.ref2Rel)+')':'')+' · '+esc(c.ref2Phone);
+          note.innerHTML='<b>Referencias en archivo</b> — podés actualizarlas si cambiaron.';
         }else{
-          refs.style.display='';el_('reuseRefs').value='';note.style.display='none';
+          el_('ref1Name').value='';el_('ref1Rel').value='';el_('ref1Phone').value='';
+          el_('ref2Name').value='';el_('ref2Rel').value='';el_('ref2Phone').value='';
+          note.style.display='none';
         }
       }
+      // El correo se fija en el paso 1 (identificación); en "Tus datos" se muestra de solo lectura.
+      function beforeAdvance_(s){ return true; }
 
       // Paso 1 (Identificación): valida correo+DNI y consulta el cliente en el servidor.
       var identified=false;
@@ -2077,16 +2092,51 @@ function intakeSmartHtml_() {
         if(r.found){
           modeEl.value='existing';clientIdEl.value=r.client.clientId;
           welcome.className='welcome ret';
-          welcome.innerHTML='<b>¡Hola de nuevo, '+esc(r.client.name)+'!</b><br>Ya te tenemos registrado ('+esc(r.client.clientId)+'). Revisá tus datos y completá los pasos.';
+          (function(){
+            var nm=esc(r.client.name);
+            var lvl=r.level||'Inicial',isIni=(lvl==='Inicial');
+            var filled=r.atMaxLevel&&!isIni?5:isIni?1:Math.max(1,Math.min(5,Math.round(((r.levelNum||1)/(r.maxLevelNum||5))*5)));
+            var starCol=r.hasArrears?'#fca5a5':r.atMaxLevel&&!isIni?'#86efac':'#fbbf24';
+            var stars='';for(var si=1;si<=5;si++)stars+='<span style="color:'+(si<=filled?starCol:'rgba(255,255,255,0.18)')+';font-size:15px;line-height:1">'+(si<=filled?'★':'☆')+'</span>';
+            var badge='<span style="display:inline-flex;align-items:center;gap:4px;vertical-align:middle"><span style="font-size:11px;color:'+starCol+';font-weight:600">'+esc(lvl)+'</span><span style="display:inline-flex;gap:1px;letter-spacing:1px">'+stars+'</span></span>';
+            var ps='font-size:12px;padding:3px 9px;border-radius:8px;background:rgba(255,255,255,0.09)';
+            var limitP='<span style="'+ps+'">💰 '+esc(r.maxAmountFmt)+'</span>';
+            var sc=r.settledCount||0,hist;
+            if(r.hasArrears)            hist='<span style="'+ps+';color:#fca5a5">⚠ Deuda vencida</span>';
+            else if(sc===0)             hist='<span style="'+ps+';color:#94a3b8">Primera solicitud</span>';
+            else if(r.levelDropped||r.levelReset) hist='<span style="'+ps+';color:#fcd34d">'+(sc===1?'1 pago':sc+' pagos')+' · atraso</span>';
+            else                        hist='<span style="'+ps+';color:#86efac">✓ '+(sc===1?'1 pago':sc+' pagos')+'</span>';
+            var ac=r.activeLoans||0;
+            var actP=ac>0?'<span style="'+ps+'">'+(ac===1?'1 activo':ac+' activos')+'</span>':'<span style="'+ps+';color:#94a3b8">Sin activos</span>';
+            // Línea de incentivo: vincula el pago puntual con el próximo límite concreto.
+            var nx=r.nextMax>0?fmt(r.nextMax):'',tip='',tipCol='#a5f3fc';
+            if(r.hasArrears){
+              tip='⚠ Regularizá tu deuda para recuperar tu límite.'; tipCol='#fca5a5';
+            } else if(r.atMaxLevel&&!isIni){
+              tip='🏆 Tenés el límite máximo. Seguí pagando a tiempo para conservarlo.'; tipCol='#86efac';
+            } else if((r.levelDropped||r.levelReset)&&nx){
+              tip='↑ Un pago a tiempo te recupera un nivel → '+nx+'.'; tipCol='#fcd34d';
+            } else if(sc===0&&nx){
+              tip='⭐ Pagá a tiempo y tu próximo límite sube a '+nx+'.';
+            } else if(nx&&nx!==esc(r.maxAmountFmt)){
+              tip='⭐ Pagá a tiempo y tu próximo límite sube a '+nx+'.';
+            }
+            welcome.innerHTML=
+              '<div style="display:flex;align-items:center;gap:7px;margin-bottom:5px"><b>¡Hola de nuevo, '+nm+'!</b>'+badge+'</div>'+
+              '<div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:'+(tip?'4':'0')+'px">'+limitP+hist+actP+'</div>'+
+              (tip?'<div style="font-size:12px;color:'+tipCol+';line-height:1.4">'+tip+'</div>':'');
+          })();
           el_('fullName').value=r.client.name||'';
           el_('phone').value=r.client.phone||'';
           el_('cuil').value=r.client.cuil||'';cuilWrap.style.display='';el_('address').value=r.client.address||'';
+          (function(){var ei2=document.getElementById('email2');if(ei2)ei2.value=emailEl.value;})();
           applyRefs(r);
         }else{
           modeEl.value='new';clientIdEl.value='';
           welcome.className='welcome newc';
           welcome.innerHTML='<b>Cliente nuevo.</b> Completá todos los datos para procesar tu primera solicitud.';
           el_('fullName').value='';el_('phone').value='';el_('cuil').value='';cuilWrap.style.display='';el_('address').value='';
+          (function(){var ei2=document.getElementById('email2');if(ei2)ei2.value=emailEl.value;})();
           applyRefs(r);
         }
         ['fullName','phone','address','cuil','dniPhoto','cuilPhoto'].forEach(function(id){ setRequired(el_(id),true); });
@@ -2114,6 +2164,10 @@ function intakeSmartHtml_() {
       // Plazos permitidos por monto: ≤T1MAX → [15,30] (elige); <T2MAX → [30]; ≥T2MAX → [90] (cuotas).
       function allowedDays(a){ if(!(a>0)) return []; if(a>MAXAMT) return null; if(a<=T1MAX) return [15,30]; if(a<T2MAX) return [30]; return [90]; }
       function recalc(){
+        // "term" es un campo OCULTO que fija el monto/elección; al setearlo por código no dispara
+        // eventos, así que su error no se limpia solo. Tras recalcular, si el error está visible lo
+        // revalidamos (se limpia al corregir el monto; se actualiza si sigue inválido).
+        try {
         var a=parseAmount(amountEl.value), tv=el_('termView'), tc=el_('termChoice'), sel=el_('term15o30');
         var al=allowedDays(a);
         if(al&&al.length===0){ termEl.value=''; tc.style.display='none'; tv.style.display='block'; calc.style.display='none'; tv.textContent='Ingresá el monto para ver el plazo y las cuotas.'; tv.style.color='#9fb2d0'; return; }
@@ -2134,6 +2188,9 @@ function intakeSmartHtml_() {
           : (ti.cuotas+' cuotas de '+fmt(cuota)+' — '+cuotaDatesTxt(ti.cuotas,90));
         calc.style.display='block';
         calc.innerHTML='Interés: <b>'+fmt(a*ti.rate)+'</b><br>Total a devolver: <b>'+fmt(total)+'</b><br>Repago: <b>'+sched+'</b>';
+        } finally {
+          var et=document.getElementById('e_term'); if(et&&et.classList.contains('show')) checkField('term');
+        }
       }
       // Al cambiar la elección de plazo (tramo chico), recalcular.
       (function(){ var s=document.getElementById('term15o30'); if(s) s.addEventListener('change',recalc); })();
@@ -2221,7 +2278,7 @@ function intakeSmartHtml_() {
         // Todos los campos son obligatorios, sea cliente nuevo o existente.
         var reusing=el_('reuseRefs')&&el_('reuseRefs').value==='1';
         var refKeys=reusing?[]:['ref1Name','ref1Rel','ref1Phone','ref2Name','ref2Rel','ref2Phone'];
-        var keys=['email','dni','fullName','phone','cuil','address'].concat(refKeys)
+        var keys=['email2','dni','fullName','phone','cuil','address'].concat(refKeys)
           .concat(['amount','term','notes','agreeRepay','agreeMora','agreeConseq','agreeContact','agree','dniPhoto','cuilPhoto']);
         if(payNeedsAccount()){ keys=keys.concat(['payDetails','acctOwn']); if(isThirdParty()) keys=keys.concat(THIRD_KEYS); } // cuenta de destino / titular
         var firstBad=null;
@@ -2322,7 +2379,7 @@ function intakeSmartHtml_() {
       });
 
       /* ===== Asistente por pasos ===== */
-      var STEP_KEYS={1:['email','dni'],2:['fullName','phone','cuil','address'],3:['ref1Name','ref1Rel','ref1Phone','ref2Name','ref2Rel','ref2Phone'],4:['amount','term','notes'],5:['dniPhoto','cuilPhoto'],6:['agreeRepay','agreeMora','agreeConseq','agreeContact','agree']};
+      var STEP_KEYS={1:['email','dni'],2:['email2','fullName','phone','cuil','address'],3:['ref1Name','ref1Rel','ref1Phone','ref2Name','ref2Rel','ref2Phone'],4:['amount','term','notes'],5:['dniPhoto','cuilPhoto'],6:['agreeRepay','agreeMora','agreeConseq','agreeContact','agree']};
       var STEP_LABELS={1:'Identificación',2:'Tus datos',3:'Referencias',4:'El préstamo',5:'Documentación',6:'Confirmación'};
       var MAXSTEP=6, curStep=1;
       function stepValid(n){
@@ -2359,7 +2416,7 @@ function intakeSmartHtml_() {
       }
       (function(){
         var nb=document.getElementById('nextBtn'), pb=document.getElementById('prevBtn');
-        if(nb) nb.addEventListener('click',function(){ if(curStep===1){ runLookup(); } else if(stepValid(curStep)){ showStep(curStep+1); } });
+        if(nb) nb.addEventListener('click',function(){ if(curStep===1){ runLookup(); } else if(beforeAdvance_(curStep)&&stepValid(curStep)){ showStep(curStep+1); } });
         if(pb) pb.addEventListener('click',function(){ showStep(curStep-1); });
         var chips=document.querySelectorAll('#stepper .schip');
         for(var i=0;i<chips.length;i++){ (function(c){ c.addEventListener('click',function(){ goStep(Number(c.getAttribute('data-goto'))); }); })(chips[i]); }

@@ -1,0 +1,4 @@
+anthropic
+Pillow
+requests
+python-dotenv

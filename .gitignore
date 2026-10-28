@@ -1,1 +1,10 @@
 .DS_Store
+instagram/commands
+instagram/.env
+instagram/story_tmp.png
+instagram/story_preview.png
+instagram/__pycache__/
+instagram/.venv/
+instagram/test
+__pycache__/
+social_media/story_tmp.png

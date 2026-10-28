@@ -1626,13 +1626,16 @@ function paymentBalanceFormula_(r) {
   const D = colL_(colByAny_(PH, ['Monto Pagado']) || PP.AMOUNT);
   const BS = CFG.SHEETS.BORROWERS;
   const bId = colL_(colByAny_(BH, ['ID Préstamo', 'ID Prestamo']) || PB.LOAN_ID);
-  const bTot = colL_(colByAny_(BH, ['Total a Pagar', 'Total a pagar']) || PB.TOTAL);
+  const bTot  = colL_(colByAny_(BH, ['Total a Pagar', 'Total a pagar']) || PB.TOTAL);
+  const bPlan = colL_(colByAny_(BH, ['Total del PLAN', 'Total del Plan']) || PB.TOTAL_PLAN);
   const moraC = colByAny_(BH, ['Recargo por Mora (acum.)']);
   const match = `MATCH($${B}${r},'${BS}'!$${bId}:$${bId},0)`;
-  const totRef = `IFERROR(INDEX('${BS}'!$${bTot}:$${bTot},${match}),0)`;
+  const totRef      = `IFERROR(INDEX('${BS}'!$${bTot}:$${bTot},${match}),0)`;
+  const planRef     = `IFERROR(INDEX('${BS}'!$${bPlan}:$${bPlan},${match}),0)`;
+  const effectiveTot = `IF(${planRef}>0,${planRef},${totRef})`;
   const moraRef = moraC ? `+IFERROR(INDEX('${BS}'!$${colL_(moraC)}:$${colL_(moraC)},${match}),0)` : '';
   const paid = `SUMIFS($${D}$2:$${D}${r},$${B}$2:$${B}${r},$${B}${r})`;
-  return `=IF($${B}${r}="","",MAX(0,${totRef}${moraRef}-${paid}))`;
+  return `=IF($${B}${r}="","",MAX(0,${effectiveTot}${moraRef}-${paid}))`;
 }
 function setupPayments_(ss) {
   const sh = getOrCreate_(ss, CFG.SHEETS.PAYMENTS); sh.clear();
@@ -2507,10 +2510,18 @@ function loanPlanSince_(loanId) {
  *  si quedó saldado— el límite vigente del cliente para un nuevo préstamo (graduación V-32). */
 function loanWaStatus_(loan) {
   const now = new Date();
-  const totalDue = round2_(Number(loan.totalDue) || 0);
+  // Para el baseOwed de multi-cuota: usamos los saldos reales de las cuotas (fuente de verdad),
+  // ya que capital/plazo almacenados pueden no coincidir con el plan real de cuotas.
+  // Para pago único: recalculamos desde capital para no depender de PB.TOTAL desactualizado.
+  const cuotas = (typeof cuotasDeLoan_ === 'function') ? cuotasDeLoan_(loan.loanId) : [];
+  const multiCuota = cuotas.length > 1;
+  const recalcDue = round2_((loan.principal || 0) * (1 + (loanRate_(loan.term) || 0)));
+  const totalDue = recalcDue > 0 ? recalcDue : round2_(Number(loan.totalDue) || 0);
   const pays = (typeof loanPayments_ === 'function') ? loanPayments_(loan.loanId) : [];
   const totalPaid = round2_(pays.reduce((s, p) => s + (Number(p.amount) || 0), 0));
-  const baseOwed = Math.max(0, round2_(totalDue - totalPaid));          // capital+interés pendiente (sin mora)
+  const baseOwed = multiCuota
+    ? round2_(Math.max(0, cuotas.reduce((s, c) => s + (Number(c.saldo) || 0), 0)))
+    : Math.max(0, round2_(totalDue - totalPaid));
   const frz = frozenInfo_(loan.loanId);
   const frozen = frz.since instanceof Date;
   const planSince = loanPlanSince_(loan.loanId);
@@ -2520,9 +2531,8 @@ function loanWaStatus_(loan) {
   const owedMora = onPlan ? 0 : mora;                                   // en plan la mora queda suspendida
   const toClear = round2_(baseOwed + owedMora);
   const paidOff = toClear <= 0.009;
-  const cuotas = (typeof cuotasDeLoan_ === 'function') ? cuotasDeLoan_(loan.loanId) : [];
   const s = { now, totalDue, totalPaid, baseOwed, frz, frozen, planSince, onPlan, mora, owedMora,
-    late, toClear, paidOff, cuotas, multiCuota: cuotas.length > 1, limit: null };
+    late, toClear, paidOff, cuotas, multiCuota, limit: null };
   if (paidOff && typeof graduationMax_ === 'function') {
     try { s.limit = graduationMax_(normDni_(loan.dni)); } catch (e) { s.limit = null; }
   }
@@ -2541,6 +2551,22 @@ function cuotaLines_(cuotas) {
   });
 }
 
+/** HTML `<table>` con el estado de cada cuota, para el cuerpo del correo de recibo. Espejo HTML de cuotaLines_. */
+function cuotasHtmlTable_(cuotas) {
+  const n = cuotas.length;
+  let h = '<table style="border-collapse:collapse;margin:4px 0">';
+  cuotas.forEach(function(c) {
+    const etq = 'Cuota ' + c.num + '/' + n;
+    const venc = c.due instanceof Date ? (' — vence ' + fmtDate_(c.due)) : '';
+    let est;
+    if      (c.saldo <= 0.009)      est = '&#10003; PAGADA';
+    else if (c.pagado > 0.009)      est = 'Parcial: ' + fmtMoney_(c.pagado) + ' pagado de ' + fmtMoney_(c.monto) + ', falta ' + fmtMoney_(c.saldo) + venc;
+    else                            est = 'Pendiente: ' + fmtMoney_(c.monto) + venc;
+    h += '<tr><td style="padding:2px 8px;border:1px solid #ccc;background:#f0f4fa"><b>' + etq + '</b></td>' +
+         '<td style="padding:2px 8px;border:1px solid #ccc">' + est + '</td></tr>';
+  });
+  return h + '</table>';
+}
 /** Arma el TEXTO del aviso de pago según el estado del préstamo (saldado / debe / cuotas / congelado /
  *  en plan). s = loanWaStatus_(loan). Usa saltos de línea reales (encodeURIComponent → %0A en wa.me). */
 function paymentWaMsg_(loan, s, payDate, amount) {
@@ -4643,21 +4669,23 @@ function recordPayment(loanId, amountStr, dateStr) {
     const row = appendPaymentRowFixed_(psh, [payId, loanId, payDate, amount, '', '', loan.name || '', loan.dni || '']);
     psh.getRange(row, PP.BALANCE).setFormula(paymentBalanceFormula_(row)); // saldo vivo (no un valor fijo)
     psh.getRange(row, PP.DATE).setNumberFormat('yyyy-mm-dd'); psh.getRange(row, PP.AMOUNT, 1, 2).setNumberFormat(CFG.CURRENCY_FMT);
+    // Estado completo del préstamo: se calcula una vez y se reutiliza en WA, correo y PDF.
+    const waState = loanWaStatus_(loan);
     // Aviso de pago por WhatsApp (col. «Avisar pago 📲»): mismo enlace que arma la edición directa de
     // Pagos. loanWaStatus_ ya cuenta este pago (la fila se agregó arriba). "sin teléfono" si no hay número.
     try {
-      const waF = paymentWaFormula_(loan, payDate, amount);
+      const waF = paymentWaFormula_(loan, payDate, amount, waState);
       psh.getRange(row, PP.WA_PAYMENT).setValue(waF || 'sin teléfono'); // setValue trata "=…" como fórmula
     } catch (e) { logError_('recordPayment:waPago', e); }
     updateLoanOutstanding_(loanId);
     if (loan.email) {
       // Recibo de pago como PDF numerado, adjunto al correo de confirmación y enlazado en "Recibo".
       let receiptFile = null;
-      try { receiptFile = makePaymentReceiptFile_(loan, { payId: payId, date: payDate, amount: amount, out: outAfter }); }
+      try { receiptFile = makePaymentReceiptFile_(loan, { payId: payId, date: payDate, amount: amount, out: outAfter, state: waState }); }
       catch (e) { logError_('recordPayment:receiptPdf', e); }
       sendBrandedEmail_(loan.email, 'Pago recibido — ' + loanId,
         'Estimado/a ' + loan.name + ', confirmamos su pago de ' + fmtMoney_(amount) + '. Saldo: ' + fmtMoney_(outAfter) + '.',
-        receiptHtml_(loan, payDate, amount, outAfter),
+        receiptHtml_(loan, payDate, amount, outAfter, waState),
         receiptFile ? { attachments: [receiptFile.getAs('application/pdf')] } : {});
       if (receiptFile) psh.getRange(row, PP.RECEIPT).setFormula('=HYPERLINK("' + receiptFile.getUrl() + '","Ver recibo")');
       else psh.getRange(row, PP.RECEIPT).setValue(new Date());
@@ -4679,13 +4707,14 @@ function sendPaymentReceiptForRow_(psh, row) {
     const payDate = psh.getRange(row, PP.DATE).getValue() || new Date();
     const amount = Number(psh.getRange(row, PP.AMOUNT).getValue()) || 0;
     if (amount <= 0) throw new Error('El monto pagado de la fila es inválido.');
-    const outAfter = Number(psh.getRange(row, PP.BALANCE).getValue()) || 0;
+    const waState  = loanWaStatus_(loan);
+    const outAfter = waState.paidOff ? 0 : Math.max(0, round2_(waState.baseOwed));
     let receiptFile = null;
-    try { receiptFile = makePaymentReceiptFile_(loan, { payId: payId, date: payDate, amount: amount, out: outAfter }); }
+    try { receiptFile = makePaymentReceiptFile_(loan, { payId: payId, date: payDate, amount: amount, out: outAfter, state: waState }); }
     catch (e) { logError_('sendPaymentReceiptForRow_:receiptPdf', e); }
     sendBrandedEmail_(loan.email, 'Pago recibido — ' + loanId,
       'Estimado/a ' + loan.name + ', confirmamos su pago de ' + fmtMoney_(amount) + '. Saldo: ' + fmtMoney_(outAfter) + '.',
-      receiptHtml_(loan, payDate, amount, outAfter),
+      receiptHtml_(loan, payDate, amount, outAfter, waState),
       receiptFile ? { attachments: [receiptFile.getAs('application/pdf')] } : {});
     if (receiptFile) psh.getRange(row, PP.RECEIPT).setFormula('=HYPERLINK("' + receiptFile.getUrl() + '","Ver recibo")');
     else psh.getRange(row, PP.RECEIPT).setValue(new Date());
@@ -4704,19 +4733,52 @@ function generatePaymentReceiptForRow_(psh, row) {
     const payDate = psh.getRange(row, PP.DATE).getValue() || new Date();
     const amount = Number(psh.getRange(row, PP.AMOUNT).getValue()) || 0;
     if (amount <= 0) throw new Error('El monto pagado de la fila es inválido.');
-    const outAfter = Number(psh.getRange(row, PP.BALANCE).getValue()) || 0;
-    const receiptFile = makePaymentReceiptFile_(loan, { payId: payId, date: payDate, amount: amount, out: outAfter });
+    const waState  = loanWaStatus_(loan);
+    const outAfter = waState.paidOff ? 0 : Math.max(0, round2_(waState.baseOwed));
+    const receiptFile = makePaymentReceiptFile_(loan, { payId: payId, date: payDate, amount: amount, out: outAfter, state: waState });
     psh.getRange(row, PP.RECEIPT).setFormula('=HYPERLINK("' + receiptFile.getUrl() + '","Ver recibo")');
     return 'Recibo ' + payId + ' generado (saldo ' + fmtMoney_(outAfter) + ').';
   });
 }
-function receiptHtml_(loan, date, amount, out) {
-  const cleared = out <= 0.009;
-  return '<p>Estimado/a ' + esc_(loan.name) + ',</p><p>Confirmamos su pago del préstamo <b>' + esc_(loan.loanId) + '</b>.</p>' +
+function receiptHtml_(loan, date, amount, out, s) {
+  const cleared = s ? s.paidOff : (out <= 0.009);
+  let html = '<p>Estimado/a ' + esc_(loan.name) + ',</p>' +
+    '<p>Confirmamos su pago del préstamo <b>' + esc_(loan.loanId) + '</b>.</p>' +
     '<table style="border-collapse:collapse">' +
-    row_('Fecha de pago', fmtDate_(date)) + row_('Monto pagado', fmtMoney_(amount)) + row_('Saldo pendiente', '<b>' + fmtMoney_(out) + '</b>') +
-    '</table>' + (cleared ? '<p style="color:#38761d"><b>¡Su préstamo está totalmente pagado. Gracias!</b></p>' : '') +
-    '<p>Saludos,<br>' + esc_(companyName_()) + '</p>';
+    row_('Fecha de pago', fmtDate_(date)) +
+    row_('Monto pagado',  fmtMoney_(amount));
+  if (!cleared) {
+    if (s && s.multiCuota && s.cuotas.length) {
+      html += row_('Estado de cuotas', cuotasHtmlTable_(s.cuotas));
+      if (s.late && s.mora > 0.009) {
+        html += row_('Saldo pendiente',     '<b>' + fmtMoney_(s.baseOwed) + '</b>') +
+                row_('Mora por atraso',      fmtMoney_(s.mora)) +
+                row_('Total para cancelar', '<b>' + fmtMoney_(s.toClear) + '</b>');
+      } else {
+        html += row_('Saldo total pendiente', '<b>' + fmtMoney_(s.baseOwed) + '</b>');
+      }
+    } else if (s && s.frozen) {
+      html += row_('Saldo pendiente', '<b>' + fmtMoney_(s.baseOwed) + '</b>');
+      if (s.mora > 0.009) html += row_('Mora congelada', fmtMoney_(s.mora));
+      html += row_('Total para cancelar', '<b>' + fmtMoney_(s.toClear) + '</b>');
+    } else if (s && s.onPlan) {
+      if (s.cuotas.length) html += row_('Cuotas del plan', cuotasHtmlTable_(s.cuotas));
+      html += row_('Total del plan pendiente', '<b>' + fmtMoney_(s.baseOwed) + '</b>');
+    } else {
+      const owed = s ? s.baseOwed : out;
+      html += row_('Saldo pendiente', '<b>' + fmtMoney_(owed) + '</b>');
+      if (s && s.late && s.mora > 0.009) {
+        html += row_('Mora por atraso',      fmtMoney_(s.mora)) +
+                row_('Total para cancelar', '<b>' + fmtMoney_(s.toClear) + '</b>');
+      }
+    }
+  }
+  html += '</table>';
+  if (cleared) {
+    html += '<p style="color:#38761d"><b>&#x2713; Su préstamo está totalmente pagado. ¡Gracias!</b></p>';
+    if (s && s.limit != null) html += '<p>Su límite aprobado para un nuevo préstamo es <b>' + fmtMoney_(s.limit) + '</b>.</p>';
+  }
+  return html + '<p>Saludos,<br>' + esc_(companyName_()) + '</p>';
 }
 function row_(k, v) { return '<tr><td style="padding:4px 10px;border:1px solid #ccc;background:#f0f4fa"><b>' + k + '</b></td><td style="padding:4px 10px;border:1px solid #ccc">' + v + '</td></tr>'; }
 
@@ -4741,16 +4803,39 @@ function receiptDocHtml_(heading, subtitle, rows, footNote) {
 }
 /** Recibo de PAGO (PDF numerado) guardado en la carpeta del prestatario. */
 function makePaymentReceiptFile_(loan, pay) {
-  const cleared = pay.out <= 0.009;
+  const s = pay.state;
+  const cleared = s ? s.paidOff : (pay.out <= 0.009);
   const rows = [
-    ['Recibo N.º', esc_(pay.payId)],
-    ['ID Préstamo', esc_(loan.loanId)],
-    ['Prestatario', esc_(loan.name) + ' · DNI ' + esc_(loan.dni)],
+    ['Recibo N.º',   esc_(pay.payId)],
+    ['ID Préstamo',  esc_(loan.loanId)],
+    ['Prestatario',  esc_(loan.name) + ' · DNI ' + esc_(loan.dni)],
     ['Fecha de pago', fmtDate_(pay.date)],
     ['Monto pagado', '<b>' + fmtMoney_(pay.amount) + '</b>'],
-    ['Saldo pendiente', '<b>' + fmtMoney_(pay.out) + '</b>'],
   ];
-  const note = cleared ? '<b style="color:#38761d">El préstamo está totalmente pagado. ¡Gracias!</b>'
+  if (!cleared) {
+    const cuotas = s && s.cuotas && s.cuotas.length ? s.cuotas : [];
+    if (s && (s.multiCuota || s.onPlan) && cuotas.length) {
+      const n = cuotas.length;
+      cuotas.forEach(function(c) {
+        const etq = 'Cuota ' + c.num + '/' + n;
+        const vFmt = c.due instanceof Date ? (', vence ' + fmtDate_(c.due)) : '';
+        if      (c.saldo <= 0.009)     rows.push([etq, '&#10003; PAGADA — ' + fmtMoney_(c.monto)]);
+        else if (c.pagado > 0.009)     rows.push([etq, 'Parcial: ' + fmtMoney_(c.pagado) + ' de ' + fmtMoney_(c.monto) + ' — falta ' + fmtMoney_(c.saldo) + vFmt]);
+        else                           rows.push([etq, 'Pendiente: ' + fmtMoney_(c.monto) + vFmt]);
+      });
+    }
+    const owed = s ? s.baseOwed : pay.out;
+    rows.push(['Saldo pendiente', '<b>' + fmtMoney_(owed) + '</b>']);
+    if (s && s.late && s.mora > 0.009) {
+      rows.push(['Mora por atraso',     fmtMoney_(s.mora)]);
+      rows.push(['Total para cancelar', '<b>' + fmtMoney_(s.toClear) + '</b>']);
+    } else if (s && s.frozen && s.mora > 0.009) {
+      rows.push(['Mora congelada',      fmtMoney_(s.mora)]);
+      rows.push(['Total para cancelar', '<b>' + fmtMoney_(s.toClear) + '</b>']);
+    }
+  }
+  const note = cleared
+    ? '<b style="color:#38761d">El préstamo está totalmente pagado. ¡Gracias!</b>'
     : 'Comprobante de pago parcial. El saldo pendiente continúa vigente según el contrato.';
   const html = receiptDocHtml_('RECIBO DE PAGO', 'Comprobante de pago — ' + esc_(companyName_()), rows, note);
   return savePdfToBorrower_(html, 'Recibo ' + pay.payId + ' - ' + loan.loanId + ' - ' + loan.name + '.pdf', loan);
