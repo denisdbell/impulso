@@ -169,6 +169,7 @@ function onOpen() {
       .addSeparator()
       .addItem('⚙ Instalar análisis de deuda (columnas + hoja + disparador)', 'instalarAnalisisDeuda')
       .addItem('➕ Agregar SOLO columnas de análisis BCRA (Prospectos)', 'crearColumnasBcraProspectos')
+      .addItem('➕ Crear columna «BCRA (comprimido)» (Clientes)', 'crearColumnaBcraComprimido')
       .addItem('➕ Crear hoja de Recordatorios de pago', 'createRemindersSheet_')
       .addItem('📄 Crear hoja de Estudio de Contratos', 'createAgreementSheet_')
       .addItem('📄 Crear/actualizar hoja de Estudio de Estados', 'createStatementsSheet_')
@@ -1406,6 +1407,8 @@ function setupDispositivos_(ss) {
 const PROSPECTO_JSON_COL = 'Datos BCRA (JSON)';
 const PROSPECTO_SCORE_COL = 'Puntaje BCRA';
 const PROSPECTO_DECISION_COL = 'Decisión BCRA';
+// Columna en «Clientes» con el resultado BCRA del cliente en formato comprimido.
+const CLIENTE_BCRA_COMP_COL = 'BCRA (comprimido)';
 // Celdas de control de la hoja «Análisis de Deuda» y fila donde arranca la salida.
 const ANALISIS_NAME_CELL = 'B3';   // selector del prospecto (desplegable)
 const ANALISIS_MODE_CELL = 'B4';   // «Solo no aprobados» / «Todos»
@@ -1489,6 +1492,32 @@ function crearColumnasBcraProspectos() {
     const msg = existed
       ? 'Las columnas de análisis BCRA ya existían en «Prospectos»; se verificaron (no se borró nada).'
       : 'Se agregaron «Datos BCRA (JSON)», «Puntaje BCRA» y «Decisión BCRA» en «Prospectos».';
+    try { ss.toast(msg, '🔎 Análisis de deuda', 6); } catch (e) { }
+    return msg;
+  });
+}
+
+/**
+ * Crea (si falta) SÓLO la columna «BCRA (comprimido)» en «Clientes», donde se guarda el
+ * resultado BCRA del cliente en formato comprimido. Idempotente y NO destructivo: agrega
+ * por nombre al final (no se incluye en CLIENTES_HEADERS_V2, así setupClientes_ no la reescribe)
+ * y no toca ningún dato existente. Pensada para correr sola desde el editor o el menú.
+ */
+function crearColumnaBcraComprimido() {
+  return guard_('crearColumnaBcraComprimido', function () {
+    const ss = getSS_();
+    const cs = ss.getSheetByName(CFG.SHEETS.CLIENTS);
+    if (!cs) throw new Error('No se encontró la hoja «' + CFG.SHEETS.CLIENTS + '».');
+    const existed = !!headerMap_(cs)[CLIENTE_BCRA_COMP_COL];
+    const col = clientesHeaderCol_(cs, CLIENTE_BCRA_COMP_COL, true);
+    if (col > 0) {
+      cs.setColumnWidth(col, 260);
+      cs.getRange(1, col).setNote('BCRA del cliente en formato comprimido (se completará al pegar/comprimir el JSON de la Central de Deudores).');
+    }
+    invalidateHeaderIndexCache_();
+    const msg = existed
+      ? 'La columna «' + CLIENTE_BCRA_COMP_COL + '» ya existía en «Clientes»; se verificó (no se borró nada).'
+      : 'Se agregó la columna «' + CLIENTE_BCRA_COMP_COL + '» en «Clientes».';
     try { ss.toast(msg, '🔎 Análisis de deuda', 6); } catch (e) { }
     return msg;
   });
@@ -8206,6 +8235,14 @@ function onEditInstallable(e) {
       }
       return;
     }
+    // Clientes: al pegar el JSON del BCRA en «BCRA (comprimido)» se comprime solo (en el lugar).
+    if (name === CFG.SHEETS.CLIENTS) {
+      const compCol = headerMap_(sh)[CLIENTE_BCRA_COMP_COL] || 0;
+      if (compCol && compCol >= c0 && compCol <= cN) {
+        for (let row = r0; row <= rN; row++) comprimirBcraClienteFila_(sh, row, compCol);
+      }
+      return;
+    }
     if (name === CFG.SHEETS.PAYMENTS) {
       // Al elegir un ID Préstamo (B): autogenerar el ID Pago (A) si falta,
       // autocompletar Nombre (G) y DNI (H), y preparar la Fecha de Pago (C):
@@ -8925,6 +8962,59 @@ function bcraMmYY_(s) {
   if (anio < 100) anio += 2000;
   if (!mes || !anio) return '';
   return String(anio) + (mes < 10 ? '0' + mes : '' + mes);
+}
+
+/* ===== Compresión del resultado BCRA (para guardarlo chico en una celda) ===== */
+var BCRA_COMP_PREFIX = 'BCRAZ1:';   // marca de formato (versión 1) + evita que la celda arranque con '='
+
+/**
+ * Comprime el objeto normalizado del BCRA ({nombre,cuil,snapshot,periodos}) a una cadena corta:
+ * JSON → gzip → Base64, con el prefijo BCRAZ1:. Solo guarda lo que el análisis necesita.
+ */
+function bcraCompress_(parsed) {
+  var json = JSON.stringify(parsed || {});
+  var gz = Utilities.gzip(Utilities.newBlob(json, 'application/json'));
+  return BCRA_COMP_PREFIX + Utilities.base64Encode(gz.getBytes());
+}
+
+/**
+ * Inverso de bcraCompress_. Devuelve el objeto normalizado {nombre,cuil,snapshot,periodos}.
+ * Acepta también JSON crudo (compatibilidad). Lanza un error claro si no puede.
+ */
+function bcraDecompress_(str) {
+  var s = String(str == null ? '' : str).trim();
+  if (!s) throw new Error('No hay dato BCRA comprimido para descomprimir.');
+  if (s.indexOf(BCRA_COMP_PREFIX) === 0) {
+    var b64 = s.slice(BCRA_COMP_PREFIX.length);
+    var bytes = Utilities.base64Decode(b64);
+    var json = Utilities.ungzip(Utilities.newBlob(bytes, 'application/x-gzip')).getDataAsString();
+    return JSON.parse(json);
+  }
+  if (s[0] === '{' || s[0] === '[') return parsePastedBcra_(s);   // compat: venía como JSON crudo
+  throw new Error('El dato BCRA no está en un formato reconocido (ni comprimido ni JSON).');
+}
+
+/**
+ * Comprime EN EL LUGAR el JSON del BCRA recién pegado en una celda de «Clientes»
+ * (columna «BCRA (comprimido)»): si parece JSON crudo, lo valida/normaliza con
+ * parsePastedBcra_ y reemplaza la celda por la cadena BCRAZ1:… Si ya está comprimido
+ * (o no parece JSON), no hace nada. Avisa por toast; ante error deja el texto crudo.
+ */
+function comprimirBcraClienteFila_(sh, row, compCol) {
+  var cell = sh.getRange(row, compCol);
+  var raw = String(cell.getValue() || '').trim();
+  if (!raw) return;
+  if (raw.indexOf(BCRA_COMP_PREFIX) === 0) return;              // ya comprimido
+  if (raw.charAt(0) !== '{' && raw.charAt(0) !== '[') return;   // no parece JSON → no tocar
+  try {
+    var parsed = parsePastedBcra_(raw);
+    cell.setValue(bcraCompress_(parsed));
+    var nper = (parsed.periodos || []).length;
+    try { getSS_().toast('Comprimido: ' + (parsed.nombre || '(cliente)') + (parsed.cuil ? ' (CUIL ' + parsed.cuil + ')' : '') + ' · ' + nper + ' período(s).', '🗜 BCRA comprimido', 6); } catch (e) { }
+  } catch (err) {
+    logError_('comprimirBcraClienteFila_', err);
+    try { getSS_().toast(err && err.message ? err.message : String(err), '⚠ BCRA (comprimido)', 8); } catch (e) { }
+  }
 }
 
 /**
