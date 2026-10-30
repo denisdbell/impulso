@@ -1,0 +1,5 @@
+# Datos sensibles: NO versionar.
+# Reportes y JSON descargados de la Central de Deudores (datos personales/financieros).
+out/
+# Lista de CUILs reales (datos personales).
+cuils.txt
