@@ -3,3 +3,10 @@
 out/
 # Lista de CUILs reales (datos personales).
 cuils.txt
+# Planilla Impulso exportada (.xlsx) — PII de prestatarios. Guardala en out/.
+*.xlsx
+# Credenciales del service account de Google (clave privada). NUNCA versionar.
+service_account*.json
+credentials*.json
+# Id de la planilla privada (identificador del recurso, fuera del código).
+.impulso_file_id
