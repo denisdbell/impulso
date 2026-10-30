@@ -1685,6 +1685,9 @@ function intakeSmartHtml_() {
             </ul>
             <div id="maxBanner" style="margin-top:7px;padding:7px 11px;background:#fff4e5;border:1px solid #f0b357;border-radius:8px;color:#7a4a00">⚠️ <b>Monto máximo por préstamo: ${fmtMoney_(loanMax_())}</b></div>
             <div id="levelInfo" style="display:none;margin-top:7px"></div>
+            <div id="levelTeaser" style="margin-top:7px;border-radius:12px;padding:12px 14px;font-size:13px;line-height:1.45;background:var(--ok-050);color:var(--ok);border:1px solid var(--ok)">
+              ⭐ <b>Pagá a tiempo y subís de nivel:</b> tu límite puede crecer de ${fmtMoney_(settingMoney_('Límite inicial (préstamo nuevo)', 150000))} hasta ${fmtMoney_(loanMax_())}. Muchos préstamos chicos no suben de nivel — contá con devolver a tiempo.
+            </div>
           </div>
           <label>Monto solicitado (ARS) <span class="req">*</span><input name="amount" id="amount" type="text" inputmode="numeric" autocomplete="off" placeholder="Ej: 100.000" required style="font-size:20px;font-weight:bold;height:auto;padding:12px"></label>
           <div id="amountWords" style="display:none;margin:6px 0 2px;font-size:19px;font-weight:bold;color:#f0c070;line-height:1.35"></div>
@@ -1816,6 +1819,7 @@ function intakeSmartHtml_() {
       <div class="pbar-track"><div class="pbar-fill" id="pbarFill"></div></div>
       <p id="loadPct" style="color:#1c4587;font-weight:bold;margin:0;font-size:20px">0%</p></div>
     <div id="successView"></div>
+    ${socialRowHtml_()}
     </div>
     <script>
       ${deviceCaptureJs_()}
@@ -2095,9 +2099,10 @@ function intakeSmartHtml_() {
           (function(){
             var nm=esc(r.client.name);
             var lvl=r.level||'Inicial',isIni=(lvl==='Inicial');
-            var filled=r.atMaxLevel&&!isIni?5:isIni?1:Math.max(1,Math.min(5,Math.round(((r.levelNum||1)/(r.maxLevelNum||5))*5)));
+            var total=(r.maxLevelNum>0)?r.maxLevelNum:0;                      // una estrella por nivel de la escalera (p. ej. 7)
+            var filled=isIni?0:Math.max(0,Math.min(total,r.levelNum||0));     // llenas = nivel actual (sin comprimir a 5)
             var starCol=r.hasArrears?'#fca5a5':r.atMaxLevel&&!isIni?'#86efac':'#fbbf24';
-            var stars='';for(var si=1;si<=5;si++)stars+='<span style="color:'+(si<=filled?starCol:'rgba(255,255,255,0.18)')+';font-size:15px;line-height:1">'+(si<=filled?'★':'☆')+'</span>';
+            var stars='';for(var si=1;si<=total;si++)stars+='<span style="color:'+(si<=filled?starCol:'rgba(255,255,255,0.18)')+';font-size:15px;line-height:1">'+(si<=filled?'★':'☆')+'</span>';
             var badge='<span style="display:inline-flex;align-items:center;gap:4px;vertical-align:middle"><span style="font-size:11px;color:'+starCol+';font-weight:600">'+esc(lvl)+'</span><span style="display:inline-flex;gap:1px;letter-spacing:1px">'+stars+'</span></span>';
             var ps='font-size:12px;padding:3px 9px;border-radius:8px;background:rgba(255,255,255,0.09)';
             var limitP='<span style="'+ps+'">💰 '+esc(r.maxAmountFmt)+'</span>';
@@ -2134,7 +2139,8 @@ function intakeSmartHtml_() {
         }else{
           modeEl.value='new';clientIdEl.value='';
           welcome.className='welcome newc';
-          welcome.innerHTML='<b>Cliente nuevo.</b> Completá todos los datos para procesar tu primera solicitud.';
+          welcome.innerHTML='<b>Cliente nuevo.</b> Completá todos los datos para procesar tu primera solicitud.'+
+            '<div style="margin-top:5px;font-size:12.5px;line-height:1.4">⭐ Pagá a tiempo y en tu próxima solicitud vas a poder pedir más: así arranca la escalera de niveles.</div>';
           el_('fullName').value='';el_('phone').value='';el_('cuil').value='';cuilWrap.style.display='';el_('address').value='';
           (function(){var ei2=document.getElementById('email2');if(ei2)ei2.value=emailEl.value;})();
           applyRefs(r);
@@ -2313,7 +2319,8 @@ function intakeSmartHtml_() {
           '<tr><td class="k">Interés</td><td>'+esc(r.interestFmt)+'</td></tr>'+
           '<tr><td class="k">Total a devolver</td><td><b>'+esc(r.totalFmt)+'</b></td></tr>'+
           '</table>'+
-          '<div class="note">Enviamos un correo de confirmación a <b>'+esc(r.email)+'</b>. Revisaremos tu solicitud y nos pondremos en contacto. Podés cerrar esta ventana.</div>';
+          '<div class="note">Enviamos un correo de confirmación a <b>'+esc(r.email)+'</b>. Revisaremos tu solicitud y nos pondremos en contacto. Podés cerrar esta ventana.</div>'+
+          '<div class="note" style="margin-top:8px">⭐ Pagá a tiempo y en tu próxima solicitud vas a poder pedir más. Así funciona la escalera de niveles.</div>';
         successView.style.display='block';
       }); }
       function onFail(err){stopProgress();loadingView.style.display='none';formView.style.display='block';btn.disabled=false;btn.textContent='Enviar solicitud';msg.className='err';msg.style.display='block';msg.textContent=(err.message||err);}
@@ -2341,6 +2348,7 @@ function intakeSmartHtml_() {
           crow('⚠️ Recargo por mora','<span style="color:#7a5200"><b style="color:#b45309">'+feePct+'% por día</b> sobre el total a devolver ('+fmt(feeDay)+' por día) de atraso posterior al vencimiento'+(grace>0?', tras '+grace+' día(s) de gracia':'')+', con tope del '+capPct+'% del total a devolver</span>')+
           crow('Si pagás tarde','<span style="color:#7a5200">'+d1+' días → <b>'+fmt(lateTotal(d1))+'</b><br>'+d2+' días → <b>'+fmt(lateTotal(d2))+'</b><br>'+d3+' días → <b>'+fmt(lateTotal(d3))+'</b></span>')+
           '</table>'+
+          '<p style="margin-top:10px;color:#2e7d32;font-size:13px">✅ Si pagás a tiempo, subís de nivel y tu próximo límite crece.</p>'+
           '<p style="margin-top:12px">¿Confirmás que querés pedir este préstamo por <b>'+t+' días</b> a <b>'+pct+'%</b> de interés?</p>';
         confirmOverlay.style.display='flex';
         return true;
@@ -2672,12 +2680,14 @@ function prospectoFormHtml_() {
           <button id="btn" type="submit">Enviar mis datos</button>
         </form>
         <div id="msg"></div>
+        ${instagramFollowHtml_(false)}
       </div>
       <div id="successView"></div>
     </div>
     <script>
       ${deviceCaptureJs_()}
       var $=function(id){return document.getElementById(id);};
+      var IG_FOLLOW=${JSON.stringify(instagramFollowHtml_(true))};
       function escHtml(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
       function digitsOnly(s){return String(s==null?'':s).replace(/[^0-9]/g,'');}
       function pad8(s){s=String(s);while(s.length<8)s='0'+s;return s;}
@@ -2735,7 +2745,7 @@ function prospectoFormHtml_() {
         $('formView').style.display='none';
         var sv=$('successView');
         sv.innerHTML='<div class="check">✓</div><h1>¡Gracias'+(r&&r.name?(', '+escHtml(r.name)):'')+'!</h1>'+
-          '<p class="sub">'+escHtml((r&&r.message)||'Guardamos tus datos. Apenas haya fondos disponibles te avisamos.')+'</p>';
+          '<p class="sub">'+escHtml((r&&r.message)||'Guardamos tus datos. Apenas haya fondos disponibles te avisamos.')+'</p>'+IG_FOLLOW;
         sv.style.display='block';
         try{$('card').scrollIntoView({block:'start',behavior:'smooth'});}catch(_){}}
       function onFail(err){
