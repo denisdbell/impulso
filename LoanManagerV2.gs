@@ -5237,19 +5237,15 @@ function recordPayment(loanId, amountStr, dateStr) {
     } catch (e) { logError_('recordPayment:waPago', e); }
     updateLoanOutstanding_(loanId);
     if (loan.email) {
-      // Recibo de pago como PDF numerado, adjunto al correo de confirmación y enlazado en "Recibo".
+      // Recibo de pago como PDF numerado, enlazado en "Recibo". Sin envío automático de correo:
+      // usar la casilla "Enviar recibo" del Pago para enviarlo manualmente.
       let receiptFile = null;
       try { receiptFile = makePaymentReceiptFile_(loan, { payId: payId, date: payDate, amount: amount, out: outAfter, state: waState }); }
       catch (e) { logError_('recordPayment:receiptPdf', e); }
-      sendBrandedEmail_(loan.email, 'Pago recibido — ' + loanId,
-        'Estimado/a ' + loan.name + ', confirmamos su pago de ' + fmtMoney_(amount) + '. Saldo: ' + fmtMoney_(outAfter) + '.',
-        receiptHtml_(loan, payDate, amount, outAfter, waState),
-        receiptFile ? { attachments: [receiptFile.getAs('application/pdf')] } : {});
       if (receiptFile) psh.getRange(row, PP.RECEIPT).setFormula('=HYPERLINK("' + receiptFile.getUrl() + '","Ver recibo")');
       else psh.getRange(row, PP.RECEIPT).setValue(new Date());
     }
-    return 'Pago registrado: ' + fmtMoney_(amount) + '. Saldo posterior: ' + fmtMoney_(outAfter) +
-      (loan.email ? '. Recibo enviado a ' + loan.email : '');
+    return 'Pago registrado: ' + fmtMoney_(amount) + '. Saldo posterior: ' + fmtMoney_(outAfter) + '.';
   });
 }
 /** Envía (o reenvía) el recibo de pago de una fila existente de "Pagos". Devuelve el mensaje. */
