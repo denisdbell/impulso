@@ -132,6 +132,25 @@ Lee la planilla exportada a `.xlsx` (sin tocar la hoja ni el proyecto Apps Scrip
    python3 bcra/analyze_combined.py 20123456789     # veredicto combinado de una persona
    ```
 
+### Aplicación de escritorio (interfaz gráfica)
+
+Para ver todo sin la terminal, abrí la app gráfica — **Tkinter** (viene con Python,
+sin `pip install`), así que corre en cualquier lado:
+
+```sh
+python3 bcra/report_gui.py
+```
+
+Barra lateral con **Resumen** (tarjetas + gráfico de decisiones + mejores/peores),
+tres pestañas de ranking (**Combinado / BCRA / Impulso**) buscables, ordenables y
+coloreadas por riesgo (doble clic en una fila abre a la persona), y una vista de
+**Persona** con medidores de puntaje (combinado / BCRA / Impulso), la tira de
+préstamos de Impulso, la línea de tiempo de 24 meses del BCRA y las tablas de detalle.
+Los números son exactamente los mismos que los de `report.py`. Los archivos BCRA
+faltantes se bajan en segundo plano (se puede desactivar en *Options*); exportá
+cualquier ranking o una ficha a Markdown desde el menú. Abrí otra planilla con
+*File ▸ Open workbook…*.
+
 - **Puntaje Impulso** (0–100, misma escala A–E que el BCRA): comportamiento de pago real
   con nosotros por préstamo — *a tiempo / tarde / vencido / en plan / congelado* —
   ponderado por recencia, con piso de calificación según la peor situación vigente.
