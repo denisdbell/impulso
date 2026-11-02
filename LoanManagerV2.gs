@@ -159,6 +159,7 @@ function onOpen() {
     .addSubMenu(ui.createMenu('⚙ Configuración y mantenimiento')
       .addItem('① Configurar / reconstruir hojas', 'setupConfirm')
       .addItem('Configurar marca (nombre + logo)', 'setBranding')
+      .addItem('🔐 Configurar panel admin (usuario/clave)', 'configurarClaveAdmin')
       .addSeparator()
       .addItem('⑤· Actualizar SOLO Pagos Atrasados (mora)', 'refreshLateOnly')
       .addItem('💳 Actualizar Saldo Posterior en «Pagos» (con mora)', 'actualizarSaldoPosteriorPagos')
@@ -926,6 +927,14 @@ function setupSettings_(ss) {
     ['Exigir token en enlaces (SÍ/NO)', 'SÍ'],
     ['Intentos antes de bloquear (enlaces)', '8'],
     ['Bloqueo por intentos (minutos)', '15'],
+    // Panel ADMIN móvil (?page=admin): usuario + contraseña (cifrada), sesión y anti-fuerza-bruta (ver AdminApp.gs).
+    ['Usuario admin', 'admin'],
+    ['Hash de contraseña admin (SHA-256)', ''],
+    ['Sal de contraseña admin', ''],
+    ['Vigencia de sesión admin (minutos)', '60'],
+    ['Intentos antes de bloquear (admin)', '5'],
+    ['Bloqueo por intentos admin (minutos)', '15'],
+    ['Panel admin activo (SÍ/NO)', 'SÍ'],
     // Avisos automáticos de vencimiento (recordatorios a 30/15/7/3 días; ver enviarAvisosVencimiento).
     ['Avisos de vencimiento activos (SÍ/NO)', 'SÍ'],
     ['Días de aviso de vencimiento (lista)', '30,15,7,3'],
@@ -4862,18 +4871,33 @@ function agreementHtml_(loan, sig) {
   const lender = companyName_(), footer = getSetting_('Pie del Contrato');
   const signatories = ownerSignatories_();   // ambos titulares firman todos los contratos
   const days = termDays_(loan.term) || 0;
-  // Cronograma de cuotas (tramo grande = 3 a 6 cuotas mensuales manejables según el monto; tramos chicos = 1 pago).
-  const nCuotas = (typeof termForAmount_ === 'function' ? (termForAmount_(loan.principal).cuotas || 1) : 1);
+  // Cronograma de cuotas. Fuente de verdad: la hoja "Cuotas" (respeta cantidad, montos y fechas
+  // REALES del préstamo — p. ej. planes reestructurados o consolidados con 4 cuotas al día 10).
+  // Sólo si el préstamo aún no tiene cronograma se DERIVA del monto (tramo grande = 3 a 6 cuotas
+  // mensuales manejables; tramos chicos = 1 pago a los 30/60/… días).
   let cuotasBox = '', cuotasNota = 'Todo se devuelve en un solo pago en la fecha de vencimiento.';
-  if (nCuotas > 1 && loan.loanDate) {
-    const base = round2_(loan.totalDue / nCuotas);
+  const sched = (typeof cuotasDeLoan_ === 'function') ? cuotasDeLoan_(loan.loanId) : [];
+  if (sched.length > 1) {
+    const n = sched.length;
     let filas = '';
-    for (let k = 1; k <= nCuotas; k++) {
-      const monto = (k === nCuotas) ? round2_(loan.totalDue - base * (nCuotas - 1)) : base;
-      filas += `<tr><td class="k">Cuota ${k} de ${nCuotas}</td><td><b>${fmtMoney_(monto)}</b> — vence ${fmtDate_(addDays_(loan.loanDate, 30 * k))}</td></tr>`;
+    sched.forEach(c => {
+      const venc = c.due ? fmtDate_(c.due) : '__________';
+      filas += `<tr><td class="k">Cuota ${c.num} de ${n}</td><td><b>${fmtMoney_(c.monto)}</b> — vence ${venc}</td></tr>`;
+    });
+    cuotasBox = `<div class="box" style="margin-top:8px"><div class="box-title">Plan de pago — ${n} cuotas mensuales</div><table style="margin:0">${filas}</table></div>`;
+    cuotasNota = 'El total se devuelve en ' + n + ' cuotas mensuales, según el cronograma de arriba.';
+  } else {
+    const nCuotas = (typeof termForAmount_ === 'function' ? (termForAmount_(loan.principal).cuotas || 1) : 1);
+    if (nCuotas > 1 && loan.loanDate) {
+      const base = round2_(loan.totalDue / nCuotas);
+      let filas = '';
+      for (let k = 1; k <= nCuotas; k++) {
+        const monto = (k === nCuotas) ? round2_(loan.totalDue - base * (nCuotas - 1)) : base;
+        filas += `<tr><td class="k">Cuota ${k} de ${nCuotas}</td><td><b>${fmtMoney_(monto)}</b> — vence ${fmtDate_(addDays_(loan.loanDate, 30 * k))}</td></tr>`;
+      }
+      cuotasBox = `<div class="box" style="margin-top:8px"><div class="box-title">Plan de pago — ${nCuotas} cuotas mensuales</div><table style="margin:0">${filas}</table></div>`;
+      cuotasNota = 'El total se devuelve en ' + nCuotas + ' cuotas mensuales iguales, según el cronograma de arriba (vencimientos mensuales a los 30, 60, … días).';
     }
-    cuotasBox = `<div class="box" style="margin-top:8px"><div class="box-title">Plan de pago — ${nCuotas} cuotas mensuales</div><table style="margin:0">${filas}</table></div>`;
-    cuotasNota = 'El total se devuelve en ' + nCuotas + ' cuotas mensuales iguales, según el cronograma de arriba (vencimientos mensuales a los 30, 60, … días).';
   }
   const feeDay = round2_(loan.totalDue * lateFeeRate_());              // recargo diario sobre el total
   const moraGrace = moraGraceDays_();                                  // días de gracia antes de la mora
@@ -6173,6 +6197,9 @@ function doGet(e) {
     .setTitle('Firmar Acuerdo de Plan de Pago').addMetaTag('viewport', 'width=device-width, initial-scale=1');
   if (page === 'firmar') return HtmlService.createHtmlOutput(signingPageHtml_(loanParam, '', t))
     .setTitle('Firmar Contrato').addMetaTag('viewport', 'width=device-width, initial-scale=1');
+  // Panel ADMIN móvil (protegido por usuario/contraseña; ver AdminApp.gs).
+  if (page === 'admin') return HtmlService.createHtmlOutput(adminPageHtml_())
+    .setTitle('Panel Admin — Impulso').addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1');
   if (page === 'congelar') return HtmlService.createHtmlOutput(freezeRequestFormHtml_(loanParam, t))
     .setTitle('Solicitud de congelamiento').addMetaTag('viewport', 'width=device-width, initial-scale=1');
   if (page === 'plan') return HtmlService.createHtmlOutput(planRequestFormHtml_(loanParam, t))

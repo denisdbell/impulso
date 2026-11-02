@@ -8,3 +8,5 @@ instagram/.venv/
 instagram/test
 __pycache__/
 social_media/story_tmp.png
+# Exportaciones de la planilla (PII de clientes: nombres/DNI/teléfonos/correos). NO subir al repo público.
+*.xlsx
