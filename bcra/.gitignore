@@ -10,3 +10,6 @@ service_account*.json
 credentials*.json
 # Id de la planilla privada (identificador del recurso, fuera del código).
 .impulso_file_id
+# Id (opcional) de la carpeta de Drive con las fotos de DNI (fuera del código).
+# Las fotos se bajan a out/dni/ — ya cubierto por out/ de arriba (PII).
+.dni_folder_id

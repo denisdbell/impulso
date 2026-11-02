@@ -151,6 +151,77 @@ faltantes se bajan en segundo plano (se puede desactivar en *Options*); exportá
 cualquier ranking o una ficha a Markdown desde el menú. Abrí otra planilla con
 *File ▸ Open workbook…*.
 
+The app adds two **anti-fraud** sections to the sidebar: **🚩 Fraude**
+(cross-record signals, computed on load) and **🪪 DNI** (OCR verification, triggered
+by a button). Both also appear as cards in the **Persona** view and export to
+Markdown. The same reports are available from the command line.
+
+> _Note: these two features (GUI text, labels and reports) are intentionally in
+> **English**, matching the rest of the bcra tooling (`report_gui.py`,
+> `analyze_*.py`). The literals that must match external data — the DNI card fields
+> read by OCR, the workbook column/sheet names, and the `spa` OCR model — stay in
+> Spanish._
+
+### Fraud signals (`analyze_fraud.py`)
+
+Mines the workbook itself for indications of suspicious identity/behavior, cross-
+referencing sheets (Clientes, Dispositivos, Firmas, Prestatarios, Pagos, Nuevos
+Prestatarios). **No OCR and no new dependencies** (it only reads the `.xlsx`).
+
+```sh
+python3 bcra/analyze_fraud.py                      # per-client ranking (to stdout)
+python3 bcra/analyze_fraud.py --export out/_fraude.md
+```
+
+Signal catalog, with per-client weights (`HIGH=40 · MED=20 · LOW=10`) and a resulting
+risk of **High** (≥40 or any HIGH signal) · **Review** (1–39) · **OK** (0):
+
+- **Duplicate identity:** DNI or CUIL repeated across clients (HIGH), inconsistent
+  CUIL↔DNI (AFIP check digit + embedded DNI), shared phone/email, invalid email,
+  shared address, flagged as duplicate, blocked with an active loan (HIGH).
+- **Device / network:** same **device fingerprint** (HIGH), same **IP** (≥3 clients),
+  identical **GPS** (≥3), **automation/webdriver** (HIGH), **signing** IP shared
+  across DNIs. Thresholds are configurable constants in the module.
+- **Reference ring:** a reference phone equal to a client phone, or reused across
+  several applications.
+- **Third-party account / mule:** disbursement to a third party (`¿Cuenta propia?`=No);
+  one account holder receiving for several borrowers (HIGH).
+- **Consistency:** a loan's or payment's denormalized `Nombre/DNI` differing from the
+  linked client.
+
+These are **indicative leads for manual review, not verdicts** (several have
+legitimate explanations: cohabitants, same neighborhood, low GPS precision).
+
+### DNI verification by OCR (`fetch_dni.py` + `verify_dni.py`)
+
+Downloads the DNI photos from the Drive folder, runs **local OCR (Tesseract)** on
+them, and compares each document against the Clientes sheet, flagging anomalies
+(`DNI mismatch`, `Name mismatch`, `Front and back mismatch`, `DNI not found in
+Clientes`, `Document expired`, etc.). It is the Python port of `VerificacionDNI.gs`
+(same folder, same fields), to keep the results consistent.
+
+Install (one-time — local OCR engine, the images **never** leave the machine):
+
+```sh
+brew install tesseract tesseract-lang        # binary + Spanish data (spa)
+pip install pytesseract pillow google-auth requests
+```
+
+The download uses the **same service account** as `fetch_impulso.py`. Share the DNI
+folder (and its subfolders) **as Viewer** with the `client_email` from
+`service_account.json`; otherwise the listing returns 404. The folder id comes from
+`--folder-id`, the `DNI_FOLDER_ID` env var, a `.dni_folder_id` file, or the default
+(the same id already present in `VerificacionDNI.gs`).
+
+```sh
+python3 bcra/fetch_dni.py        # → out/dni/<person>/…  (resumable, PII git-ignored)
+python3 bcra/verify_dni.py       # OCR + comparison → Markdown report
+python3 bcra/verify_dni.py --fetch --export out/_dni.md     # download and scan in one
+```
+
+OCR reading is **indicative**: it may contain errors and does not replace manual
+verification of the document.
+
 - **Puntaje Impulso** (0–100, misma escala A–E que el BCRA): comportamiento de pago real
   con nosotros por préstamo — *a tiempo / tarde / vencido / en plan / congelado* —
   ponderado por recencia, con piso de calificación según la peor situación vigente.

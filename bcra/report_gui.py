@@ -27,6 +27,7 @@ with fetch_impulso.py, or File ▸ Open workbook…).
 
 import datetime
 import queue
+import re
 import threading
 import traceback
 from pathlib import Path
@@ -37,6 +38,9 @@ from tkinter import ttk, font as tkfont, filedialog, messagebox
 import analyze_bcra
 import analyze_impulso
 import analyze_combined
+import analyze_fraud  # cross-record fraud signals (pure workbook read — no extra deps)
+import verify_dni     # DNI photo OCR vs Clientes (Tesseract; lazy-imported inside)
+import fetch_dni      # download the DNI photos from Drive (service account; lazy-imported)
 import fetch_impulso  # re-download the workbook from the live Google Sheet on reload
 import report  # reuse the polite auto-fetch (_ensure_bcra) + weights
 
@@ -94,6 +98,8 @@ class DataService:
         self.icohort = []
         self.bcohort = []
         self.clients = {}
+        self.dni = []       # DNI OCR verification records (filled on demand by a scan)
+        self.fraud = []     # cross-record fraud signals (filled on every load)
         self.loaded_at = None
 
     # ---- whole portfolio ----
@@ -131,7 +137,36 @@ class DataService:
         self.bcohort = analyze_bcra.build_cohort(str(self.out_dir)) if self.out_dir.exists() else []
         progress("Combining…")
         self.combined = analyze_combined.build_combined(str(self.out_dir), str(self.xlsx), today, self.iw, self.bw)
+        progress("Fraud signals…")
+        try:
+            self.fraud = analyze_fraud.build_fraud(str(self.xlsx), dni_records=self.dni or None, today=today)
+        except Exception:  # noqa: BLE001 — a fraud-scan hiccup must not break the dashboard
+            self.fraud = []
         self.loaded_at = datetime.datetime.now()
+
+    def verify_dni_scan(self, fetch=True, progress=lambda m: None):
+        """Download the DNI photos (optional) then OCR + compare to Clientes.
+        Slow (Tesseract) — run on a worker thread. Also recomputes fraud so the
+        document anomalies fold into the fraud section. Returns the records."""
+        today = datetime.date.today()
+        if not self.clients:
+            tables = analyze_impulso.load_tables(str(self.xlsx))
+            self.clients = analyze_impulso.build_clients(tables, today)
+        photo_dir = self.out_dir / "dni"
+        has_local = bool(verify_dni.group_photos(photo_dir))
+        if has_local:
+            progress("Photos already on disk — skipping download.")
+        elif fetch:
+            progress("Downloading DNI photos…")
+            cred = fetch_impulso.resolve_credentials(None, HERE)
+            folder = fetch_dni.resolve_folder_id(None, HERE)
+            fetch_dni.download_all(photo_dir, cred, folder, progress=progress)
+        self.dni = verify_dni.build_verifications(photo_dir, self.clients, today=today, progress=progress)
+        try:
+            self.fraud = analyze_fraud.build_fraud(str(self.xlsx), dni_records=self.dni or None, today=today)
+        except Exception:  # noqa: BLE001
+            pass
+        return self.dni
 
     # ---- table-ready rows ----
     def combined_rows(self):
@@ -166,6 +201,46 @@ class DataService:
             "category": c["category"], "decision": c["decision"],
             "token": c["cuil"],
         } for i, c in enumerate(rows, 1)]
+
+    def fraud_rows(self):
+        dmap = {"High": "REJECT", "Review": "REVIEW", "OK": "OK"}
+        out = []
+        for r in self.fraud:
+            out.append({
+                "riesgo": r["riesgo"], "name": r["name"] or "—",
+                "dni": r["dni"] or "—", "cuil": r["cuil"] or "—", "n": r["n_signals"],
+                "signals": ", ".join(s["label"] for s in r["signals"]) or "—",
+                "decision": dmap.get(r["riesgo"], "NO RECORD"),
+                "token": r["cuil"] or r["dni"] or r["client_id"],
+            })
+        return out
+
+    def dni_rows(self):
+        dmap = {"OK": "OK", "Review": "REVIEW", "No match": "REJECT", "No photo": "NO RECORD"}
+        out, seen = [], set()
+        for r in self.dni:
+            if r["cliente_id"]:
+                seen.add(r["cliente_id"])
+            key = r["dni_ocr"] or r["dni_folder"]
+            out.append({
+                "name": r["persona"] or "—", "dni_doc": key or "—", "dni_cli": r["cliente_dni"] or "—",
+                "ocr_name": (" ".join([r["apellido"], r["nombre"]]).strip()) or "—",
+                "cli_name": r["cliente_name"] or "—", "via": r["via"], "estado": r["estado"],
+                "anomalias": ", ".join(r["anomalias"]) or "—", "cuil": key or "",
+                "decision": dmap.get(r["estado"], "NO RECORD"),
+                "token": (r["cliente_cuil"] or r["cliente_dni"] or key or r["cliente_id"] or r["persona"]),
+            })
+        # clients with loans but no scanned photo → "No photo"
+        for c in self.clients.values():
+            if c["client_id"] in seen or not c.get("loans"):
+                continue
+            out.append({
+                "name": c["name"] or "—", "dni_doc": "—", "dni_cli": c["dni"] or "—",
+                "ocr_name": "—", "cli_name": c["name"] or "—", "via": "—", "estado": "No photo",
+                "anomalias": "—", "cuil": c["dni"] or "", "decision": "NO RECORD",
+                "token": c["cuil"] or c["dni"] or c["client_id"],
+            })
+        return out
 
     def summary(self):
         rows = self.combined
@@ -488,6 +563,7 @@ class App(tk.Tk):
         self.pages = {}
         for key, label in [("overview", "📊  Overview"), ("combined", "🔀  Combined"),
                            ("bcra", "🏦  BCRA bureau"), ("impulso", "💳  Impulso"),
+                           ("fraud", "🚩  Fraude"), ("dni", "🪪  DNI"),
                            ("person", "🔍  Person")]:
             b = tk.Label(self.side, text="   " + label, bg=SIDEBAR, fg="#e5e7eb",
                          font=self.fonts["nav"], anchor="w", padx=8, pady=10, cursor="hand2")
@@ -513,6 +589,8 @@ class App(tk.Tk):
         self._active = None
         self._build_overview()
         self._build_rankings()
+        self._build_fraud()
+        self._build_dni()
         self._build_person()
         self.show_page("overview")
 
@@ -655,6 +733,46 @@ class App(tk.Tk):
         page._panel = panel
         return page
 
+    def _build_fraud(self):
+        self.pages["fraud"] = self._ranking_page(
+            "Fraud signals",
+            "Per-client leads (indicative — review manually). Identity/device = high risk.",
+            [("riesgo", "Risk", 80, "center", False), ("name", "Client", 210, "w", False),
+             ("dni", "DNI", 100, "center", False), ("cuil", "CUIL", 115, "center", False),
+             ("n", "#", 44, "center", True), ("signals", "Signals", 440, "w", False)],
+            lambda: self.data.fraud_rows(), "fraud")
+
+    def _build_dni(self):
+        page = ttk.Frame(self.content, style="TFrame")
+        self.pages["dni"] = page
+        head = ttk.Frame(page, style="TFrame")
+        head.pack(fill="x")
+        ttk.Label(head, text="DNI verification", style="H1.TLabel").pack(side="left")
+        ttk.Button(head, text="Export .md", command=lambda: self._export_named("dni")).pack(side="right")
+        self.dni_scan_btn = ttk.Button(head, text="⟳  Download photos + scan",
+                                       style="Accent.TButton", command=self.scan_dni)
+        self.dni_scan_btn.pack(side="right", padx=6)
+        ttk.Label(page, text="OCR of the DNI photo vs the Clientes sheet (indicative). "
+                             "Photos are downloaded from Drive with the service account "
+                             "(skipped if already on disk).",
+                  style="Muted.TLabel").pack(anchor="w", pady=(2, 12))
+        # progress bar (shown only while a scan runs)
+        self.dni_prog_frame = ttk.Frame(page, style="TFrame")
+        self.dni_prog = ttk.Progressbar(self.dni_prog_frame, mode="determinate", maximum=100)
+        self.dni_prog.pack(side="left", fill="x", expand=True)
+        self.dni_prog_lbl = ttk.Label(self.dni_prog_frame, text="", style="Muted.TLabel", width=34)
+        self.dni_prog_lbl.pack(side="left", padx=(10, 0))
+        panel = RankingPanel(page, [
+            ("name", "Person", 165, "w", False), ("dni_doc", "DNI (doc)", 92, "center", False),
+            ("dni_cli", "DNI (client)", 105, "center", False), ("ocr_name", "Name (doc)", 150, "w", False),
+            ("cli_name", "Name (client)", 150, "w", False), ("via", "Match", 118, "center", False),
+            ("estado", "Status", 105, "center", False), ("anomalias", "Anomalies", 240, "w", False)],
+            self.open_person, self.fonts)
+        panel.pack(fill="both", expand=True)
+        panel._rows_fn = lambda: self.data.dni_rows()
+        page._panel = panel
+        self.dni_panel = panel
+
     def _build_person(self):
         page = ttk.Frame(self.content, style="TFrame")
         self.pages["person"] = page
@@ -708,6 +826,22 @@ class App(tk.Tk):
                 self.q.put(("error", ("person", exc, traceback.format_exc())))
         threading.Thread(target=work, daemon=True).start()
 
+    def scan_dni(self):
+        self.dni_scan_btn.configure(state="disabled")
+        self.dni_prog.configure(value=0)
+        self.dni_prog_lbl.configure(text="Starting…")
+        self.dni_prog_frame.pack(fill="x", pady=(0, 8), before=self.dni_panel)
+        self.set_status("Scanning DNIs…")
+        fetch = self.fetch_var.get()
+
+        def work():
+            try:
+                self.data.verify_dni_scan(fetch=fetch, progress=lambda m: self.q.put(("dni_progress", m)))
+                self.q.put(("dni_done", None))
+            except Exception as exc:
+                self.q.put(("error", ("dni", exc, traceback.format_exc())))
+        threading.Thread(target=work, daemon=True).start()
+
     def reload(self):
         self.set_status("Loading…")
         # Read Tk variables on the MAIN thread; Tkinter isn't thread-safe.
@@ -735,6 +869,10 @@ class App(tk.Tk):
                     self._on_loaded()
                 elif kind == "person":
                     self._render_person(payload)
+                elif kind == "dni_progress":
+                    self._dni_progress(payload)
+                elif kind == "dni_done":
+                    self._on_dni_done()
                 elif kind == "error":
                     where, exc, tb = payload
                     self._on_error(where, exc, tb)
@@ -743,7 +881,7 @@ class App(tk.Tk):
         self.after(120, self._poll)
 
     def _on_loaded(self):
-        for key in ("combined", "bcra", "impulso"):
+        for key in ("combined", "bcra", "impulso", "fraud", "dni"):
             panel = self.pages[key]._panel
             panel.set_rows(panel._rows_fn())
         self._refresh_overview()
@@ -755,7 +893,40 @@ class App(tk.Tk):
         self.set_status("Ready · %d people · avg combined %.0f · loaded %s"
                         % (s["people"], s["avg"], s["loaded_at"].strftime("%H:%M:%S")))
 
+    _DNI_STEP_RE = re.compile(r"\((\d+)/(\d+)\)\s*(.*)")
+
+    def _dni_progress(self, msg):
+        """Drive the DNI progress bar: '(i/N) …' messages fill it; phase headers
+        (no counter) reset it to 0 and just update the caption."""
+        m = self._DNI_STEP_RE.match(msg)
+        if m:
+            i, n, rest = int(m.group(1)), int(m.group(2)), m.group(3)
+            self.dni_prog.configure(value=(i / max(n, 1)) * 100.0)
+            self.dni_prog_lbl.configure(text=("%d/%d  %s" % (i, n, rest))[:40])
+        else:
+            self.dni_prog.configure(value=0)
+            self.dni_prog_lbl.configure(text=msg[:40])
+        self.set_status(msg)
+
+    def _on_dni_done(self):
+        self.dni_scan_btn.configure(state="normal")
+        self.dni_prog_frame.pack_forget()
+        for key in ("dni", "fraud"):
+            panel = self.pages[key]._panel
+            panel.set_rows(panel._rows_fn())
+        n_rev = sum(1 for r in self.data.dni if r["estado"] != "OK")
+        self.set_status("DNI verification: %d document(s), %d to review." % (len(self.data.dni), n_rev))
+        # if the person view is open, re-render so its DNI/fraud cards refresh
+        if self._active == "person" and self._person_payload:
+            self._render_person(self._person_payload)
+
     def _on_error(self, where, exc, tb):
+        if where == "dni":
+            self.dni_scan_btn.configure(state="normal")
+            self.dni_prog_frame.pack_forget()
+            self.set_status("DNI verification: %s" % str(exc).splitlines()[0])
+            messagebox.showwarning("DNI verification", str(exc))
+            return
         if where == "load" and isinstance(exc, FileNotFoundError):
             self.set_status("Workbook not found — File ▸ Open workbook…")
             self._placeholder(self.person_body, "Workbook not found.")
@@ -808,7 +979,93 @@ class App(tk.Tk):
         self._section_impulso(body, a_imp, payload["imp_rank"])
         # BCRA section
         self._section_bcra(body, a_bcra, payload["bcra_rank"])
+        # Fraud signals + DNI verification
+        self._section_fraud(body, payload)
+        self._section_dni(body, payload)
         self.set_status("Showing %s%s" % (payload["name"], "  ·  CUIL " + payload["cuil"] if payload["cuil"] else ""))
+
+    def _person_keys(self, payload):
+        """Candidate identifiers (cuil/dni/client_id) for matching this person to
+        a fraud/DNI record."""
+        cuils, dnis, cids = set(), set(), set()
+        if payload.get("cuil"):
+            cuils.add(payload["cuil"])
+        a = payload.get("a_imp")
+        if a:
+            if a.get("dni"):
+                dnis.add(a["dni"])
+            if a.get("client_id"):
+                cids.add(a["client_id"])
+        return cuils, dnis, cids
+
+    def _find_fraud(self, payload):
+        cuils, dnis, cids = self._person_keys(payload)
+        for r in self.data.fraud:
+            if (r["client_id"] in cids) or (r["cuil"] and r["cuil"] in cuils) or (r["dni"] and r["dni"] in dnis):
+                return r
+        return None
+
+    def _find_dni(self, payload):
+        cuils, dnis, cids = self._person_keys(payload)
+        for r in self.data.dni:
+            keys_dni = {r["dni_ocr"], r["dni_folder"], r["cliente_dni"]}
+            if (r["cliente_id"] in cids) or (r["cliente_cuil"] and r["cliente_cuil"] in cuils) or (dnis & keys_dni):
+                return r
+        return None
+
+    def _section_fraud(self, body, payload):
+        f = self.fonts
+        c = self._card_frame(body, "🚩  Fraud signals")
+        rec = self._find_fraud(payload)
+        if not rec or rec["riesgo"] == "OK" or not rec["signals"]:
+            tk.Label(c, text="No fraud signals detected.", bg=SURFACE, fg=MUTED,
+                     font=f["base"]).pack(anchor="w", padx=16, pady=(0, 14))
+            return
+        rmap = {"High": "REJECT", "Review": "REVIEW"}
+        cap = tk.Frame(c, bg=SURFACE)
+        cap.pack(fill="x")
+        tk.Label(cap, text="Risk", bg=SURFACE, fg=MUTED, font=f["small"]).pack(side="left", padx=(16, 8), pady=4)
+        badge = tk.Canvas(cap, bg=SURFACE, highlightthickness=0, height=26, width=110)
+        badge.pack(side="left", pady=4)
+        draw_badge(badge, 0, 2, rec["riesgo"], DECISION_COLOR.get(rmap.get(rec["riesgo"], ""), MUTED), f)
+        for s in rec["signals"]:
+            txt = "•  %s%s" % (s["label"], ("  —  " + s["detail"]) if s["detail"] else "")
+            tk.Label(c, text=txt, bg=SURFACE, fg=INK, font=f["base"], anchor="w").pack(anchor="w", padx=16)
+        tk.Label(c, text="Indicative — review manually.", bg=SURFACE, fg=MUTED,
+                 font=f["hint"]).pack(anchor="w", padx=16, pady=(4, 14))
+
+    def _section_dni(self, body, payload):
+        f = self.fonts
+        c = self._card_frame(body, "🪪  DNI verification")
+        rec = self._find_dni(payload)
+        if not rec:
+            tk.Label(c, text="Not scanned — use the 🪪 DNI section (Download photos + scan).",
+                     bg=SURFACE, fg=MUTED, font=f["base"]).pack(anchor="w", padx=16, pady=(0, 14))
+            return
+        tk.Label(c, text="Status: %s   ·   %s" % (rec["estado"], rec["via"]), bg=SURFACE, fg=INK,
+                 font=f["base"], anchor="w").pack(anchor="w", padx=16)
+        ocr_name = (" ".join([rec["apellido"], rec["nombre"]]).strip()) or "—"
+        grid = tk.Frame(c, bg=SURFACE)
+        grid.pack(fill="x", padx=16, pady=(6, 2))
+        rows = [("Field", "Document (OCR)", "Client"),
+                ("DNI", rec["dni_ocr"] or rec["dni_folder"] or "—", rec["cliente_dni"] or "—"),
+                ("Name", ocr_name, rec["cliente_name"] or "—"),
+                ("CUIL", rec["cuil"] or "—", rec["cliente_cuil"] or "—")]
+        for ri, (a, b, cc) in enumerate(rows):
+            fnt = f["bold"] if ri == 0 else f["base"]
+            tk.Label(grid, text=a, bg=SURFACE, fg=MUTED if ri == 0 else INK, font=fnt, width=10, anchor="w").grid(row=ri, column=0, sticky="w")
+            tk.Label(grid, text=b, bg=SURFACE, fg=INK, font=fnt, width=28, anchor="w").grid(row=ri, column=1, sticky="w")
+            tk.Label(grid, text=cc, bg=SURFACE, fg=INK, font=fnt, width=28, anchor="w").grid(row=ri, column=2, sticky="w")
+        if rec["anomalias"]:
+            tk.Label(c, text="Anomalies: " + ", ".join(rec["anomalias"]), bg=SURFACE, fg=DECISION_COLOR["REVIEW"],
+                     font=f["base"], anchor="w", wraplength=760, justify="left").pack(anchor="w", padx=16, pady=(4, 0))
+        paths = "  ·  ".join(p for p in [("front: " + rec["frente"]) if rec["frente"] else "",
+                                         ("back: " + rec["dorso"]) if rec["dorso"] else ""] if p)
+        if paths:
+            tk.Label(c, text=paths, bg=SURFACE, fg=MUTED, font=f["hint"], anchor="w",
+                     wraplength=760, justify="left").pack(anchor="w", padx=16, pady=(2, 0))
+        tk.Label(c, text="OCR reading is indicative and may contain errors.", bg=SURFACE, fg=MUTED,
+                 font=f["hint"]).pack(anchor="w", padx=16, pady=(2, 14))
 
     def _draw_person_gauges(self, cv, rec, a_bcra, a_imp):
         cv.delete("all")
@@ -934,7 +1191,7 @@ class App(tk.Tk):
             self.reload()
 
     def _export_ranking(self):
-        self._export_named(self._active if self._active in ("combined", "bcra", "impulso") else "combined")
+        self._export_named(self._active if self._active in ("combined", "bcra", "impulso", "fraud", "dni") else "combined")
 
     def _export_named(self, key):
         if not self.data.loaded_at:
@@ -945,6 +1202,12 @@ class App(tk.Tk):
         elif key == "bcra":
             text = analyze_bcra.render_leaderboard_md(self.data.bcohort)
             default = "_ranking.md"
+        elif key == "fraud":
+            text = analyze_fraud.render_md(self.data.fraud)
+            default = "_fraude.md"
+        elif key == "dni":
+            text = verify_dni.render_md(self.data.dni)
+            default = "_dni.md"
         else:
             text = analyze_impulso.render_leaderboard_md(self.data.icohort)
             default = "_impulso_ranking.md"
