@@ -72,6 +72,15 @@ LOAN_COLOR = {
 # BCRA situación level (0 none … 5/6 loss) → colour
 SIT_COLOR = {0: "#d1fae5", 1: "#16a34a", 2: "#a3e635", 3: "#f59e0b", 4: "#f97316", 5: "#dc2626", 6: "#7f1d1d"}
 
+# "Loans by month" view: month labels + loan-status filter groups
+MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+LOAN_STATUS_GROUP = {
+    "current": "Current", "overdue": "Overdue",
+    "repaid_ontime": "Repaid", "repaid_late": "Repaid", "repaid_untimed": "Repaid",
+    "in_plan": "In a plan", "frozen": "Frozen",
+}
+LOAN_STATUS_FILTERS = ["All", "Current", "Overdue", "Repaid", "In a plan", "Frozen"]
+
 
 def rating_letter(rating):
     return rating[0] if rating and rating[0] in "ABCDE" else "—"
@@ -201,6 +210,27 @@ class DataService:
             "category": c["category"], "decision": c["decision"],
             "token": c["cuil"],
         } for i, c in enumerate(rows, 1)]
+
+    def loan_due_rows(self):
+        """Flat list of loans for the 'Loans by month' view (one row per loan,
+        bucketed by the loan's own due date)."""
+        out = []
+        for cid, cl in self.clients.items():
+            for loan in cl["loans"]:
+                due = loan.get("venc_stored") or loan.get("venc")  # the loan's due date
+                out.append({
+                    "due": due,
+                    "year": due.year if due else None,
+                    "month": due.month if due else None,
+                    "loan_id": loan["loan_id"],
+                    "name": cl["name"] or "—",
+                    "token": cl.get("cuil") or cl.get("dni") or cid,   # for open-person
+                    "total": loan["total"],    # Total a Pagar   → "to collect"
+                    "paid": loan["paid"],      # Total Pagado    → "collected"
+                    "saldo": loan["saldo"],    # Saldo Pendiente → "outstanding"
+                    "status": loan["status"],  # computed loan status
+                })
+        return out
 
     def fraud_rows(self):
         dmap = {"High": "REJECT", "Review": "REVIEW", "OK": "OK"}
@@ -380,6 +410,48 @@ class ScrollFrame(ttk.Frame):
             self.canvas.yview_scroll(1, "units")
         else:
             self.canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
+
+
+class Accordion(tk.Frame):
+    """A collapsible section: a clickable header row that shows/hides its body.
+    Put content into `.body`. Collapsed by default; click the header to toggle."""
+
+    def __init__(self, parent, title, subtitle="", fonts=None, open=False,
+                 bg=SURFACE, header_bg="#f3f4f6", indent=16):
+        super().__init__(parent, bg=bg)
+        self._open = bool(open)
+        hdr = tk.Frame(self, bg=header_bg, cursor="hand2")
+        hdr.pack(fill="x")
+        self._arrow = tk.Label(hdr, text=("▾" if self._open else "▸"), bg=header_bg,
+                               fg=MUTED, font=(fonts["bold"] if fonts else None))
+        self._arrow.pack(side="left", padx=(indent, 6), pady=5)
+        tl = tk.Label(hdr, text=title, bg=header_bg, fg=INK,
+                      font=(fonts["bold"] if fonts else None), anchor="w")
+        tl.pack(side="left", pady=5)
+        self._sub = None
+        if subtitle:
+            self._sub = tk.Label(hdr, text=subtitle, bg=header_bg, fg=MUTED,
+                                 font=(fonts["small"] if fonts else None), anchor="e")
+            self._sub.pack(side="right", padx=(6, indent), pady=5)
+        self.body = tk.Frame(self, bg=bg)
+        if self._open:
+            self.body.pack(fill="x")
+        clickers = [hdr, self._arrow, tl] + ([self._sub] if self._sub else [])
+        for w in clickers:
+            w.bind("<Button-1>", self._toggle)
+
+    def set_subtitle(self, text):
+        if self._sub:
+            self._sub.config(text=text)
+
+    def _toggle(self, _e=None):
+        self._open = not self._open
+        if self._open:
+            self.body.pack(fill="x")
+            self._arrow.config(text="▾")
+        else:
+            self.body.pack_forget()
+            self._arrow.config(text="▸")
 
 
 class RankingPanel(ttk.Frame):
@@ -563,6 +635,7 @@ class App(tk.Tk):
         self.pages = {}
         for key, label in [("overview", "📊  Overview"), ("combined", "🔀  Combined"),
                            ("bcra", "🏦  BCRA bureau"), ("impulso", "💳  Impulso"),
+                           ("loans_due", "📅  Loans by month"),
                            ("fraud", "🚩  Fraude"), ("dni", "🪪  DNI"),
                            ("person", "🔍  Person")]:
             b = tk.Label(self.side, text="   " + label, bg=SIDEBAR, fg="#e5e7eb",
@@ -592,6 +665,7 @@ class App(tk.Tk):
         self._build_fraud()
         self._build_dni()
         self._build_person()
+        self._build_loans_due()
         self.show_page("overview")
 
     def _place(self, frame):
@@ -694,6 +768,122 @@ class App(tk.Tk):
         mini("Best payers", rows[:6])
         ttk.Frame(self.lists_inner, style="Card.TFrame", height=10).pack()
         mini("Needs attention", rows[-6:][::-1])
+
+    # ---- loans by month ----
+    def _build_loans_due(self):
+        page = ttk.Frame(self.content, style="TFrame")
+        self.pages["loans_due"] = page
+        ttk.Label(page, text="Loans by month", style="H1.TLabel").pack(anchor="w")
+        ttk.Label(page, text="Loans bucketed by their due date (Vencimiento). "
+                             "The cards total the whole month; the status filter narrows the table.",
+                  style="Muted.TLabel").pack(anchor="w", pady=(2, 12))
+
+        # filter bar
+        bar = ttk.Frame(page, style="TFrame")
+        bar.pack(fill="x", pady=(0, 12))
+        ttk.Label(bar, text="Month:", style="Muted.TLabel").pack(side="left", padx=(0, 4))
+        self.ldue_month = ttk.Combobox(bar, width=6, state="readonly", values=MONTHS)
+        self.ldue_month.pack(side="left", padx=(0, 12))
+        ttk.Label(bar, text="Year:", style="Muted.TLabel").pack(side="left", padx=(0, 4))
+        self.ldue_year = ttk.Combobox(bar, width=8, state="readonly", values=[])
+        self.ldue_year.pack(side="left", padx=(0, 12))
+        ttk.Label(bar, text="Status:", style="Muted.TLabel").pack(side="left", padx=(0, 4))
+        self.ldue_status = ttk.Combobox(bar, width=12, state="readonly", values=LOAN_STATUS_FILTERS)
+        self.ldue_status.pack(side="left")
+        for cb in (self.ldue_month, self.ldue_year, self.ldue_status):
+            cb.bind("<<ComboboxSelected>>", lambda e: self._refill_loans_due())
+        self.ldue_hide_overdue = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="Exclude overdue", variable=self.ldue_hide_overdue,
+                        command=self._refill_loans_due).pack(side="left", padx=(16, 0))
+
+        # summary cards (filled in _refill)
+        self.ldue_cards = ttk.Frame(page, style="TFrame")
+        self.ldue_cards.pack(fill="x")
+
+        # table
+        table_card = ttk.Frame(page, style="Card.TFrame")
+        table_card.pack(fill="both", expand=True, pady=(14, 0))
+        cols = [("due", "Due", 110, "center"), ("loan", "Loan", 90, "w"),
+                ("name", "Borrower", 230, "w"), ("total", "To collect", 120, "e"),
+                ("paid", "Collected", 120, "e"), ("saldo", "Balance", 120, "e"),
+                ("status", "Status", 140, "w")]
+        tv = ttk.Treeview(table_card, columns=[c[0] for c in cols], show="headings")
+        for k, h, w_, anc in cols:
+            tv.heading(k, text=h)
+            tv.column(k, width=w_, anchor=anc)
+        vs = ttk.Scrollbar(table_card, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=vs.set)
+        vs.pack(side="right", fill="y")
+        tv.pack(fill="both", expand=True, padx=(12, 0), pady=12)
+        tv.bind("<Double-1>", self._open_loan_person)
+        self.ldue_tv = tv
+        self._ldue_tokens = {}  # tree item id → person token
+
+    def _refresh_loans_due(self):
+        """Populate the year choices and default to the current month on data load."""
+        rows = self.data.loan_due_rows()
+        years = sorted({r["year"] for r in rows if r["year"]})
+        self.ldue_year["values"] = [str(y) for y in years]
+        today = datetime.date.today()
+        if str(today.year) in self.ldue_year["values"]:
+            self.ldue_year.set(str(today.year))
+        elif years:
+            self.ldue_year.set(str(years[-1]))
+        yr = int(self.ldue_year.get()) if self.ldue_year.get() else today.year
+        months_in_year = sorted({r["month"] for r in rows if r["year"] == yr and r["month"]})
+        if yr == today.year and today.month in months_in_year:
+            self.ldue_month.set(MONTHS[today.month - 1])
+        elif months_in_year:
+            self.ldue_month.set(MONTHS[months_in_year[-1] - 1])
+        else:
+            self.ldue_month.set(MONTHS[today.month - 1])
+        if not self.ldue_status.get():
+            self.ldue_status.set("All")
+        self._refill_loans_due()
+
+    def _refill_loans_due(self):
+        """Apply the month/year/status filters: refresh the cards (whole month) and
+        the table (status-filtered)."""
+        if not self.ldue_month.get() or not self.ldue_year.get():
+            return
+        month = MONTHS.index(self.ldue_month.get()) + 1
+        year = int(self.ldue_year.get())
+        status_sel = self.ldue_status.get() or "All"
+        rows = [r for r in self.data.loan_due_rows() if r["year"] == year and r["month"] == month]
+        if self.ldue_hide_overdue.get():
+            rows = [r for r in rows if LOAN_STATUS_GROUP.get(r["status"], r["status"]) != "Overdue"]
+
+        # cards: the selected month (optionally excluding overdue)
+        to_collect = sum(r["total"] for r in rows)
+        collected = sum(r["paid"] for r in rows)
+        outstanding = sum(r["saldo"] for r in rows)
+        for w in self.ldue_cards.winfo_children():
+            w.destroy()
+        label = "%s %d" % (self.ldue_month.get(), year)
+        self._card(self.ldue_cards, "To collect — " + label, money(to_collect))
+        self._card(self.ldue_cards, "Collected", money(collected), "#15803d")
+        self._card(self.ldue_cards, "Outstanding", money(outstanding), ACCENT)
+        self._card(self.ldue_cards, "# due", str(len(rows)))
+
+        # table: narrowed by the status filter
+        tv = self.ldue_tv
+        tv.delete(*tv.get_children())
+        self._ldue_tokens = {}
+        shown = [r for r in rows if status_sel == "All"
+                 or LOAN_STATUS_GROUP.get(r["status"], r["status"]) == status_sel]
+        shown.sort(key=lambda r: (r["due"] or datetime.date(1900, 1, 1), r["loan_id"]))
+        for r in shown:
+            item = tv.insert("", "end", values=(
+                r["due"].isoformat() if r["due"] else "—",
+                r["loan_id"], (r["name"] or "—")[:36],
+                money(r["total"]), money(r["paid"]), money(r["saldo"]),
+                analyze_impulso._STATUS_LABEL.get(r["status"], r["status"])))
+            self._ldue_tokens[item] = r["token"]
+
+    def _open_loan_person(self, event):
+        item = self.ldue_tv.identify_row(event.y)
+        if item and item in self._ldue_tokens:
+            self.open_person(self._ldue_tokens[item])
 
     def _build_rankings(self):
         self.pages["combined"] = self._ranking_page(
@@ -885,6 +1075,7 @@ class App(tk.Tk):
             panel = self.pages[key]._panel
             panel.set_rows(panel._rows_fn())
         self._refresh_overview()
+        self._refresh_loans_due()
         # person search choices
         choices = self.data.people_choices()
         self._cb_map = {label: token for label, token in choices}
@@ -1120,7 +1311,21 @@ class App(tk.Tk):
                 l["loan_id"], l["fecha"].isoformat() if l["fecha"] else "—", money(l["capital"]),
                 "%dd" % int(l["term"]), analyze_impulso._STATUS_LABEL.get(l["status"], l["status"]),
                 ("%dd" % l["days_late"]) if l["days_late"] else "—"))
-        tv.pack(fill="x", padx=16, pady=(4, 14))
+        tv.pack(fill="x", padx=16, pady=(4, 10))
+
+        # Payments — month-by-month breakdown per loan (collapsible accordion)
+        total_pays = sum(len(l.get("payments") or []) for l in a_imp["loans"])
+        acc = Accordion(c, "📆  Payments — monthly breakdown",
+                        subtitle="Lender: Impulso Crédito · %d payment(s) on %d loan(s)" % (
+                            total_pays, len(a_imp["loans"])),
+                        fonts=f, open=False)
+        acc.pack(fill="x", padx=16, pady=(0, 14))
+        if total_pays == 0:
+            tk.Label(acc.body, text="No payments recorded yet.", bg=SURFACE, fg=MUTED,
+                     font=f["small"], anchor="w").pack(anchor="w", padx=44, pady=(2, 8))
+        else:
+            for l in a_imp["loans"]:
+                self._loan_payments_accordion(acc.body, l)
 
     def _draw_loan_strip(self, cv, loans):
         cv.delete("all")
@@ -1137,6 +1342,58 @@ class App(tk.Tk):
             cv.create_text(x + bw / 2, 46, text=l["loan_id"].replace("L-", ""), font=self.fonts["small"], fill=MUTED)
             x += bw + pad
 
+    @staticmethod
+    def _month_label(d):
+        """datetime.date → 'Sep 2026' (English month, matching the rest of the UI)."""
+        if not d:
+            return "— (no date)"
+        return d.strftime("%b %Y")
+
+    def _loan_payments_accordion(self, parent, loan):
+        """One collapsible row per loan → its payments grouped by month (date + amount)."""
+        f = self.fonts
+        pays = [p for p in (loan.get("payments") or []) if p.get("amount")]
+        repaid = sum(p["amount"] for p in pays)
+        status = analyze_impulso._STATUS_LABEL.get(loan["status"], loan["status"])
+        title = "%s  ·  %s" % (loan["loan_id"], money(loan.get("capital", 0)))
+        sub = "%s · repaid %s · outstanding %s" % (status, money(repaid), money(loan.get("saldo", 0)))
+        acc = Accordion(parent, title, subtitle=sub, fonts=f, open=False,
+                        header_bg="#fafbfc", indent=30)
+        acc.pack(fill="x", padx=(16, 0))
+        b = acc.body
+        if not pays:
+            tk.Label(b, text="No payments on this loan yet.", bg=SURFACE, fg=MUTED,
+                     font=f["small"], anchor="w").pack(anchor="w", padx=46, pady=(2, 6))
+            return
+        # group payments by calendar month, preserving chronological order
+        months = []
+        bucket = {}
+        for p in pays:
+            key = (p["date"].year, p["date"].month) if p["date"] else (0, 0)
+            if key not in bucket:
+                bucket[key] = []
+                months.append(key)
+            bucket[key].append(p)
+        for key in months:
+            items = bucket[key]
+            sub_tot = sum(p["amount"] for p in items)
+            label = self._month_label(items[0]["date"])
+            row = tk.Frame(b, bg=SURFACE)
+            row.pack(fill="x", padx=46, pady=(4, 0))
+            tk.Label(row, text=label, bg=SURFACE, fg=INK, font=f["bold"], anchor="w",
+                     width=16).pack(side="left")
+            tk.Label(row, text="%s   (%d)" % (money(sub_tot), len(items)), bg=SURFACE, fg=INK,
+                     font=f["bold"], anchor="w").pack(side="left")
+            for p in items:
+                ds = p["date"].isoformat() if p["date"] else "—"
+                pr = tk.Frame(b, bg=SURFACE)
+                pr.pack(fill="x", padx=46)
+                tk.Label(pr, text=ds, bg=SURFACE, fg=MUTED, font=f["small"], anchor="w",
+                         width=16).pack(side="left", padx=(16, 0))
+                tk.Label(pr, text=money(p["amount"]), bg=SURFACE, fg=MUTED, font=f["small"],
+                         anchor="w").pack(side="left")
+        tk.Frame(b, bg=SURFACE, height=6).pack()
+
     def _section_bcra(self, body, a_bcra, rank):
         c = self._card_frame(body, "🏦  BCRA — external bureau")
         f = self.fonts
@@ -1150,6 +1407,13 @@ class App(tk.Tk):
             return
         prof = "%s  —  %s" % (a_bcra["category"], a_bcra["category_why"])
         tk.Label(c, text=prof, bg=SURFACE, fg=INK, font=f["base"], anchor="w", wraplength=760, justify="left").pack(anchor="w", padx=16)
+        # Payment reliability — the real "pays well?" verdict (situación-based, not the balance table).
+        rel = self._reliability(a_bcra)
+        relrow = tk.Frame(c, bg=SURFACE)
+        relrow.pack(anchor="w", fill="x", padx=16, pady=(6, 0))
+        tk.Label(relrow, text="Payment reliability", bg=SURFACE, fg=MUTED, font=f["small"]).pack(side="left", padx=(0, 8))
+        tk.Label(relrow, text="  %s  " % rel["verdict"], bg=rel["color"], fg="#ffffff", font=f["bold"]).pack(side="left")
+        tk.Label(c, text=rel["detail"], bg=SURFACE, fg=INK, font=f["small"], anchor="w").pack(anchor="w", padx=16, pady=(2, 2))
         meta = "Current sit %d · worst24m %d · performing %.0f%% · creditors %d · total debt %s · checks %d" % (
             a_bcra["current_worst"], a_bcra["worst_24m"], a_bcra["pct_performante"],
             a_bcra["entidades"], money(a_bcra["total_debt"]), a_bcra["cheques"])
@@ -1160,9 +1424,31 @@ class App(tk.Tk):
         tk.Label(c, text="24-month situación timeline (old → new):", bg=SURFACE, fg=MUTED,
                  font=f["small"]).pack(anchor="w", padx=16, pady=(8, 2))
         tl = tk.Canvas(c, bg=SURFACE, highlightthickness=0, height=44)
-        tl.pack(fill="x", padx=16, pady=(0, 14))
+        tl.pack(fill="x", padx=16, pady=(0, 10))
         tl.bind("<Configure>", lambda e, cv=tl, s=a_bcra["worst_series"]: self._draw_sit_timeline(cv, s))
         self.after(30, lambda cv=tl, s=a_bcra["worst_series"]: self._draw_sit_timeline(cv, s))
+
+        # Lending institutions (creditors) — one collapsible table (BCRA reports per entidad)
+        creditors = a_bcra.get("creditors") or []
+        if creditors:
+            acc = Accordion(c, "🏦  Lending institutions (creditors)",
+                            subtitle="%d institution(s) · total debt %s" % (len(creditors), money(a_bcra["total_debt"])),
+                            fonts=f, open=False)
+            acc.pack(fill="x", padx=16, pady=(0, 6))
+            self._creditors_body(acc.body, creditors)
+
+        # Debt movement by month — BCRA reports balances, so a drop = an inferred payment
+        neto = [x for x in (a_bcra.get("neto") or []) if x.get("has_prev")]
+        if neto:
+            acc2 = Accordion(c, "💸  Debt movement by month (inferred payments)",
+                             subtitle="Reliability: %s (%s al día) · repaid %s · %d paydown(s)" % (
+                                 rel["verdict"], rel["pct_txt"],
+                                 money(a_bcra.get("total_repaid", 0)), a_bcra.get("payments_count", 0)),
+                             fonts=f, open=False)
+            acc2.pack(fill="x", padx=16, pady=(0, 14))
+            self._bcra_movement_body(acc2.body, neto, rel)
+        else:
+            tk.Frame(c, bg=SURFACE, height=8).pack()
 
     def _draw_sit_timeline(self, cv, series):
         cv.delete("all")
@@ -1177,6 +1463,90 @@ class App(tk.Tk):
             cv.create_rectangle(x, 6, x + cw, 30, fill=SIT_COLOR.get(lvl, MUTED), outline="")
             cv.create_text(x + cw / 2, 38, text=str(lvl), font=self.fonts["small"], fill=MUTED)
             x += cw + pad
+
+    @staticmethod
+    def _fmt_periodo(p):
+        """'202609' → '2026-09'."""
+        p = str(p or "").strip()
+        return ("%s-%s" % (p[:4], p[4:6])) if len(p) >= 6 and p.isdigit() else (p or "—")
+
+    @staticmethod
+    def _reliability(a_bcra):
+        """Plain-language 'pays well?' verdict for the BCRA record. Derived ONLY from the
+        situación history already computed in analyze_bcra (category / pct_months / recency /
+        rating) — NOT from the balance-movement table, which shows amortization volume, not
+        reliability. Returns {verdict, grade, color, detail, pct_txt}."""
+        if not a_bcra or not a_bcra.get("has_record"):
+            return {"verdict": "Sin historial BCRA", "grade": "—", "color": RATING_COLOR.get("—", MUTED),
+                    "detail": "No hay deuda informada en el BCRA.", "pct_txt": "—"}
+        verdict_map = {
+            "Consistent — always current": "Pays well",
+            "Consistent — performing": "Pays well",
+            "Recovering": "Recovering",
+            "On and off (volatile)": "Volatile",
+            "Deteriorating": "Deteriorating",
+            "Chronically delinquent": "Poor payer",
+        }
+        cat = a_bcra.get("category", "") or ""
+        verdict = verdict_map.get(cat, cat or "—")
+        grade = rating_letter(a_bcra.get("rating", "—"))
+        color = RATING_COLOR.get(grade, MUTED)
+        mp, mo, pct = a_bcra.get("months_perf", 0), a_bcra.get("months", 0), a_bcra.get("pct_months")
+        pct_txt = ("%d%%" % pct) if pct is not None else "—"
+        rec = a_bcra.get("recency")
+        if rec is None:
+            rec_txt = "nunca en mora"
+        elif rec == 0:
+            rec_txt = "en mora el último mes"
+        else:
+            rec_txt = "última mora hace %d mes%s" % (rec, "" if rec == 1 else "es")
+        detail = "al día %d/%d meses (%s) · %s · grado %s" % (mp, mo, pct_txt, rec_txt, grade)
+        return {"verdict": verdict, "grade": grade, "color": color, "detail": detail, "pct_txt": pct_txt}
+
+    def _creditors_body(self, parent, creditors):
+        f = self.fonts
+        cols = [("ent", "Institution", 250, "w"), ("sit", "Sit", 48, "center"),
+                ("now", "Debt now", 120, "e"), ("m6", "6m ago", 110, "e"),
+                ("m12", "12m ago", 110, "e"), ("net", "Net change", 120, "e")]
+        tv = ttk.Treeview(parent, columns=[x[0] for x in cols], show="headings",
+                          height=min(max(len(creditors), 1), 8))
+        for k, h, w_, anc in cols:
+            tv.heading(k, text=h)
+            tv.column(k, width=w_, anchor=anc)
+        for r in creditors:
+            net = r.get("neto", 0.0)
+            tv.insert("", "end", values=(
+                r.get("entidad") or "—", r.get("situacion", 0), money(r.get("actual", 0)),
+                money(r.get("hace6m", 0)), money(r.get("hace12m", 0)),
+                ("%s%s" % ("+" if net >= 0 else "−", money(abs(net))))))
+        tv.pack(fill="x", padx=44, pady=(2, 4))
+        tk.Label(parent, text="Situación 1–2 = performing · 3+ = delinquent.  Net change = current − first reported "
+                 "(negative = paid down).", bg=SURFACE, fg=MUTED, font=f["hint"], anchor="w",
+                 wraplength=700, justify="left").pack(anchor="w", padx=44, pady=(0, 8))
+
+    def _bcra_movement_body(self, parent, neto, rel=None):
+        f = self.fonts
+        if rel:
+            tk.Label(parent, text="Pays well?  →  %s  (%s al día).  Judge reliability by situación above, not by this table."
+                     % (rel["verdict"], rel["pct_txt"]), bg=SURFACE, fg=INK, font=f["small"], anchor="w",
+                     wraplength=700, justify="left").pack(anchor="w", padx=44, pady=(4, 2))
+        cols = [("per", "Period", 110, "w"), ("tot", "Reported debt", 150, "e"),
+                ("chg", "Change", 140, "e"), ("note", "", 120, "w")]
+        tv = ttk.Treeview(parent, columns=[x[0] for x in cols], show="headings",
+                          height=min(max(len(neto), 1), 12))
+        for k, h, w_, anc in cols:
+            tv.heading(k, text=h)
+            tv.column(k, width=w_, anchor=anc)
+        for x in neto:
+            chg = x.get("delta", 0.0)
+            note = "paydown" if chg < 0 else ("new debt" if chg > 0 else "no change")
+            tv.insert("", "end", values=(self._fmt_periodo(x.get("periodo")), money(x.get("total", 0)),
+                      ("%s%s" % ("+" if chg >= 0 else "−", money(abs(chg)))), note))
+        tv.pack(fill="x", padx=44, pady=(2, 4))
+        tk.Label(parent, text="BCRA reports monthly balances, not payments — paydowns / new-debt show amortization "
+                 "volume, not reliability. Judge whether they pay well by situación (above), not by this table.",
+                 bg=SURFACE, fg=MUTED, font=f["hint"], anchor="w",
+                 wraplength=700, justify="left").pack(anchor="w", padx=44, pady=(0, 8))
 
     # ---- status / exports ----
     def set_status(self, text):

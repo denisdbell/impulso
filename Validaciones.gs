@@ -421,19 +421,18 @@ function termInfoForDays_(days) {
   return { days: 90, rate: 1.0, cuotas: 3, cadence: 'monthly' };
 }
 /**
- * Plazos PERMITIDOS según el monto:
+ * Plazos PERMITIDOS según el monto (el monto fija el MÁXIMO del préstamo; NO fuerza un plan):
  *   ≤ tramo1 → [15, 30]  (el cliente elige 15 o 30 días)
- *   tramo1 < monto < tramo2 → [30]  (forzado, 1 pago)  — franja $150.000 a $299.999
- *   ≥ tramo2 (hasta el tope) → [90]  (forzado, cuotas mensuales manejables) — desde $300.000
- * El corte del tramo grande es ESTRICTO (< tramo2): un préstamo de exactamente $300.000 va al
- * tramo de cuotas, no a un único pago grande (reduce la mora/default; ver datos del análisis).
+ *   tramo1 < monto ≤ tramo2 → [30]  (1 pago)  — $150.001 a $300.000 (incluye EXACTAMENTE $300.000)
+ *   monto > tramo2 → [90]  (3 cuotas mensuales) — más de $300.000
+ * Los planes de pago en cuotas se agregan SOLO de forma explícita (no por el monto del préstamo).
  */
 function allowedTermsForAmount_(amount) {
   const a = Number(amount) || 0;
   if (a <= 0) return [];
   if (a <= tier1Max_()) return [15, 30];
-  if (a < tier2Max_()) return [30];
-  return [90];
+  if (a <= tier2Max_()) return [30];   // hasta $300.000 inclusive → 30 días (1 pago)
+  return [90];                          // más de $300.000 → 90 días (3 cuotas)
 }
 /** Cantidad de cuotas del TRAMO GRANDE para que cada cuota sea MANEJABLE (≈ ≤ la "Cuota manejable
  *  objetivo", la franja de 0% de default): clamp(ceil(Total / objetivo), 3, 6). total = Total a Pagar. */
@@ -1680,8 +1679,8 @@ function intakeSmartHtml_() {
             <div style="margin-bottom:5px">El plazo se calcula según el monto:</div>
             <ul id="tierList" style="margin:0;padding-left:18px">
               <li id="tierLi1">Hasta <b>${fmtMoney_(tier1Max_())}</b>: elegís <b class="thl">15 días (25%)</b> o <b class="thl">30 días (50%)</b> — <b>1 pago</b>.</li>
-              <li id="tierLi2">De <b>${fmtMoney_(tier1Max_())}</b> a <b>${fmtMoney_(tier2Max_() - 1)}</b>: <b class="thl">30 días (50%)</b> — <b>1 pago</b>.</li>
-              <li id="tierLi3">De <b>${fmtMoney_(tier2Max_())}</b> a <b>${fmtMoney_(loanMax_())}</b>: <b class="thl">90 días (100%)</b> — <b>de 3 a 6 cuotas mensuales</b> según el monto (cada cuota ≈ ≤ <b>${fmtMoney_(settingMoney_('Cuota manejable objetivo (tramo grande)', 150000))}</b>).</li>
+              <li id="tierLi2">De <b>${fmtMoney_(tier1Max_())}</b> a <b>${fmtMoney_(tier2Max_())}</b>: <b class="thl">30 días (50%)</b> — <b>1 pago</b>.</li>
+              <li id="tierLi3">Más de <b>${fmtMoney_(tier2Max_())}</b> a <b>${fmtMoney_(loanMax_())}</b>: <b class="thl">90 días (100%)</b> — <b>3 cuotas mensuales</b>.</li>
             </ul>
             <div id="maxBanner" style="margin-top:7px;padding:7px 11px;background:#fff4e5;border:1px solid #f0b357;border-radius:8px;color:#7a4a00">⚠️ <b>Monto máximo por préstamo: ${fmtMoney_(loanMax_())}</b></div>
             <div id="levelInfo" style="display:none;margin-top:7px"></div>
@@ -2161,14 +2160,14 @@ function intakeSmartHtml_() {
       // Info fija por plazo (réplica de termInfoForDays_ del servidor).
       // Cuotas manejables del tramo grande (réplica de bigTierCuotas_): clamp(ceil(total/objetivo),3,6).
       function bigCuotas(total){ var n=Math.ceil((total||0)/CUOTA_TARGET); return Math.min(6,Math.max(3,n||3)); }
-      // Info por plazo (réplica de termInfoForDays_/termInfoForAmount_). El tramo grande (90 d) calcula
-      // las cuotas según el monto para que cada una sea manejable; necesita el monto 'a'.
+      // Info por plazo (réplica de termInfoForDays_). El cronograma sigue el PLAZO, no el monto:
+      // 15/30 días = 1 pago; 90 días = 3 cuotas mensuales. Los planes se agregan sólo explícitamente.
       function infoForDays(d,a){ d=parseInt(d,10);
         if(d===15) return {days:15,rate:0.25,cuotas:1,cadence:'once'};
         if(d===30) return {days:30,rate:0.5,cuotas:1,cadence:'once'};
-        return {days:90,rate:1,cuotas:bigCuotas((a||0)*2),cadence:'monthly'}; }
-      // Plazos permitidos por monto: ≤T1MAX → [15,30] (elige); <T2MAX → [30]; ≥T2MAX → [90] (cuotas).
-      function allowedDays(a){ if(!(a>0)) return []; if(a>MAXAMT) return null; if(a<=T1MAX) return [15,30]; if(a<T2MAX) return [30]; return [90]; }
+        return {days:90,rate:1,cuotas:3,cadence:'monthly'}; }
+      // Plazos permitidos por monto: ≤T1MAX → [15,30] (elige); ≤T2MAX → [30] (1 pago); >T2MAX → [90] (3 cuotas).
+      function allowedDays(a){ if(!(a>0)) return []; if(a>MAXAMT) return null; if(a<=T1MAX) return [15,30]; if(a<=T2MAX) return [30]; return [90]; }
       function recalc(){
         // "term" es un campo OCULTO que fija el monto/elección; al setearlo por código no dispara
         // eventos, así que su error no se limpia solo. Tras recalcular, si el error está visible lo
@@ -2219,7 +2218,7 @@ function intakeSmartHtml_() {
           else if(!off&&tag){tag.parentNode.removeChild(tag);}
         }
         dim('tierLi2', MAXAMT<=T1MAX);
-        dim('tierLi3', MAXAMT<T2MAX);
+        dim('tierLi3', MAXAMT<=T2MAX);
         recalc();
       }
 

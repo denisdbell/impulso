@@ -237,7 +237,7 @@ function writeMoraFormulasBlock_(sh) {
   });
   if (bmC) setColFormulas_(sh, bmC, b.first, b.count, r => MOR ? `=IF($${A}${r}="","",N($${K}${r})+N($${MOR}${r}))` : `=IF($${A}${r}="","",N($${K}${r}))`);
   if (planC) setColFormulas_(sh, planC, b.first, b.count, r => borrowerPlanTotalFormula_(r, A, TOT));
-  if (linkC) { const base = webAppBaseUrl_(), firmaL = firmaC ? a1col_(firmaC) : ''; setColFormulas_(sh, linkC, b.first, b.count, r => signingLinkFormula_(r, A, firmaL, base)); }
+  if (linkC) { const base = webAppBaseUrl_(), firmaL = firmaC ? a1col_(firmaC) : '', tokC = colByAny_(H, ['Token de acceso']), tokL = tokC ? a1col_(tokC) : ''; setColFormulas_(sh, linkC, b.first, b.count, r => signingLinkFormula_(r, A, firmaL, base, tokL)); }
   if (morC) fmtCol_(sh, morC, b.first, b.count, CFG.CURRENCY_FMT);
   if (adjC) { fmtCol_(sh, adjC, b.first, b.count, CFG.CURRENCY_FMT); sh.getRange(1, adjC).setNote('AJUSTE MANUAL de la mora. Vacío = automático. 0 = condonar. Un importe = fijar ese recargo.'); }
   if (bmC) fmtCol_(sh, bmC, b.first, b.count, CFG.CURRENCY_FMT);
@@ -524,8 +524,8 @@ function reactivateBorrowers_(ss) {
   if (bmC) setColFormulas_(sh, bmC, b.first, b.count, r => MOR ? `=IF($${A}${r}="","",N($${K}${r})+N($${MOR}${r}))` : `=IF($${A}${r}="","",N($${K}${r}))`);
   // Suma de cuotas = total del plan (Σ "Monto Cuota" de "Cuotas"); estable ante los pagos.
   if (planC) setColFormulas_(sh, planC, b.first, b.count, r => borrowerPlanTotalFormula_(r, A, I));
-  // Enlace de Firma = enlace clicable a la página de firma del contrato (o "✔ Firmado").
-  if (linkC) { const base = webAppBaseUrl_(), firmaL = firmaC ? a1col_(firmaC) : ''; setColFormulas_(sh, linkC, b.first, b.count, r => signingLinkFormula_(r, A, firmaL, base)); }
+  // Enlace de Firma = enlace clicable a la página de firma del contrato (o "✔ Firmado"); con token &t=.
+  if (linkC) { const base = webAppBaseUrl_(), firmaL = firmaC ? a1col_(firmaC) : '', tokC = colByAny_(H, ['Token de acceso']), tokL = tokC ? a1col_(tokC) : ''; setColFormulas_(sh, linkC, b.first, b.count, r => signingLinkFormula_(r, A, firmaL, base, tokL)); }
   // V-16: Estado se DERIVA del monto a pagar (Saldo con Mora) y la fecha. PAGADO sólo si nada
   // se debe, incluida la mora. V-15: sin mora si saldo 0. EN PLAN: reestructurado al día
   // (la "Suma de cuotas" supera el "Total a Pagar" por la mora congelada) → se distingue del ACTIVO.
@@ -1119,13 +1119,16 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
   // Fórmulas calculadas (Tasa/Venc/Interés/Total/Pagado/Saldo/Estado) en la fila nueva,
   // para que el préstamo quede completo al instante (Total ≠ $0 en el contrato/panel).
   try { writeBorrowerRowFormulas_(bs, tRow); } catch (e) { logError_('approveApplicantV2_:formulasFila', e); }
-  // V-31 — cronograma de cuotas: tramos chicos = 1 pago; tramo grande (>$300.000) = 3 cuotas mensuales.
+  // V-31 — cronograma de cuotas SEGÚN EL PLAZO del préstamo (NO el monto): 15/30 días = 1 pago;
+  // 90 días = 3 cuotas mensuales (producto 90 días). El monto NO convierte el préstamo en un plan de
+  // cuotas; los planes de pago se agregan SOLO de forma explícita (flujo de plan / reestructuración).
   try {
     const cs = ss.getSheetByName(CFG.SHEETS.INSTALLMENTS) || (typeof setupCuotas_ === 'function' ? setupCuotas_(ss) : null);
-    if (cs && typeof cuotasForLoan_ === 'function' && typeof resolveTerm_ === 'function') {
-      const ti = resolveTerm_(amount, term), total = round2_(amount * (1 + ti.rate)); // respeta el plazo elegido (15/30 en tramo chico)
-      const dueDays = ti.cadence === 'monthly' ? Array.from({ length: ti.cuotas }, (_, i) => (i + 1) * 30) : [ti.days];
-      cuotasForLoan_(cs, loanId, new Date(), total, ti.cuotas, dueDays);
+    if (cs && typeof cuotasForLoan_ === 'function' && typeof termInfoForDays_ === 'function') {
+      const ti = termInfoForDays_(term), total = round2_(amount * (1 + ti.rate));
+      const n = (ti.cadence === 'monthly') ? ti.cuotas : 1;   // sin ajuste de cantidad de cuotas por monto
+      const dueDays = (n > 1) ? Array.from({ length: n }, (_, i) => (i + 1) * 30) : [termDays_(term) || ti.days];
+      cuotasForLoan_(cs, loanId, new Date(), total, n, dueDays);
     }
   } catch (e) { logError_('approveApplicantV2_:cuotas', e); }
   // Nombre/DNI: se resuelven del cliente por "ID Cliente" con INDEX/MATCH (modelo normalizado);

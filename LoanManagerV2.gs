@@ -147,6 +147,9 @@ function onOpen() {
     .addSubMenu(ui.createMenu('💳 Confirmaciones de pago (automáticas)')
       .addItem('⏰ Instalar / actualizar envío diario', 'instalarConfirmacionesPago')
       .addItem('✉ Enviar confirmaciones ahora (envío real a clientes)', 'enviarConfirmacionesPago'))
+    .addSubMenu(ui.createMenu('👋 Bienvenida a nuevos prestatarios (automática)')
+      .addItem('⏰ Instalar / actualizar envío diario', 'instalarBienvenidaPrestatarios')
+      .addItem('✉ Enviar bienvenidas ahora (envío real a clientes)', 'enviarBienvenidaPrestatarios'))
     .addSubMenu(ui.createMenu('🪪 Verificación de DNI (OCR)')
       .addItem('⏰ Instalar / actualizar escaneo diario', 'instalarVerificacionDNI')
       .addItem('🔍 Escanear ahora (solo nuevos)', 'escanearDNIAhora')
@@ -1810,7 +1813,7 @@ function internalLoansForClient_(clientId) {
   const idC = colByAny_(H, ['ID Préstamo', 'ID Prestamo']) || PB.LOAN_ID;
   const cliC = colByAny_(H, ['ID Cliente']) || PB.CLIENT_ID;
   const capC = colByAny_(H, ['Capital']) || PB.PRINCIPAL;
-  const dateC = colByAny_(H, ['Fecha del Préstamo', 'Fecha del Prestamo', 'Fecha de Préstamo']) || PB.LOAN_DATE;
+  const dateC = colByAny_(H, ['Fecha del Préstamo', 'Fecha Préstamo', 'Fecha de Préstamo', 'Fecha Prestamo']) || PB.LOAN_DATE;
   const stC = colByAny_(H, ['Estado']) || PB.STATE;
   const paidC = colByAny_(H, ['Total Pagado', 'Pagado']) || PB.PAID;
   const balC = colByAny_(H, ['Saldo con Mora', 'Saldo Pendiente', 'Saldo']) || PB.BALANCE_MORA;
@@ -3994,7 +3997,7 @@ function withdrawableStats_() {
     const idC = colByAny_(HI, ['ID Préstamo', 'ID Prestamo']) || PB.LOAN_ID;
     const capC = colByAny_(HI, ['Capital']) || PB.PRINCIPAL;
     const paidC = colByAny_(HI, ['Total Pagado']) || PB.PAID;
-    const dateC = colByAny_(HI, ['Fecha del Préstamo', 'Fecha del Prestamo']) || PB.LOAN_DATE;
+    const dateC = colByAny_(HI, ['Fecha del Préstamo', 'Fecha Préstamo', 'Fecha de Préstamo', 'Fecha Prestamo']) || PB.LOAN_DATE;
     const dueC = colByAny_(HI, ['Fecha de Vencimiento', 'Vencimiento']) || PB.DUE;
     const totC = colByAny_(HI, ['Total a Pagar', 'Total a pagar']) || PB.TOTAL;
     const balC = colByAny_(HI, ['Saldo Pendiente', 'Saldo Pendiente (hoy)']) || PB.BALANCE;
@@ -4576,8 +4579,13 @@ function computeOutstanding_(principal, rate, loanDate, payments, asOf, paymentC
 
   const pays = payments.filter(p => new Date(p.date).getTime() <= cutoff.getTime())
     .map(p => ({ t: new Date(p.date).getTime(), amount: p.amount })).sort((a, b) => a.t - b.t);
-  for (const p of pays) { accrueTo(p.t); applyPay(p.amount); }
-  accrueTo(asOf.getTime());
+  // La mora NUNCA devenga más allá de `asOf` (la fecha de corte; en préstamos CONGELADOS = fecha de
+  // congelamiento). Un pago posterior al corte SE APLICA igual (baja el saldo), pero NO arrastra el
+  // reloj de mora más allá del corte: por eso el instante de devengo se acota a `asOf`. (Antes, un pago
+  // hecho DESPUÉS de congelar seguía sumando mora hasta la fecha del pago.)
+  const asOfMs = asOf.getTime();
+  for (const p of pays) { accrueTo(Math.min(p.t, asOfMs)); applyPay(p.amount); }
+  accrueTo(asOfMs);
 
   let out = 0;
   cuotas.forEach(c => { out = round2_(out + Math.max(0, c.balance) + Math.max(0, c.mora)); });
@@ -4887,7 +4895,9 @@ function agreementHtml_(loan, sig) {
     cuotasBox = `<div class="box" style="margin-top:8px"><div class="box-title">Plan de pago — ${n} cuotas mensuales</div><table style="margin:0">${filas}</table></div>`;
     cuotasNota = 'El total se devuelve en ' + n + ' cuotas mensuales, según el cronograma de arriba.';
   } else {
-    const nCuotas = (typeof termForAmount_ === 'function' ? (termForAmount_(loan.principal).cuotas || 1) : 1);
+    // Cuotas SEGÚN EL PLAZO (no el monto): sólo el plazo de 90 días se reparte en 3; 15/30 = 1 pago.
+    const tiC = (typeof termInfoForDays_ === 'function') ? termInfoForDays_(loan.term) : { cadence: 'once', cuotas: 1 };
+    const nCuotas = (tiC.cadence === 'monthly') ? (tiC.cuotas || 1) : 1;
     if (nCuotas > 1 && loan.loanDate) {
       const base = round2_(loan.totalDue / nCuotas);
       let filas = '';
@@ -7321,10 +7331,13 @@ function submitSignature(loanId, dni, signatureDataUrl, agree, meta, token) {
     // quedaban desfasadas respecto del "Vencimiento" del encabezado. cuotasForLoan_ borra-y-recrea.
     try {
       const cs = getSS_().getSheetByName(CFG.SHEETS.INSTALLMENTS) || setupCuotas_(getSS_());
-      const ti = resolveTerm_(freshLoan.principal, freshLoan.term);
+      // Cronograma SEGÚN EL PLAZO del préstamo (no re-derivado del monto): así coincide con el
+      // encabezado (Total a Pagar) y el monto NO lo convierte en un plan de cuotas.
+      const ti = termInfoForDays_(freshLoan.term);
       const totalPlan = round2_(freshLoan.principal * (1 + ti.rate));
-      const dueDays = ti.cadence === 'monthly' ? Array.from({ length: ti.cuotas }, (_, i) => (i + 1) * 30) : [ti.days];
-      cuotasForLoan_(cs, loanId, freshLoan.loanDate, totalPlan, ti.cuotas, dueDays);
+      const n = (ti.cadence === 'monthly') ? ti.cuotas : 1;
+      const dueDays = (n > 1) ? Array.from({ length: n }, (_, i) => (i + 1) * 30) : [termDays_(freshLoan.term) || ti.days];
+      cuotasForLoan_(cs, loanId, freshLoan.loanDate, totalPlan, n, dueDays);
     } catch (e) { logError_('submitSignature:cuotas', e); }
 
     const sig = {
@@ -10051,6 +10064,235 @@ function instalarConfirmacionesPago() {
   });
 }
 
+/* ============ BIENVENIDA A NUEVOS PRESTATARIOS (correo diario, una sola vez) ============ */
+
+/** {ID Cliente → {t: ms de la "Fecha Préstamo" más temprana FIRMADA, loanId}} de los préstamos
+ *  con Estado de Firma = FIRMADO. Identifica el PRIMER préstamo (el más antiguo) de cada cliente,
+ *  para decidir a quién saludar y con qué préstamo chequear el interruptor "Avisar por correo". */
+function firstSignedLoanByClient_() {
+  const out = {};
+  const bs = getSS_().getSheetByName(CFG.SHEETS.BORROWERS);
+  if (!bs || bs.getLastRow() < 2) return out;
+  const H = headerIndex_(bs);
+  const idC = colByAny_(H, ['ID Préstamo', 'ID Prestamo']) || PB.LOAN_ID;
+  const cliC = colByAny_(H, ['ID Cliente']) || PB.CLIENT_ID;
+  const fecC = colByAny_(H, ['Fecha Préstamo', 'Fecha de Préstamo', 'Fecha Prestamo']) || PB.LOAN_DATE;
+  const firmaC = colByAny_(H, ['Estado de Firma']) || PB.SIGN_STATUS;
+  const maxC = Math.max(idC, cliC, fecC, firmaC);
+  const data = bs.getRange(2, 1, bs.getLastRow() - 1, maxC).getValues();
+  data.forEach(function (r) {
+    const cid = String(r[cliC - 1] || '').trim();
+    const loanId = String(r[idC - 1] || '').trim();
+    if (!cid || !loanId) return;
+    if (String(r[firmaC - 1] || '').trim().toUpperCase() !== SIGN.SIGNED) return; // sólo FIRMADOS
+    const fv = r[fecC - 1];
+    const d = (fv instanceof Date) ? fv : (fv ? new Date(fv) : null);
+    const t = (d instanceof Date && !isNaN(d.getTime())) ? d.getTime() : Infinity;
+    const prev = out[cid];
+    if (!prev || t < prev.t) out[cid] = { t: t, loanId: loanId };   // nos quedamos con el más antiguo
+  });
+  return out;
+}
+
+/** Cuerpo HTML del correo de bienvenida (la cabecera/pie de marca + logo los agrega
+ *  sendBrandedEmail_). Reproduce el flyer "¡Te damos la bienvenida!" (navy + dorado), personalizado
+ *  con el nombre, y resalta: pagar a tiempo (subir de nivel) y avisar antes del vencimiento. */
+function bienvenidaHtml_(nombre) {
+  const navy = BRAND.navy, gold = BRAND.amber, company = companyName_();
+  const nice = titleCaseName_(nombre) || '';                 // capitaliza siempre ("elvio ricardo gimenez" → "Elvio Ricardo Gimenez")
+  const first = esc_(nice.split(/\s+/)[0] || '');            // saludo con el primer nombre, bien capitalizado
+  const hero = '<table role="presentation" width="100%" style="border-collapse:collapse;background:' + navy + ';border-radius:10px"><tr>' +
+    '<td style="padding:28px 20px;text-align:center;color:#fff">' +
+    '<div style="display:inline-block;border:1px solid ' + gold + ';color:' + gold + ';font-size:12px;font-weight:bold;letter-spacing:1px;padding:4px 12px;border-radius:14px">BIENVENIDO/A</div>' +
+    '<div style="font-size:26px;font-weight:bold;line-height:1.25;margin-top:14px">¡Te damos la bienvenida a <span style="color:' + gold + '">' + esc_(company) + '</span>!</div>' +
+    '<div style="font-size:15px;opacity:.92;margin-top:8px">Tu camino para subir de nivel ya empezó 🚀</div>' +
+    '</td></tr></table>';
+  const box1 = '<table role="presentation" width="100%" style="border-collapse:collapse;background:#eefaf1;border:1px solid #bfe6cb;border-radius:8px;margin-top:18px"><tr>' +
+    '<td style="padding:14px 16px">' +
+    '<div style="font-size:15px;font-weight:bold;color:#1a7a3c">✅ Pagá a tiempo y subí de nivel</div>' +
+    '<div style="font-size:14px;color:#2e6f52;margin-top:4px;line-height:1.5">Cada pago puntual te ayuda a evitar recargos por mora y te permite pedir montos cada vez más altos.</div>' +
+    '</td></tr></table>';
+  const box2 = '<table role="presentation" width="100%" style="border-collapse:collapse;background:#fdf3e3;border:1px solid #f0dcae;border-radius:8px;margin-top:12px"><tr>' +
+    '<td style="padding:14px 16px">' +
+    '<div style="font-size:15px;font-weight:bold;color:#b9791f">⛔ ¿Tenés dificultades para pagar?</div>' +
+    '<div style="font-size:14px;color:#8a5a00;margin-top:4px;line-height:1.5">¡No te preocupes! Hablanos <b>antes</b> de tu fecha de vencimiento y buscamos una solución juntos para cuidar tu nivel.</div>' +
+    '</td></tr></table>';
+  const waNum = (typeof waNumberAR_ === 'function') ? waNumberAR_(cobranzaTel_()) : '';
+  const waMsg = 'Hola, soy ' + nice + '. Acabo de tomar mi primer préstamo con ' + company + ' y quería saludar.';
+  const waUrl = waNum ? ('https://wa.me/' + waNum + '?text=' + encodeURIComponent(waMsg)) : '';
+  const cta = waUrl ? '<table role="presentation" border="0" cellspacing="0" cellpadding="0" style="margin:20px 0 4px"><tr>' +
+    '<td align="center" bgcolor="#25D366" style="border-radius:8px">' +
+    '<a href="' + esc_(waUrl) + '" target="_blank" style="display:inline-block;padding:12px 22px;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;color:#ffffff;text-decoration:none;border-radius:8px">💬 Escribinos por WhatsApp</a>' +
+    '</td></tr></table>' : '';
+  return hero +
+    '<p style="font-size:16px;margin:18px 0 10px">¡Hola ' + first + '! 👋</p>' +
+    '<p style="font-size:15px;color:#444;line-height:1.5;margin:0 0 4px">Gracias por tu confianza. Ya sos parte de ' + esc_(company) + ' y este es el comienzo de tu camino con nosotros.</p>' +
+    box1 + box2 + cta +
+    '<p style="font-size:14px;color:#444;margin:18px 0 0">¡Bienvenido/a! 🙌<br>' + esc_(company) + '</p>';
+}
+
+/** Reporte (texto plano) de a QUIÉNES se les envió la bienvenida (y a quiénes se omitió y por qué). */
+function resumenBienvenidaPlano_(sent, skipped, hoy) {
+  let t = 'Resumen de correos de bienvenida\nEjecución: ' + fmtDate_(hoy) + '\n\n';
+  t += 'Enviadas (' + (sent ? sent.length : 0) + '):\n';
+  (sent || []).forEach(function (s) { t += '  • ' + s.nombre + ' <' + s.email + '>  — préstamo ' + s.loanId + '\n'; });
+  if (!sent || !sent.length) t += '  (ninguna)\n';
+  if (skipped && skipped.length) {
+    t += '\nOmitidas (' + skipped.length + '):\n';
+    skipped.forEach(function (s) { t += '  • ' + s.nombre + ' <' + s.email + '>  — préstamo ' + s.loanId + ' — ' + s.motivo + '\n'; });
+  }
+  return t;
+}
+/** Reporte (HTML, tabla) de destinatarios de la bienvenida, enviado al "Correo para resumen de avisos". */
+function resumenBienvenidaHtml_(sent, skipped, hoy) {
+  const cell = 'padding:6px 10px;border-bottom:1px solid #eee;font-size:13px;color:#333';
+  const head = 'padding:6px 10px;background:#1c4587;color:#fff;font-size:12px;text-align:left';
+  const rowsSent = (sent || []).map(function (s) {
+    return '<tr><td style="' + cell + '">' + esc_(s.nombre) + '</td><td style="' + cell + '">' + esc_(s.email) + '</td><td style="' + cell + '">' + esc_(s.loanId) + '</td></tr>';
+  }).join('') || '<tr><td style="' + cell + '" colspan="3">— ninguna —</td></tr>';
+  const tblSent = '<table role="presentation" width="100%" style="border-collapse:collapse;margin-top:8px">' +
+    '<tr><th style="' + head + '">Cliente</th><th style="' + head + '">Correo</th><th style="' + head + '">Préstamo</th></tr>' + rowsSent + '</table>';
+  let tblSkip = '';
+  if (skipped && skipped.length) {
+    const rowsSkip = skipped.map(function (s) {
+      return '<tr><td style="' + cell + '">' + esc_(s.nombre) + '</td><td style="' + cell + '">' + esc_(s.email) + '</td><td style="' + cell + '">' + esc_(s.loanId) + '</td><td style="' + cell + '">' + esc_(s.motivo) + '</td></tr>';
+    }).join('');
+    tblSkip = '<p style="font-size:14px;font-weight:bold;color:#b45309;margin:18px 0 0">Omitidas (' + skipped.length + ')</p>' +
+      '<table role="presentation" width="100%" style="border-collapse:collapse;margin-top:8px">' +
+      '<tr><th style="' + head + '">Cliente</th><th style="' + head + '">Correo</th><th style="' + head + '">Préstamo</th><th style="' + head + '">Motivo</th></tr>' + rowsSkip + '</table>';
+  }
+  return '<p style="font-size:16px;margin:0 0 4px"><b>Resumen de correos de bienvenida</b></p>' +
+    '<p style="font-size:13px;color:#666;margin:0 0 10px">Ejecución: ' + esc_(fmtDate_(hoy)) + '</p>' +
+    '<p style="font-size:14px;font-weight:bold;color:#1a7a3c;margin:12px 0 0">Enviadas (' + (sent ? sent.length : 0) + ')</p>' +
+    tblSent + tblSkip;
+}
+
+/** Envío diario (disparador time-based): saluda UNA sola vez a cada cliente que tomó su PRIMER
+ *  préstamo FIRMADO en los últimos N días (Configuración). Marca "Bienvenida enviada" en "Clientes"
+ *  (fecha = enviado; centinela = omitido) para no reenviar jamás. Respeta "Avisar por correo (SÍ/NO)".
+ *  Al terminar, envía un REPORTE con los destinatarios al "Correo para resumen de avisos". */
+function enviarBienvenidaPrestatarios() {
+  return guard_('enviarBienvenidaPrestatarios', function () {
+    if (String(getSetting_('Bienvenida a nuevos prestatarios activa (SÍ/NO)') || 'SÍ').trim().toUpperCase() === 'NO')
+      return 'Bienvenida a nuevos prestatarios desactivada (Configuración).';
+    const cs = getSS_().getSheetByName(CFG.SHEETS.CLIENTS);
+    if (!cs || cs.getLastRow() < 2) return 'Bienvenida: no hay clientes.';
+    let nDias = parseInt(String(getSetting_('Días para bienvenida (primer préstamo reciente)') || '7'), 10);
+    if (!isFinite(nDias) || nDias < 0) nDias = 7;
+    // Remitente / correo de reporte: se reusan los mismos ajustes que los avisos de vencimiento.
+    const resumenTo = String(getSetting_('Correo para resumen de avisos') || '').trim();
+    const wantFrom = String(getSetting_('Correo remitente de avisos') || '').trim();
+    let fromAddr = '';
+    if (wantFrom) { try { if (GmailApp.getAliases().indexOf(wantFrom) !== -1) fromAddr = wantFrom; } catch (e) { } }
+    const emailOpts = { from: fromAddr, replyTo: wantFrom || '' };
+
+    const first = firstSignedLoanByClient_();
+    const notify = loanNotifyEmailMap_();
+    const flagCol = clientesHeaderCol_(cs, 'Bienvenida enviada', true);
+    const last = cs.getLastRow();
+    const maxC = Math.max(PC.CLIENT_ID, PC.NAME, PC.EMAIL, flagCol);
+    const data = cs.getRange(2, 1, last - 1, maxC).getValues();
+    const flagOut = data.map(function (r) { return [r[flagCol - 1]]; });
+    const now = new Date();
+    const hoy = new Date(); hoy.setHours(0, 0, 0, 0);
+    const cutoffMs = now.getTime() - nDias * 86400000;
+    const sent = [], skipped = [];
+    let revisados = 0, errores = 0, dirty = false;
+    for (let i = 0; i < data.length; i++) {
+      const cid = String(data[i][PC.CLIENT_ID - 1] || '').trim();
+      if (!cid) continue;
+      if (flagOut[i][0] !== '' && flagOut[i][0] != null) continue;      // ya saludado (fecha o centinela)
+      const fs = first[cid];
+      if (!fs || !isFinite(fs.t) || fs.t <= cutoffMs) continue;         // sin préstamo firmado reciente (≤ N días)
+      revisados++;
+      const nombre = titleCaseName_(data[i][PC.NAME - 1]) || 'cliente';
+      const email = normEmail_(data[i][PC.EMAIL - 1]);
+      if (!email || email.indexOf('@') < 1 || email.indexOf('.') < 0) {
+        flagOut[i][0] = 'sin correo'; dirty = true;
+        skipped.push({ nombre: nombre, email: '—', loanId: fs.loanId, motivo: 'sin correo' }); continue;
+      }
+      if (notify[fs.loanId] === false) {
+        flagOut[i][0] = 'avisos desactivados'; dirty = true;
+        skipped.push({ nombre: nombre, email: email, loanId: fs.loanId, motivo: 'avisos desactivados' }); continue;
+      }
+      const asunto = nombre + ', ¡te damos la bienvenida a ' + companyName_() + '!';
+      const plain = '¡Hola ' + nombre + '! Gracias por tu confianza. Pagá a tiempo para evitar la mora y subir de nivel; ' +
+        'si se te complica, escribinos antes del vencimiento y lo resolvemos juntos. ' + companyName_() + '.';
+      try {
+        sendBrandedEmail_(email, asunto, plain, bienvenidaHtml_(nombre), emailOpts);
+        flagOut[i][0] = now; dirty = true;
+        sent.push({ nombre: nombre, email: email, loanId: fs.loanId });
+      } catch (e) {
+        logError_('enviarBienvenidaPrestatarios:email', e); errores++;
+        skipped.push({ nombre: nombre, email: email, loanId: fs.loanId, motivo: 'error de envío' });
+      }
+    }
+    if (dirty) cs.getRange(2, flagCol, flagOut.length, 1).setValues(flagOut);
+    invalidateClientesCache_();
+
+    const resumen = 'Bienvenida: ' + sent.length + ' enviada(s) de ' + revisados + ' primer(os) préstamo(s) reciente(s)' +
+      (skipped.length ? (' · ' + skipped.length + ' omitida(s)') : '') +
+      (errores ? (' · ' + errores + ' error(es)') : '') + '.';
+    // REPORTE al administrador: a quiénes se les envió (y a quiénes se omitió y por qué).
+    if (resumenTo && (sent.length || skipped.length)) {
+      try {
+        sendBrandedEmail_(resumenTo, 'Resumen de bienvenidas — ' + sent.length + ' enviada(s) (' + fmtDate_(hoy) + ')',
+          resumenBienvenidaPlano_(sent, skipped, hoy), resumenBienvenidaHtml_(sent, skipped, hoy), emailOpts);
+      } catch (e) { logError_('enviarBienvenidaPrestatarios:resumen', e); }
+    }
+    try { getSS_().toast(resumen, '👋 Bienvenida', 8); } catch (e) { }
+    return resumen;
+  });
+}
+
+/** Instala/actualiza el envío diario de bienvenida y SIEMBRA la columna de control: marca como
+ *  "preexistente" a los clientes cuyo primer préstamo firmado es más viejo que N días, para que el
+ *  primer envío NO sea masivo (sólo recientes). Idempotente. */
+function instalarBienvenidaPrestatarios() {
+  return guard_('instalarBienvenidaPrestatarios', function () {
+    const defs = [
+      ['Bienvenida a nuevos prestatarios activa (SÍ/NO)', 'SÍ'],
+      ['Hora de envío de bienvenida', '18'],
+      ['Días para bienvenida (primer préstamo reciente)', '7'],
+    ];
+    defs.forEach(function (d) { if (!String(getSetting_(d[0]) || '').trim()) setSetting_(d[0], d[1]); });
+    let nDias = parseInt(String(getSetting_('Días para bienvenida (primer préstamo reciente)') || '7'), 10);
+    if (!isFinite(nDias) || nDias < 0) nDias = 7;
+    let seeded = 0;
+    const cs = getSS_().getSheetByName(CFG.SHEETS.CLIENTS);
+    if (cs && cs.getLastRow() >= 2) {
+      const flagCol = clientesHeaderCol_(cs, 'Bienvenida enviada', true);
+      const first = firstSignedLoanByClient_();
+      const last = cs.getLastRow(), maxC = Math.max(PC.CLIENT_ID, flagCol);
+      const data = cs.getRange(2, 1, last - 1, maxC).getValues();
+      const flagOut = data.map(function (r) { return [r[flagCol - 1]]; });
+      const cutoffMs = (new Date()).getTime() - nDias * 86400000;
+      let dirty = false;
+      for (let i = 0; i < data.length; i++) {
+        const cid = String(data[i][PC.CLIENT_ID - 1] || '').trim();
+        if (!cid) continue;
+        if (flagOut[i][0] !== '' && flagOut[i][0] != null) continue;   // ya marcado
+        const fs = first[cid];
+        // Sólo sembramos a quien YA tiene un primer préstamo firmado VIEJO (> N días). Los recientes
+        // y los que aún no firmaron quedan en blanco: los saludará el envío diario cuando corresponda.
+        if (fs && isFinite(fs.t) && fs.t <= cutoffMs) { flagOut[i][0] = 'preexistente'; dirty = true; seeded++; }
+      }
+      if (dirty) cs.getRange(2, flagCol, flagOut.length, 1).setValues(flagOut);
+      invalidateClientesCache_();
+    }
+    ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'enviarBienvenidaPrestatarios') ScriptApp.deleteTrigger(t); });
+    let hora = parseInt(String(getSetting_('Hora de envío de bienvenida') || '18'), 10);
+    if (!isFinite(hora) || hora < 0 || hora > 23) hora = 18;
+    ScriptApp.newTrigger('enviarBienvenidaPrestatarios').timeBased().everyDays(1).atHour(hora).create();
+    const msg = 'Bienvenida a nuevos prestatarios: envío diario instalado (~' + hora + ':00 h). ' +
+      seeded + ' cliente(s) existente(s) marcados como "preexistente" (no se reenvía). ' +
+      'Se saluda UNA sola vez a quien tomó su primer préstamo firmado en los últimos ' + nDias + ' días.';
+    try { getSS_().toast(msg, '👋 Bienvenida instalada', 8); } catch (e) { }
+    try { SpreadsheetApp.getUi().alert(msg); } catch (e) { }
+    return msg;
+  });
+}
+
 /* ===================== HELPERS ===================== */
 function recalcLoanPayments_(loanId) {
   // "Saldo Posterior" es una fórmula viva (paymentBalanceFormula_); la reafirmamos en las
@@ -11315,8 +11557,8 @@ function crearPrestamoPruebaMora100(clienteId, capital, plazoDias) {
     }
     if (cl && cl.getLastRow() >= 2 && !cliName) throw new Error('No encontré el cliente ' + clienteId + ' en "' + CFG.SHEETS.CLIENTS + '". Verificá el ID.');
 
-    // Tasa/cuotas/plazo reales según el monto (misma fuente que una aprobación normal).
-    const ti = resolveTerm_(capital, plazoDias);
+    // Tasa/cuotas SEGÚN EL PLAZO elegido (no el monto; igual que una aprobación normal).
+    const ti = termInfoForDays_(plazoDias);
     const total = round2_(capital * (1 + ti.rate));
     // Para llegar al tope (100% al 5%/día) hacen falta ~20 días de atraso. Dejamos un
     // margen extra para quedar holgadamente en el tope. Vencimiento = Fecha + plazo.
