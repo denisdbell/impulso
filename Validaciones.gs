@@ -213,9 +213,10 @@ function clientesRows_() {
     cAddr = ccol_('Dirección', 13),
     cR1N = ccol_('Ref 1 Nombre', 0), cR1R = ccol_('Ref 1 Vínculo', 0), cR1P = ccol_('Ref 1 Teléfono', 0),
     cR2N = ccol_('Ref 2 Nombre', 0), cR2R = ccol_('Ref 2 Vínculo', 0), cR2P = ccol_('Ref 2 Teléfono', 0),
-    cBloq = ccol_('Bloqueado', 0), cBloqM = ccol_('Motivo de bloqueo', 0);
+    cBloq = ccol_('Bloqueado', 0), cBloqM = ccol_('Motivo de bloqueo', 0),
+    cNoRec = ccol_('Recordatorios desactivados', 0);
   const width = Math.max(cId, cName, cEmail, cDni, cPhone, cDniN, cEmailN, cPhoneN, cCuil, cAddr,
-    cR1N, cR1R, cR1P, cR2N, cR2R, cR2P, cBloq, cBloqM);
+    cR1N, cR1R, cR1P, cR2N, cR2R, cR2P, cBloq, cBloqM, cNoRec);
   const cell = (r, c) => c ? String(r[c - 1] || '').trim() : '';
   const data = sh.getRange(2, 1, sh.getLastRow() - 1, width).getValues();
   _clientesRowsCache = data.map((r, i) => ({
@@ -230,6 +231,7 @@ function clientesRows_() {
     phoneNorm: String(r[cPhoneN - 1] || '').trim() || normPhoneE164_(r[cPhone - 1]),
     bloqueado: (function () { const v = cell(r, cBloq).toUpperCase(); return v === 'SÍ' || v === 'SI'; })(),
     bloqueoMotivo: cell(r, cBloqM),
+    sinRecordatorios: (function () { const v = cNoRec ? r[cNoRec - 1] : ''; return v === true || /^(sí|si|true|verdadero)$/i.test(String(v == null ? '' : v).trim()); })(),
     row: i + 2,
   })).filter(o => o.id || o.dniNorm || o.emailNorm);
   return _clientesRowsCache;
@@ -1289,6 +1291,7 @@ function ensureClienteBloqueoColumns_(ss) {
   if (!cl) return;
   clientesHeaderCol_(cl, 'Bloqueado', true);
   clientesHeaderCol_(cl, 'Motivo de bloqueo', true);
+  clientesHeaderCol_(cl, 'Recordatorios desactivados', true);   // interruptor por cliente (casilla)
   invalidateClientesHdrCache_();
   invalidateClientesRows_();
   if (typeof invalidateClientesCache_ === 'function') invalidateClientesCache_();
@@ -1310,6 +1313,16 @@ function applySheetValidations_(ss) {
     if (cBloq) cl.getRange(2, cBloq, N, 1).setDataValidation(
       SpreadsheetApp.newDataValidation().requireValueInList(['', 'SÍ'], true).setAllowInvalid(true)
         .setHelpText('SÍ = cliente bloqueado (no puede solicitar ni recibir préstamos). Vaciar = desbloquear.').build());
+    // "Recordatorios desactivados": casilla (TRUE/FALSE). Tildada = no enviar ningún correo
+    // automático (avisos de vencimiento/cuota/congelado/atraso, confirmaciones de pago ni
+    // bienvenida) a este cliente. Se crea si falta (cubre reactivarFuncionalidad, que no pasa
+    // por ensureClienteBloqueoColumns_).
+    const cNoRec = clientesHeaderCol_(cl, 'Recordatorios desactivados', true);
+    if (cNoRec) {
+      cl.getRange(2, cNoRec, N, 1).insertCheckboxes();
+      invalidateClientesHdrCache_();
+      if (typeof invalidateClientesCache_ === 'function') invalidateClientesCache_();
+    }
   }
 
   // V-13 — Plazo en DÍAS (15/30/60) en "Prestatarios" (col D) y "Nuevos Prestatarios" (col G).

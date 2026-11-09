@@ -213,6 +213,20 @@ function ensureSigningLinkCheckboxColumn_(bs) {
   return col;
 }
 
+/** Inserta (una sola vez) la casilla "Mora deshabilitada" en "Prestatarios" y le pone checkboxes a
+ *  las filas de datos. Al tildarla, el "Recargo por Mora (acum.)" de ESE préstamo se fija en 0 (vía
+ *  la fórmula) y los avisos dejan de mencionar mora. Idempotente; resuelve por NOMBRE. */
+function ensureMoraDisabledColumn_(bs) {
+  let col = colByAny_(headerIndex_(bs), ['Mora deshabilitada']);
+  if (!col) {
+    col = insertEndColumnSafe_(bs, 'Mora deshabilitada', 120);
+    bs.getRange(1, col).setNote('Tildá para DESHABILITAR la mora de este préstamo: el recargo se fija en 0 y no vuelve a crecer, y los avisos dejan de mencionar mora. "Mora (ajuste)" sigue disponible para fijar un recargo manual.');
+  }
+  const last = bs.getLastRow();
+  if (last >= 2) bs.getRange(2, col, last - 1, 1).insertCheckboxes();
+  return col;
+}
+
 /** Escribe las fórmulas de "Recargo por Mora (acum.)" y "Saldo con Mora" en todo el bloque de
  *  datos de "Prestatarios" (respetando "Mora (ajuste)"). "Mora (ajuste)" queda como entrada.
  *  Usado por 🆕 Aplicar novedades para que las columnas no queden vacías sin un reactivar completo. */
@@ -460,6 +474,7 @@ function reactivateBorrowers_(ss) {
   ensureSigningLinkColumn_(sh); // "Enlace de Firma" = enlace clicable al contrato (al final de la hoja)
   ensureSigningLinkCheckboxColumn_(sh); // casilla "Generar enlace 🔗" (genera el enlace de ese préstamo al tildar)
   ensureFrozenColumns_(sh); // "Congelado el" / "Días congelados" — congelamiento de la mora
+  ensureMoraDisabledColumn_(sh); // casilla "Mora deshabilitada" (fija la mora de ese préstamo en 0 al tildar)
   const H = headerIndex_(sh);
   const idC = colByAny_(H, ['ID Préstamo', 'ID Prestamo']);
   const cliC = colByAny_(H, ['ID Cliente']);
@@ -489,6 +504,8 @@ function reactivateBorrowers_(ss) {
     F = a1col_(fecC), G = a1col_(venC), Hh = a1col_(intC), I = a1col_(totC), J = a1col_(pagC), K = a1col_(salC);
   const MOR = morC ? a1col_(morC) : '';
   const ADJ = adjC ? a1col_(adjC) : '';
+  const dismC = colByAny_(H, ['Mora deshabilitada']);
+  const DISM = dismC ? a1col_(dismC) : ''; // casilla "Mora deshabilitada" → fija el recargo en 0 (prevalece)
   const BM = bmC ? a1col_(bmC) : K; // Estado cae al saldo base si aún no existe "Saldo con Mora"
   const PLAN = planC ? a1col_(planC) : ''; // "Suma de cuotas" (detecta préstamos EN PLAN)
   const FS = congC ? a1col_(congC) : '';   // "Congelado el" (detecta préstamos CONGELADOS)
@@ -515,9 +532,9 @@ function reactivateBorrowers_(ss) {
   if (morC) {
     setColFormulas_(sh, morC, b.first, b.count, r => {
       const auto = (typeof moraLookupFormula_ === 'function') ? moraLookupFormula_('$' + A + r) : '0';
-      return ADJ
-        ? `=IF($${A}${r}="","",IF(ISNUMBER($${ADJ}${r}),MAX(0,$${ADJ}${r}),${auto}))`
-        : `=IF($${A}${r}="","",${auto})`;
+      const core = ADJ ? `IF(ISNUMBER($${ADJ}${r}),MAX(0,$${ADJ}${r}),${auto})` : auto;
+      const body = DISM ? `IF($${DISM}${r}=TRUE,0,${core})` : core; // "Mora deshabilitada" prevalece
+      return `=IF($${A}${r}="","",${body})`;
     });
   }
   // Saldo con Mora = Saldo Pendiente + Recargo por Mora = monto a pagar HOY.
@@ -612,6 +629,8 @@ function writeBorrowerRowFormulas_(bs, r) {
   const bmC = colByAny_(H, ['Saldo con Mora']);
   const MOR = morC ? a1col_(morC) : '';
   const ADJ = adjC ? a1col_(adjC) : '';
+  const dismC = colByAny_(H, ['Mora deshabilitada']);
+  const DISM = dismC ? a1col_(dismC) : ''; // casilla "Mora deshabilitada" → fija el recargo en 0 (prevalece)
   const BM = bmC ? a1col_(bmC) : K; // si aún no existe la columna, el Estado cae al saldo base
   let payLoanL = 'B', payAmtL = 'D';
   if (pg) { const PH = headerIndex_(pg); payLoanL = a1col_(colByAny_(PH, ['ID Préstamo', 'ID Prestamo']) || 2); payAmtL = a1col_(colByAny_(PH, ['Monto Pagado']) || 4); }
@@ -631,9 +650,9 @@ function writeBorrowerRowFormulas_(bs, r) {
   setF(['Saldo Pendiente', 'Saldo Pendiente (hoy)'], `=IF($${A}${r}="","",MAX(0,$${I}${r}-$${J}${r}))`);
   // Recargo por Mora (acum.): usa el AJUSTE manual si es número (0 = condonar); si no, el auto.
   const moraFrag = (typeof moraLookupFormula_ === 'function') ? moraLookupFormula_('$' + A + r) : '0';
-  setF(['Recargo por Mora (acum.)'], ADJ
-    ? `=IF($${A}${r}="","",IF(ISNUMBER($${ADJ}${r}),MAX(0,$${ADJ}${r}),${moraFrag}))`
-    : `=IF($${A}${r}="","",${moraFrag})`);
+  const moraCore = ADJ ? `IF(ISNUMBER($${ADJ}${r}),MAX(0,$${ADJ}${r}),${moraFrag})` : moraFrag;
+  const moraBody = DISM ? `IF($${DISM}${r}=TRUE,0,${moraCore})` : moraCore; // "Mora deshabilitada" prevalece
+  setF(['Recargo por Mora (acum.)'], `=IF($${A}${r}="","",${moraBody})`);
   // Saldo con Mora = Saldo Pendiente + Recargo por Mora = monto a pagar HOY.
   setF(['Saldo con Mora'], MOR ? `=IF($${A}${r}="","",N($${K}${r})+N($${MOR}${r}))` : `=IF($${A}${r}="","",N($${K}${r}))`);
   // Suma de cuotas = total del plan (Σ "Monto Cuota" de "Cuotas"); estable ante los pagos.
