@@ -8715,6 +8715,52 @@ function bcraGet_(path) {
 }
 
 /**
+ * Envía un WhatsApp con una PLANTILLA aprobada vía Meta Cloud API.
+ * `toDigits` = destinatario internacional SIN «+» (p. ej. 549XXXXXXXXXX, tal como lo devuelve waNumberAR_);
+ * `bodyParams` = textos para los {{1}}…{{n}} del cuerpo. Lanza error si la respuesta no es 2xx (el llamador
+ * lo registra; nunca interrumpe el envío de correos). Reintenta una vez ante 429/5xx, igual que bcraGet_.
+ */
+function sendWhatsAppTemplate_(toDigits, templateName, langCode, bodyParams) {
+  const wa = waConfig_();
+  if (!wa) throw new Error('WhatsApp sin configurar (falta token o Phone Number ID).');
+  if (typeof TEST_MODE !== 'undefined' && TEST_MODE) return { testMode: true, to: String(toDigits), template: templateName, params: bodyParams };
+  const url = 'https://graph.facebook.com/' + wa.version + '/' + wa.phoneId + '/messages';
+  const payload = {
+    messaging_product: 'whatsapp',
+    to: String(toDigits),
+    type: 'template',
+    template: {
+      name: templateName,
+      language: { code: langCode },
+      components: [{
+        type: 'body',
+        parameters: (bodyParams || []).map(function (p) { return { type: 'text', text: waSanitizeParam_(p) }; })
+      }]
+    }
+  };
+  const opts = {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + wa.token },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+  let res = UrlFetchApp.fetch(url, opts);
+  let code = res.getResponseCode();
+  if (code === 429 || code >= 500) {   // throttled o error transitorio — un reintento lento
+    Utilities.sleep(3000);
+    res = UrlFetchApp.fetch(url, opts);
+    code = res.getResponseCode();
+  }
+  if (code < 200 || code >= 300) {
+    let detalle = res.getContentText();
+    try { const j = JSON.parse(detalle); if (j && j.error && j.error.message) detalle = j.error.message; } catch (e) {}
+    throw new Error('WhatsApp HTTP ' + code + ': ' + detalle);
+  }
+  try { return JSON.parse(res.getContentText()); } catch (e) { return {}; }
+}
+
+/**
  * Reduce las entidades de UN período a { total, perf (sit≤2), worst, deudas[] }.
  * La Central de Deudores del BCRA informa los montos en MILES de pesos: si los
  * montos todavía están en miles, pasá montoYaEnPesos=false para multiplicarlos ×1000.
@@ -9450,6 +9496,32 @@ function cobranzaTelUrl_() {
   const num = (typeof waNumberAR_ === 'function') ? waNumberAR_(cobranzaTel_()) : '';
   return num ? ('tel:+' + num) : '';
 }
+/** ¿Está activo el envío de recordatorios por WhatsApp? (Configuración SÍ/NO). */
+function whatsAppActivo_() {
+  const v = String(getSetting_('WhatsApp activo (SÍ/NO)') || '').trim().toUpperCase();
+  return v === 'SÍ' || v === 'SI';
+}
+/** Configuración de WhatsApp (Meta Cloud API) desde "Configuración".
+ *  Devuelve null si falta el token o el Phone Number ID (se trata como "sin configurar"). */
+function waConfig_() {
+  const token = String(getSetting_('WhatsApp — Token de acceso') || '').trim();
+  const phoneId = String(getSetting_('WhatsApp — Phone Number ID') || '').trim();
+  if (!token || !phoneId) return null;
+  let dias = parseInt(String(getSetting_('WhatsApp — Días de aviso antes del vencimiento') || '3'), 10);
+  if (!isFinite(dias) || dias < 0) dias = 3;
+  return {
+    token: token,
+    phoneId: phoneId,
+    version: String(getSetting_('WhatsApp — Versión API') || '').trim() || 'v21.0',
+    template: String(getSetting_('WhatsApp — Nombre de plantilla') || '').trim() || 'recordatorio',
+    lang: String(getSetting_('WhatsApp — Idioma de plantilla') || '').trim() || 'es_AR',
+    dias: dias
+  };
+}
+/** Normaliza un parámetro de plantilla: Meta rechaza saltos de línea, tabs o >4 espacios seguidos. */
+function waSanitizeParam_(s) {
+  return String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+}
 /** Bloque "coordiná un plan" con contacto por WhatsApp, llamada, correo e Instagram (email-safe). */
 function cobranzaContactoHtml_(loanId, nombre) {
   const tel = esc_(cobranzaTel_());
@@ -9534,7 +9606,8 @@ function resumenAvisosPlano_(stats, hitos, hoy) {
     'Avisos enviados: ' + stats.enviados + ' (activos ' + stats.porTipo.activo + ' · plan ' + stats.porTipo.plan + ' · cuota ' + stats.porTipo.cuota + ' · congelados ' + stats.porTipo.congelado + ' · atraso ' + stats.porTipo.atraso + ')\n' +
     'Sin aviso hoy: ' + sinAviso + '\n' +
     'En un hito hoy: ' + stats.evaluados + ' · Omitidos (sin correo / ya avisado): ' + stats.omitidos + '\n' +
-    'Errores: ' + stats.errores + '\n\n';
+    'Errores: ' + stats.errores + '\n' +
+    'WhatsApp: ' + (Number(stats.waEnviados) || 0) + ' enviados · ' + (Number(stats.waOmitidos) || 0) + ' sin teléfono · ' + (Number(stats.waErrores) || 0) + ' errores\n\n';
   if (stats.filas.length) {
     t += 'Detalle:\n';
     stats.filas.forEach(function (f) { t += '- ' + f.loanId + ' | ' + f.nombre + ' | ' + f.tipo + ' | ' + f.detalle + ' | ' + f.monto + ' | ' + f.res + '\n'; });
@@ -9574,6 +9647,7 @@ function resumenAvisosHtml_(stats, hitos, hoy) {
     tile(stats.errores, 'Errores', '#c0392b', '#fbeceb') +
     '</tr></table>' +
     '<p style="font-size:13px;color:#555;margin:16px 0 6px"><b>En un hito hoy:</b> ' + stats.evaluados + ' · <b>Omitidos:</b> ' + stats.omitidos + ' (sin correo / ya avisado) · <b>Por tipo:</b> ' + esc_(porTipo) + '</p>' +
+    '<p style="font-size:13px;color:#555;margin:0 0 6px"><b>WhatsApp:</b> ' + (Number(stats.waEnviados) || 0) + ' enviados · ' + (Number(stats.waOmitidos) || 0) + ' sin teléfono · ' + (Number(stats.waErrores) || 0) + ' errores</p>' +
     '<table role="presentation" width="100%" style="border-collapse:collapse;font-size:13px;border:1px solid #e3e6ec;border-radius:8px;overflow:hidden">' +
     '<tr style="background:#1c4587;color:#fff">' +
     '<th align="left" style="padding:9px 10px">Préstamo</th><th align="left" style="padding:9px 10px">Cliente</th>' +
@@ -9631,7 +9705,7 @@ function enviarAvisosVencimiento() {
     const acct = (typeof lenderAccount_ === 'function') ? lenderAccount_() : {};
 
     const bs = getSS_().getSheetByName(CFG.SHEETS.BORROWERS), last = bs ? bs.getLastRow() : 0;
-    const stats = { revisados: 0, evaluados: 0, enviados: 0, omitidos: 0, errores: 0, porTipo: { activo: 0, plan: 0, cuota: 0, congelado: 0, atraso: 0 }, filas: [] };
+    const stats = { revisados: 0, evaluados: 0, enviados: 0, omitidos: 0, errores: 0, waEnviados: 0, waOmitidos: 0, waErrores: 0, porTipo: { activo: 0, plan: 0, cuota: 0, congelado: 0, atraso: 0 }, filas: [] };
     const hoy = new Date(); hoy.setHours(0, 0, 0, 0);
     const DAY = 86400000;
     if (last < 2) return 'Avisos: 0 enviados, 0 omitidos, 0 errores.';
@@ -9653,15 +9727,19 @@ function enviarAvisosVencimiento() {
     const adjC = colByAny_(H, ['Mora (ajuste)']), sinceC = colByAny_(H, ['Congelado el']), daysAccC = colByAny_(H, ['Días congelados', 'Dias congelados']);
     const disC = colByAny_(H, ['Mora deshabilitada']);  // casilla por préstamo: mora en 0 + avisos sin mora
     const notifyC = colByAny_(H, ['Avisar por correo (SÍ/NO)', 'Avisar por correo']);  // interruptor por préstamo
+    const waNoticeC = clientesHeaderCol_(bs, 'Último WhatsApp', true);  // dedupe de WhatsApp (una vez por día)
     // UNA sola lectura en bloque de "Prestatarios": alimenta el parseo del préstamo (parseLoanRow_),
     // Estado/Saldo/Último Aviso (por índice PB, igual que antes) y las columnas de mora/congelado.
     // Evita ~3-4 lecturas por fila — clave para no romper el límite de tiempo del disparador.
     const loanMaxCol = Math.max(loanCols.idC, loanCols.cliC, loanCols.capC, loanCols.plzC, loanCols.tasC, loanCols.fecC, loanCols.venC, loanCols.intC, loanCols.totC);
-    const maxCol = Math.min(bs.getLastColumn(), Math.max(loanMaxCol, PB.STATE, PB.BALANCE, PB.NOTICE, adjC || 0, sinceC || 0, daysAccC || 0, disC || 0));
+    const maxCol = Math.min(bs.getLastColumn(), Math.max(loanMaxCol, PB.STATE, PB.BALANCE, PB.NOTICE, adjC || 0, sinceC || 0, daysAccC || 0, disC || 0, waNoticeC || 0));
     const data = bs.getRange(2, 1, last - 1, maxCol).getValues();
     // Copia editable de "Último Aviso": se escriben TODAS las fechas de una sola vez al final del bucle.
     const noticeCol = data.map(function (r) { return [r[PB.NOTICE - 1]]; });
     let noticeDirty = false;
+    const waCol = data.map(function (r) { return [r[waNoticeC - 1]]; });
+    let waDirty = false;
+    const waCfg = whatsAppActivo_() ? waConfig_() : null;  // null = WhatsApp desactivado o sin configurar
     const promisedByLoan = freezePromisedByLoan_();
 
     const mpPlano = function (montoTxt) {
@@ -9677,6 +9755,57 @@ function enviarAvisosVencimiento() {
       const status = rowArr[PB.STATE - 1];
       const saldo = Number(rowArr[PB.BALANCE - 1]) || 0;
       if (status === ST.PAID || status === ST.CLEARED || saldo <= 0) continue;
+
+      // ---- WhatsApp: recordatorio por plantilla (Meta Cloud API) a N días del vencimiento ----
+      // Va ANTES del interruptor de correo por préstamo: WhatsApp es independiente de "Avisar por correo",
+      // pero respeta el opt-out maestro del cliente (sinRecordatorios) y requiere teléfono válido.
+      // Nunca interrumpe el flujo de correos de abajo. PLAN/CONGELADO/VENCIDO quedan fuera (fuera de alcance).
+      if (waCfg && !loan.sinRecordatorios) {
+        let waDue = null, waMonto = 0, waAplica = false;
+        const qsWa = cuotasByLoan[loan.loanId] || [];
+        if (status === ST.ACTIVE && qsWa.length <= 1) {              // pago único
+          waDue = loan.dueDate instanceof Date ? loan.dueDate : null; waMonto = saldo; waAplica = !!waDue;
+        } else if (status === ST.ACTIVE && qsWa.length > 1) {        // cuotas nativas (la mora corre)
+          const nq = qsWa.filter(function (q) { return q.saldo > 0.009 && q.due instanceof Date; })[0];
+          if (nq) { waDue = nq.due; waMonto = nq.saldo; waAplica = true; }
+        }
+        if (waAplica) {
+          const diasWa = Math.round((startOfDay_(waDue).getTime() - hoy.getTime()) / DAY);
+          const yaWaHoy = (waCol[row - 2][0] instanceof Date) && fmtDate_(waCol[row - 2][0]) === fmtDate_(hoy);
+          if (diasWa === waCfg.dias && !yaWaHoy) {
+            const waNombre = titleCaseName_(loan.name) || 'cliente';
+            const waMontoTxt = fmtMoney_(round2_(waMonto));
+            const waDet = 'WhatsApp · ' + diasWa + ' días';   // se marca en "detalle" para distinguirlo del correo
+            const waTo = (typeof waNumberAR_ === 'function') ? waNumberAR_(loan.phone) : '';
+            if (!waTo) {
+              stats.waOmitidos++;   // en fecha de aviso pero sin teléfono válido
+              stats.filas.push({ loanId: loan.loanId, nombre: waNombre, tipo: 'whatsapp', detalle: waDet, monto: waMontoTxt, res: 'sin teléfono' });
+            } else {
+              const moraOffWa = !!(disC && rowArr[disC - 1] === true);
+              const moraDiaWa = moraOffWa ? fmtMoney_(0) : fmtMoney_(round2_((Number(loan.totalDue) || 0) * lateFeeRate_()));
+              const params = [
+                waNombre,                                 // {{1}} nombre
+                loan.loanId,                              // {{2}} préstamo
+                waMontoTxt,                               // {{3}} monto a abonar
+                fmtDate_(waDue),                          // {{4}} fecha límite
+                moraDiaWa,                                // {{5}} recargo por mora diario
+                cobranzaTel_()                            // {{6}} teléfono de contacto
+              ];
+              try {
+                sendWhatsAppTemplate_(waTo, waCfg.template, waCfg.lang, params);
+                waCol[row - 2][0] = hoy; waDirty = true;
+                stats.waEnviados++;
+                stats.filas.push({ loanId: loan.loanId, nombre: waNombre, tipo: 'whatsapp', detalle: waDet, monto: waMontoTxt, res: 'OK' });
+              } catch (e) {
+                logError_('enviarAvisosVencimiento:whatsapp', e);
+                stats.waErrores++;
+                stats.filas.push({ loanId: loan.loanId, nombre: waNombre, tipo: 'whatsapp', detalle: waDet, monto: waMontoTxt, res: 'ERROR' });
+              }
+            }
+          }
+        }
+      }
+
       if (notifyC && !loanEmailOn_(rowArr[notifyC - 1])) continue;   // avisos por correo desactivados para este préstamo
       if (loan.sinRecordatorios) continue;   // cliente con recordatorios desactivados (Clientes)
       stats.revisados++;   // préstamo con saldo que este aviso examina (haya o no hito hoy)
@@ -9812,13 +9941,14 @@ function enviarAvisosVencimiento() {
     }
     // Vuelca "Último Aviso" de TODOS los envíos en UNA sola escritura (antes: una por envío).
     if (noticeDirty) bs.getRange(2, PB.NOTICE, last - 1, 1).setValues(noticeCol);
+    if (waDirty) bs.getRange(2, waNoticeC, last - 1, 1).setValues(waCol);
     if (resumenTo) {
       try {
-        const asunto = 'Resumen de avisos — ' + stats.enviados + ' enviados de ' + stats.revisados + ' revisados (' + stats.porTipo.activo + ' activos · ' + stats.porTipo.plan + ' plan · ' + stats.porTipo.cuota + ' cuota · ' + stats.porTipo.congelado + ' congelados · ' + stats.porTipo.atraso + ' atraso), ' + stats.errores + ' errores (' + fmtDate_(hoy) + ')';
+        const asunto = 'Resumen de avisos — ' + stats.enviados + ' enviados de ' + stats.revisados + ' revisados (' + stats.porTipo.activo + ' activos · ' + stats.porTipo.plan + ' plan · ' + stats.porTipo.cuota + ' cuota · ' + stats.porTipo.congelado + ' congelados · ' + stats.porTipo.atraso + ' atraso), ' + stats.errores + ' errores · ' + stats.waEnviados + ' WhatsApp (' + fmtDate_(hoy) + ')';
         sendBrandedEmail_(resumenTo, asunto, resumenAvisosPlano_(stats, hitos, hoy), resumenAvisosHtml_(stats, hitos, hoy), emailOpts);
       } catch (e) { logError_('enviarAvisosVencimiento:resumen', e); }
     }
-    return 'Avisos: ' + stats.enviados + ' enviados de ' + stats.revisados + ' revisados (' + stats.porTipo.activo + ' activos, ' + stats.porTipo.plan + ' plan, ' + stats.porTipo.cuota + ' cuota, ' + stats.porTipo.congelado + ' congelados, ' + stats.porTipo.atraso + ' atraso), ' + stats.omitidos + ' omitidos, ' + stats.errores + ' errores.';
+    return 'Avisos: ' + stats.enviados + ' enviados de ' + stats.revisados + ' revisados (' + stats.porTipo.activo + ' activos, ' + stats.porTipo.plan + ' plan, ' + stats.porTipo.cuota + ' cuota, ' + stats.porTipo.congelado + ' congelados, ' + stats.porTipo.atraso + ' atraso), ' + stats.omitidos + ' omitidos, ' + stats.errores + ' errores. WhatsApp: ' + stats.waEnviados + ' enviados, ' + stats.waOmitidos + ' omitidos, ' + stats.waErrores + ' errores.';
   });
 }
 /**
@@ -9837,6 +9967,14 @@ function instalarAvisosVencimiento() {
       ['Hora de envío de avisos de vencimiento', '8'],
       ['Correo remitente de avisos', 'impulso.credito.ars@gmail.com'],
       ['Correo para resumen de avisos', 'impulso.credito.ars@gmail.com'],
+      // WhatsApp (recordatorio por plantilla — Meta Cloud API). Cargar token/ID y poner "SÍ" para activar.
+      ['WhatsApp activo (SÍ/NO)', 'NO'],
+      ['WhatsApp — Token de acceso', ''],
+      ['WhatsApp — Phone Number ID', ''],
+      ['WhatsApp — Versión API', 'v21.0'],
+      ['WhatsApp — Nombre de plantilla', 'recordatorio'],
+      ['WhatsApp — Idioma de plantilla', 'es_AR'],
+      ['WhatsApp — Días de aviso antes del vencimiento', '3'],
     ];
     defs.forEach(function (d) { if (!String(getSetting_(d[0]) || '').trim()) setSetting_(d[0], d[1]); });
     ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'enviarAvisosVencimiento') ScriptApp.deleteTrigger(t); });
