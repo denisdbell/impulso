@@ -727,6 +727,7 @@ function applyFeatureUpdates() {
         const nWa = fillPaymentWaLinks_(ss);
         done.push('casilla «Generar recibo» + «Saldo Posterior» vivo en «Pagos»');
         done.push('columna «Avisar pago 📲» (WhatsApp) en «Pagos»' + (nWa ? (' · ' + nWa + ' fila(s)') : ''));
+        done.push('casilla «' + PAY_WA_REGEN_HEADER + '» (regenerar WhatsApp por fila) en «Pagos»');
         // Columna "Confirmación enviada": marca del envío diario de confirmaciones de pago. Al crearla
         // por primera vez, marca los pagos ya existentes como "previo" (no reenvía el histórico).
         const confCol = ensureConfirmColumn_(psh);
@@ -2229,7 +2230,7 @@ function setupPayments_(ss) {
   // Modelo normalizado: la identidad vive en "Clientes". Nombre y DNI se muestran
   // aquí por comodidad (se autocompletan al elegir el ID Préstamo); no son la
   // fuente de verdad. El ID Pago se autogenera (P-0001, P-0002, …).
-  const H = ['ID Pago', 'ID Préstamo', 'Fecha de Pago', 'Monto Pagado', 'Saldo Posterior', 'Recibo Enviado', 'Nombre', 'DNI', 'Enviar recibo', 'Generar recibo', 'Avisar pago 📲', 'Confirmación enviada'];
+  const H = ['ID Pago', 'ID Préstamo', 'Fecha de Pago', 'Monto Pagado', 'Saldo Posterior', 'Recibo Enviado', 'Nombre', 'DNI', 'Enviar recibo', 'Generar recibo', 'Avisar pago 📲', 'Confirmación enviada', PAY_WA_REGEN_HEADER];
   sh.getRange(1, 1, 1, H.length).setValues([H]).setFontWeight('bold').setBackground('#38761d').setFontColor('#fff');
   sh.setFrozenRows(1);
   sh.getRange(2, PP.DATE, CFG.MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd')
@@ -2237,6 +2238,7 @@ function setupPayments_(ss) {
   sh.getRange(2, PP.AMOUNT, CFG.MAX_ROWS, 2).setNumberFormat(CFG.CURRENCY_FMT);
   sh.getRange(2, PP.SEND_RECEIPT, CFG.MAX_ROWS, 1).insertCheckboxes(); // casilla "Enviar recibo"
   sh.getRange(2, PP.GEN_RECEIPT, CFG.MAX_ROWS, 1).insertCheckboxes(); // casilla "Generar recibo" (sin correo)
+  ensurePaymentWaRegenColumn_(sh); // casilla "Regenerar WA 🔄" (reconstruye el enlace de WhatsApp por fila)
   // "Saldo Posterior" VIVO: lo que falta pagar del préstamo tras cada pago, INCLUIDA la mora.
   const balF = []; for (let r = 2; r <= CFG.MAX_ROWS + 1; r++) balF.push([paymentBalanceFormula_(r)]);
   sh.getRange(2, PP.BALANCE, balF.length, 1).setFormulas(balF);
@@ -2728,8 +2730,8 @@ function statementStudioSend_(sh) {
 /* ===================== ESTUDIO DE RECORDATORIOS (lista) ===================== */
 const REM_HEADERS = ['ID Préstamo', 'Prestatario', 'Fecha de Vencimiento', 'Días (− = atraso)',
   'Estado', 'Total a Pagar', 'Saldo Pendiente', 'Recargo por Mora diario', 'Correo',
-  'Generar PDF 👁', 'Enviar ✉', 'Último PDF', 'Recordar por WhatsApp', 'Pedir congelamiento 📲', 'Pedir plan de pago 📋'];
-const REM_GEN_COL = 10, REM_SEND_COL = 11, REM_LINK_COL = 12, REM_WA_COL = 13, REM_FREEZE_COL = 14, REM_PLANREQ_COL = 15;
+  'Generar PDF 👁', 'Enviar ✉', 'Último PDF', 'Recordar por WhatsApp', 'Regenerar WA 🔄', 'Pedir congelamiento 📲', 'Pedir plan de pago 📋'];
+const REM_GEN_COL = 10, REM_SEND_COL = 11, REM_LINK_COL = 12, REM_WA_COL = 13, REM_WAGEN_COL = 14, REM_FREEZE_COL = 15, REM_PLANREQ_COL = 16;
 const REM_HEADER_ROW = 3, REM_DATA_START = 4; // fila 1 título, fila 2 control, fila 3 encabezados
 
 /** Construye la estructura (título, casilla de refresco y encabezados) y llena la lista. */
@@ -2744,8 +2746,9 @@ function setupReminders_(ss) {
   sh.getRange(REM_HEADER_ROW, 1, 1, REM_HEADERS.length).setValues([REM_HEADERS])
     .setFontWeight('bold').setBackground('#b45f06').setFontColor('#fff').setWrap(true);
   sh.setFrozenRows(REM_HEADER_ROW);
-  [110, 180, 130, 120, 110, 120, 130, 150, 210, 110, 90, 130, 170].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  [110, 180, 130, 120, 110, 120, 130, 150, 210, 110, 90, 130, 170, 120].forEach((w, i) => sh.setColumnWidth(i + 1, w));
   sh.getRange(REM_HEADER_ROW, 1).setNote('Se actualiza con "⑤ Actualizar", con la casilla 🔄 y automáticamente cada día. Incluye préstamos vencidos o que vencen dentro de los "Días de aviso de recordatorio" (Configuración, por defecto 7).');
+  sh.getRange(REM_HEADER_ROW, REM_WAGEN_COL).setNote('Tildá para RE-GENERAR el enlace "Recordar por WhatsApp" de ESTA fila con los datos actuales (saldo, mora, pagos). Se destilda solo. Útil tras registrar un pago o cambiar la mora sin reconstruir toda la lista.');
   rebuildRemindersSheet_(ss);
   return sh;
 }
@@ -2755,6 +2758,11 @@ function rebuildRemindersSheet_(ss) {
   ss = ss || getSS_();
   let sh = ss.getSheetByName(CFG.SHEETS.REMINDER);
   if (!sh) { setupReminders_(ss); return; } // setupReminders_ ya llama a rebuild
+  // Reafirma el encabezado antes de volcar datos: alinea las hojas creadas por versiones anteriores
+  // (p. ej. sin "Regenerar WA 🔄") con REM_HEADERS, para que las columnas y las casillas no se corran.
+  sh.getRange(REM_HEADER_ROW, 1, 1, REM_HEADERS.length).setValues([REM_HEADERS])
+    .setFontWeight('bold').setBackground('#b45f06').setFontColor('#fff').setWrap(true);
+  sh.getRange(REM_HEADER_ROW, REM_WAGEN_COL).setNote('Tildá para RE-GENERAR el enlace "Recordar por WhatsApp" de ESTA fila con los datos actuales (saldo, mora, pagos). Se destilda solo. Útil tras registrar un pago o cambiar la mora sin reconstruir toda la lista.');
   const bs = ss.getSheetByName(CFG.SHEETS.BORROWERS), last = bs ? bs.getLastRow() : 0;
   // limpia datos, casillas y colores previos (conserva encabezados)
   const clearH = Math.max(sh.getMaxRows() - REM_HEADER_ROW, 1);
@@ -2837,7 +2845,7 @@ function rebuildRemindersSheet_(ss) {
     const overdue = daysUntil < 0;
     const feeDay = round2_(totalDue * feePct);
     rows.push([loanId, loan.name + cuotaTxt, dueDate, daysUntil, overdue ? ST.OVERDUE : 'PRÓXIMO',
-      totalDue, out, feeDay, loan.email, false, false, '', '', '', '']);
+      totalDue, out, feeDay, loan.email, false, false, '', '', false, '', '']);
     overdueFlags.push(overdue);
     // Desglose financiero del WhatsApp de VENCIDOS, calculado con datos YA leídos (payMap + columnas
     // del bloque) y el motor de mora SIN leer hojas (accruedMoraFast_). Evita el loanWaStatus_ por
@@ -2879,6 +2887,7 @@ function rebuildRemindersSheet_(ss) {
   sh.getRange(REM_DATA_START, 6, n, 3).setNumberFormat(CFG.CURRENCY_FMT);
   sh.getRange(REM_DATA_START, REM_GEN_COL, n, 1).insertCheckboxes();
   sh.getRange(REM_DATA_START, REM_SEND_COL, n, 1).insertCheckboxes();
+  sh.getRange(REM_DATA_START, REM_WAGEN_COL, n, 1).insertCheckboxes(); // "Regenerar WA 🔄" por fila
   // colores por renglón: vencido = rojo, próximo = amarillo (columnas de datos 1..9)
   for (let i = 0; i < n; i++) {
     sh.getRange(REM_DATA_START + i, 1, 1, 9).setBackground(sortedFlags[i] ? '#f4cccc' : '#fff2cc');
@@ -2916,6 +2925,39 @@ function reminderRowSend_(sh, row) { // ✉ genera el PDF y lo envía por correo
     sh.getRange(row, REM_LINK_COL).setFormula('=HYPERLINK("' + file.getUrl() + '","👁 Abrir PDF")');
     getSS_().toast('Recordatorio enviado a ' + loan.email, 'Recordatorio', 5);
   } catch (err) { logError_('reminderRowSend_', err); getSS_().toast(err.message || String(err), '⚠ No se pudo enviar', 8); }
+}
+/** 🔄 Reconstruye el enlace "Recordar por WhatsApp" (REM_WA_COL) de UNA fila con los datos ACTUALES
+ *  del préstamo (próxima cuota impaga o pago único; mora/pagos al día), sin reconstruir toda la lista.
+ *  Espeja las decisiones de rebuildRemindersSheet_ pero leyendo un solo préstamo (vía loanWaStatus_). */
+function reminderRowRegenWa_(sh, row) {
+  const loanId = String(sh.getRange(row, 1).getValue()).trim();
+  if (!loanId) return 'Fila sin préstamo.';
+  const loan = findLoanById_(loanId);
+  if (!loan) return 'No se encontró el préstamo ' + loanId + '.';
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const s = loanWaStatus_(loan);
+  // Base del aviso: próxima cuota impaga (si hay cronograma) o el vencimiento/saldo del préstamo.
+  let dueDate = loan.dueDate, out = s.baseOwed;
+  if (s.multiCuota) {
+    const nextQ = (s.cuotas || []).filter(q => q.saldo > 0.009 && q.due instanceof Date)[0];
+    if (nextQ) { dueDate = nextQ.due; out = nextQ.saldo; }
+  }
+  const daysUntil = (dueDate instanceof Date) ? Math.round((startOfDay_(dueDate) - today) / 86400000) : 0;
+  // Vencido: desglose (capital/interés/pagos/mora) igual que el que arma rebuildRemindersSheet_.
+  let fin = null;
+  if (daysUntil < 0) {
+    const base = Math.max(0, round2_(s.totalDue - s.totalPaid));
+    fin = {
+      principal: loan.principal, interest: round2_(Math.max(0, s.totalDue - (loan.principal || 0))),
+      totalDue: s.totalDue, totalPaid: s.totalPaid, owedMora: s.owedMora,
+      toClear: round2_(base + s.owedMora),
+      daysLate: Math.max(0, daysLate_(loan.dueDate, effMoraAsOf2_(s.frz, today))),
+    };
+  }
+  const f = remWhatsappFormula_(loan, dueDate, out, daysUntil, fin);
+  const cell = sh.getRange(row, REM_WA_COL);
+  if (f) cell.setFormula(f).setFontColor(null); else cell.setValue('sin teléfono').setFontColor('#999');
+  return f ? ('WhatsApp de ' + (loan.name || loanId) + ' actualizado.') : (loan.name || loanId) + ': sin teléfono válido.';
 }
 
 /** Número para wa.me de un móvil argentino: 549 + área + número (sin el «+»). '' si no es válido.
@@ -3218,12 +3260,45 @@ function paymentWaFormula_(loan, payDate, amount, status) {
   return '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","' + label + '")';
 }
 
+/** Encabezado de la casilla por fila que RE-GENERA el enlace "Avisar pago 📲" de esa fila en "Pagos". */
+const PAY_WA_REGEN_HEADER = 'Regenerar WA 🔄';
+
+/** Asegura la columna "Regenerar WA 🔄" en "Pagos" (una casilla por fila): tildarla reconstruye el
+ *  enlace "Avisar pago 📲" de ESA fila con los datos actuales (saldo, mora, teléfono). Idempotente:
+ *  crea la columna si falta y (re)instala las casillas. Funciona en el layout nuevo o migrado. */
+function ensurePaymentWaRegenColumn_(sh) {
+  sh = sh || getSS_().getSheetByName(CFG.SHEETS.PAYMENTS); if (!sh) return 0;
+  const col = clientesHeaderCol_(sh, PAY_WA_REGEN_HEADER, true);
+  sh.getRange(1, col).setBackground('#38761d').setFontColor('#fff') // iguala el encabezado de Pagos
+    .setNote('Tildá para RE-GENERAR el enlace de "Avisar pago 📲" de ESTA fila con los datos actuales (saldo con mora, teléfono). Se destilda solo. Útil si cambió el saldo/la mora o el teléfono del cliente.');
+  sh.setColumnWidth(col, 120);
+  const rows = Math.max(sh.getMaxRows() - 1, 1);
+  sh.getRange(2, col, rows, 1).insertCheckboxes();
+  return col;
+}
+
+/** 🔄 Reconstruye el enlace "Avisar pago 📲" (WA_PAYMENT) de UNA fila de "Pagos" con los datos
+ *  actuales del préstamo y ese pago. Misma lógica que el armado por fila del onEdit de "Pagos". */
+function paymentRowRegenWa_(sh, row) {
+  const waCol = headerMap_(sh)['Avisar pago 📲'] || PP.WA_PAYMENT;
+  const id = String(sh.getRange(row, PP.LOAN_ID).getValue()).trim();
+  const amt = Number(sh.getRange(row, PP.AMOUNT).getValue()) || 0;
+  const cell = sh.getRange(row, waCol);
+  if (!id || !amt) { cell.clearContent(); return 'Fila sin préstamo o monto.'; }
+  const loan = findLoanById_(id);
+  if (!loan) { cell.setValue(''); return 'No se encontró el préstamo ' + id + '.'; }
+  const f = paymentWaFormula_(loan, sh.getRange(row, PP.DATE).getValue(), amt);
+  if (f) cell.setFormula(f); else cell.setValue('sin teléfono');
+  return f ? ('WhatsApp de ' + (loan.name || id) + ' actualizado.') : (loan.name || id) + ': sin teléfono válido.';
+}
+
 /** (Re)completa la columna "Avisar pago 📲" de TODA la hoja Pagos con el enlace de WhatsApp por fila
  *  (según el pago y el saldo resultante). "sin teléfono" si el cliente no tiene número válido; vacío si
  *  la fila no tiene préstamo + monto. Crea la columna si falta. Devuelve la cantidad de filas tratadas. */
 function fillPaymentWaLinks_(ss) {
   ss = ss || getSS_();
   const sh = ss.getSheetByName(CFG.SHEETS.PAYMENTS); if (!sh) return 0;
+  try { ensurePaymentWaRegenColumn_(sh); } catch (e) { logError_('fillPaymentWaLinks_:regenCol', e); }
   const waCol = clientesHeaderCol_(sh, 'Avisar pago 📲', true);
   if (!waCol) return 0;
   sh.getRange(1, waCol).setBackground('#38761d').setFontColor('#fff'); // iguala el encabezado de Pagos
@@ -4554,10 +4629,15 @@ function computeOutstanding_(principal, rate, loanDate, payments, asOf, paymentC
   const grace = (typeof graceDays === 'number') ? Math.max(0, Math.floor(graceDays)) : moraGraceDays_();
   const capFrac = (typeof feeCapFrac === 'number') ? feeCapFrac : moraCapFrac_();
   const total = round2_(principal * (1 + rate));
-  // Cronograma: por defecto, un solo pago al vencimiento (idéntico al comportamiento previo).
+  // Cronograma: por defecto, un solo pago al vencimiento. El vencimiento se calcula por DÍAS
+  // calendario (modelo día: 15/30/60), IGUAL que dueDateForTerm_/termDays_, la fórmula de
+  // "Vencimiento" de la hoja y daysLate_. Antes usaba addMonths_ (modelo mes): para un préstamo
+  // de 30 días originado en un mes de 31 días, addMonths_(,1) caía UN DÍA DESPUÉS que
+  // loanDate+30, así que la mora se devengaba un día tarde (0 el primer día de atraso) y los
+  // avisos informaban "sin mora" a quienes sí la tenían. (90 días siempre entra por `schedule`.)
   let sched = (Array.isArray(schedule) && schedule.length) ? schedule : null;
   if (!sched) {
-    const dueDate = rate === 0.25 ? addDays_(loanDate, 15) : addMonths_(loanDate, rate === 0.5 ? 1 : 2);
+    const dueDate = addDays_(loanDate, rate === 0.25 ? 15 : rate === 0.5 ? 30 : 60);
     sched = [{ due: dueDate, amount: total, principalShare: principal }];
   }
   const cuotas = sched.map(c => ({
@@ -8384,6 +8464,16 @@ function onEditInstallable(e) {
           catch (err) { logError_('onEdit:PAGOS:generarRecibo', err); getSS_().toast(err.message || String(err), '⚠ No se pudo generar', 8); }
         }
       }
+      // Casilla "Regenerar WA 🔄": reconstruye el enlace "Avisar pago 📲" de esa fila con los datos actuales.
+      const waRegenCol = headerMap_(sh)[PAY_WA_REGEN_HEADER] || 0;
+      if (waRegenCol && waRegenCol >= c0 && waRegenCol <= cN) {
+        for (let row = rN; row >= r0; row--) {
+          if (sh.getRange(row, waRegenCol).getValue() !== true) continue;
+          sh.getRange(row, waRegenCol).setValue(false);
+          try { getSS_().toast(paymentRowRegenWa_(sh, row), '📲 WhatsApp regenerado', 4); }
+          catch (err) { logError_('onEdit:PAGOS:waRegen', err); getSS_().toast(err.message || String(err), '⚠ No se pudo regenerar', 8); }
+        }
+      }
     } else if (name === CFG.SHEETS.BORROWERS) {
       // Casilla "Eliminar" (col U): quita el préstamo de la fila tildada.
       if (PB.DELETE >= c0 && PB.DELETE <= cN) {
@@ -8469,11 +8559,16 @@ function onEditInstallable(e) {
     } else if (name === CFG.SHEETS.REMINDER) {
       if (e.range.getA1Notation() === 'B2' && sh.getRange('B2').getValue() === true) {
         sh.getRange('B2').setValue(false); rebuildRemindersSheet_(getSS_());
-      } else if ((REM_GEN_COL >= c0 && REM_GEN_COL <= cN) || (REM_SEND_COL >= c0 && REM_SEND_COL <= cN)) {
+      } else if ((REM_GEN_COL >= c0 && REM_GEN_COL <= cN) || (REM_SEND_COL >= c0 && REM_SEND_COL <= cN) || (REM_WAGEN_COL >= c0 && REM_WAGEN_COL <= cN)) {
         for (let row = rN; row >= Math.max(r0, REM_DATA_START); row--) {
           if (sh.getRange(row, 1).getValue() === '') continue;
           if (sh.getRange(row, REM_GEN_COL).getValue() === true) { sh.getRange(row, REM_GEN_COL).setValue(false); reminderRowGenerate_(sh, row); }
           else if (sh.getRange(row, REM_SEND_COL).getValue() === true) { sh.getRange(row, REM_SEND_COL).setValue(false); reminderRowSend_(sh, row); }
+          else if (sh.getRange(row, REM_WAGEN_COL).getValue() === true) {
+            sh.getRange(row, REM_WAGEN_COL).setValue(false);
+            try { getSS_().toast(reminderRowRegenWa_(sh, row), '📲 WhatsApp regenerado', 4); }
+            catch (err) { logError_('onEdit:REMINDER:waRegen', err); getSS_().toast(err.message || String(err), '⚠ No se pudo regenerar', 8); }
+          }
         }
       }
     } else if (name === CFG.SHEETS.LATE) {
