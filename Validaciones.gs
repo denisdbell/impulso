@@ -2674,9 +2674,104 @@ function prospectoFormHtml_() {
     <div class="card" id="card">${brandHeaderHtml_()}
       ${clientThemeCss_()}
       <div id="formView">
-        <h1>Sumate a ${lender}</h1>
-        <p class="sub">Dejanos tus datos para sumarte a nuestra lista de interesados.</p>
-        <div class="note">💛 <b>Por el momento no tenemos fondos disponibles</b>, pero apenas haya cupo <b>te avisamos</b>. Completá tus datos y quedás en la lista.</div>
+        <style>
+          /* --- Productos: plazos e interés --- */
+          .pprod{margin:14px 0 2px;padding:14px 16px;border:1px solid rgba(255,255,255,.12);border-radius:14px;background:rgba(255,255,255,.04)}
+          .pprod-h{font-size:14px;font-weight:800;color:#fff;margin-bottom:4px}
+          .prow{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-top:1px solid rgba(255,255,255,.08);font-size:15px;color:#eaf1fb}
+          .prow:first-of-type{border-top:0}
+          .prow b{color:#f0c070;font-size:17px;font-weight:800}
+          .pprod-f{margin-top:8px;font-size:11.5px;color:#9fb2d0;line-height:1.45}
+          /* --- Niveles: tu límite crece (versión simple) --- */
+          .phow{margin:12px 0 2px;padding:14px 16px;border:1px solid rgba(232,163,61,.3);border-radius:14px;background:rgba(232,163,61,.06)}
+          .phow-h{font-size:14px;font-weight:800;color:#fff;margin-bottom:10px}
+          .pladder{display:flex;align-items:stretch;gap:8px;flex-wrap:wrap}
+          .prung{flex:1;min-width:120px;text-align:center;padding:10px 8px;border-radius:12px;font-weight:800;font-size:17px;line-height:1.1}
+          .prung small{display:block;font-weight:700;font-size:10px;margin-top:3px;letter-spacing:.04em}
+          .prung.start{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.18);color:#eaf1fb}
+          .prung.start small{color:#9fb2d0}
+          .prung.max{background:#e8a33d;color:#0b1d35}
+          .prung.max small{color:rgba(11,29,53,.72)}
+          .parrow{display:flex;flex-direction:column;align-items:center;justify-content:center;min-width:78px;font-size:11.5px;font-weight:800;color:#f0c070;text-align:center;line-height:1.2}
+          .phow-f{margin-top:10px;font-size:12.5px;color:#f0d9b0;line-height:1.5}
+          .phow-f b{color:#ffcf87}
+          /* --- Calculadora (colapsable, cerrada por defecto) --- */
+          details.pcalc-wrap{margin:16px 0 2px;border:1px solid rgba(255,255,255,.12);border-radius:14px;background:rgba(255,255,255,.04);overflow:hidden}
+          summary.pcalc-sum{list-style:none;cursor:pointer;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;font-weight:700;font-size:15px;color:#fff;user-select:none}
+          summary.pcalc-sum::-webkit-details-marker{display:none}
+          summary.pcalc-sum .pchev{color:#9fb2d0;font-size:13px;transition:transform .2s}
+          details[open] summary.pcalc-sum .pchev{transform:rotate(180deg)}
+          .pcbody{padding:0 16px 16px}
+          .phint{font-size:12.5px;color:#9fb2d0;margin:0 0 10px;line-height:1.45}
+          .pcbody .q{font-weight:600;font-size:13px;color:#cdd9ee;margin:14px 0 6px}
+          #pamt{padding:14px;font-size:24px;font-weight:800;text-align:center;letter-spacing:.3px;color:#f0c070!important}
+          .pterms{display:flex;gap:8px;margin-top:2px}
+          .pterm{flex:1;padding:12px 4px;border:2px solid rgba(255,255,255,.16);border-radius:12px;background:rgba(255,255,255,.04);
+            color:#eaf1fb;font-weight:700;font-size:15px;text-align:center;cursor:pointer;user-select:none;line-height:1.15;
+            transition:border-color .15s,background .15s,transform .05s}
+          .pterm small{display:block;font-weight:700;font-size:12px;color:#9fb2d0;margin-top:3px}
+          .pterm:hover{background:rgba(232,163,61,.12);border-color:rgba(232,163,61,.55)}
+          .pterm:active{transform:translateY(1px)}
+          .pterm.sel{background:#e8a33d;border-color:#e8a33d;color:#0b1d35}
+          .pterm.sel small{color:rgba(11,29,53,.72)}
+          .pterm:focus-visible{outline:2px solid #e8a33d;outline-offset:2px}
+          .pres{display:none;margin-top:14px;padding:14px 16px;border-radius:12px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12)}
+          .pres .r{display:flex;justify-content:space-between;align-items:baseline;font-size:14px;color:#cdd9ee;padding:3px 0}
+          .pres .r b{color:#eaf1fb;font-variant-numeric:tabular-nums}
+          .pres .tot{border-top:1px dashed rgba(255,255,255,.18);margin-top:8px;padding-top:10px}
+          .pres .tot span{font-size:15px;font-weight:700;color:#fff}
+          .pres .tot b{font-size:20px;font-weight:800;color:#f0c070}
+          .psched{margin-top:9px;font-size:12.5px;color:#9fb2d0;line-height:1.45}
+          .pmax{display:none;margin-top:12px;padding:10px 12px;border-radius:10px;background:rgba(232,163,61,.12);
+            border:1px solid rgba(232,163,61,.5);color:#f0c070;font-size:13px;font-weight:600}
+          .pmax b{color:#ffcf87}
+          .pfine{margin-top:11px;font-size:11.5px;color:#8ea2c2;line-height:1.45}
+        </style>
+        <h1>Pedí tu préstamo</h1>
+        <p class="sub">Rápido y simple. <b>Cuanto mejor pagás, más te prestamos.</b> 🚀</p>
+
+        <div class="pprod">
+          <div class="pprod-h">⏱️ Nuestros plazos</div>
+          <div class="prow"><span>15 días</span><b>25%</b></div>
+          <div class="prow"><span>30 días</span><b>50%</b></div>
+          <div class="prow"><span>Más de 30 días</span><b>100%</b></div>
+          <div class="pprod-f">El interés es sobre lo que pedís. Más de 30 días son 90 días, en 3 cuotas.</div>
+        </div>
+
+        <div class="phow">
+          <div class="phow-h">🚀 Tu límite crece pagando a tiempo</div>
+          <div class="pladder">
+            <span class="prung start">${fmtMoney_(settingMoney_('Límite inicial (préstamo nuevo)', 150000))}<small>EMPEZÁS</small></span>
+            <span class="parrow">+${fmtMoney_(settingMoney_('Incremento de graduación', 50000))}<br>por nivel ▸</span>
+            <span class="prung max">${fmtMoney_(loanMax_())}<small>TU TECHO</small></span>
+          </div>
+          <div class="phow-f">Pagá a tiempo y subís de nivel. Si te atrasás, <b>bajás</b> y se suma <b>mora</b>.</div>
+        </div>
+
+        <details class="pcalc-wrap">
+          <summary class="pcalc-sum"><span>🧮 Calculá cuánto pagarías</span><span class="pchev">▾</span></summary>
+          <div class="pcbody">
+            <div class="phint">Cálculo orientativo. Monto máximo: <b style="color:#f0c070">${fmtMoney_(loanMax_())}</b>.</div>
+            <div class="q">1) ¿Cuánto querés? 💰</div>
+            <input id="pamt" type="text" inputmode="numeric" autocomplete="off" placeholder="Ej: 100.000">
+            <div class="q">2) ¿En cuánto tiempo lo devolvés? 📅</div>
+            <div class="pterms">
+              <div class="pterm" role="button" tabindex="0" data-days="15">15 días<small>+ 25%</small></div>
+              <div class="pterm" role="button" tabindex="0" data-days="30">30 días<small>+ 50%</small></div>
+              <div class="pterm" role="button" tabindex="0" data-days="90">90 días<small>+ 100%</small></div>
+            </div>
+            <div class="pres" id="pres">
+              <div class="r"><span>Te damos</span><b id="pGiven">—</b></div>
+              <div class="r"><span id="pIntLbl">Interés</span><b id="pInt">—</b></div>
+              <div class="r tot"><span>👉 Devolvés</span><b id="pTot">—</b></div>
+              <div class="psched" id="pSched"></div>
+            </div>
+            <div class="pmax" id="pmax"></div>
+            <div class="pfine">💡 Cuanto más corto el plazo, menos interés pagás. El plazo final puede depender del monto; lo confirmamos al revisar tu solicitud.</div>
+          </div>
+        </details>
+
+        <p class="sub" style="margin-top:16px">Dejanos tus datos y <b>te decimos si calificás</b>. 👇</p>
         <form id="f" novalidate autocomplete="off">
           <label>Nombre y apellido <span class="req">*</span>
             <input name="name" id="name" autocomplete="off" placeholder="Nombre completo"></label>
@@ -2689,7 +2784,7 @@ function prospectoFormHtml_() {
           <div class="fieldErr" id="e_phone"></div>
           <input type="hidden" name="deviceMeta" id="deviceMeta" value="">
           ${honeypotTrapHtml_()}
-          <button id="btn" type="submit">Enviar mis datos</button>
+          <button id="btn" type="submit">Quiero que me evalúen</button>
         </form>
         <div id="msg"></div>
         ${instagramFollowHtml_(false)}
@@ -2757,11 +2852,11 @@ function prospectoFormHtml_() {
         $('formView').style.display='none';
         var sv=$('successView');
         sv.innerHTML='<div class="check">✓</div><h1>¡Gracias'+(r&&r.name?(', '+escHtml(r.name)):'')+'!</h1>'+
-          '<p class="sub">'+escHtml((r&&r.message)||'Guardamos tus datos. Apenas haya fondos disponibles te avisamos.')+'</p>'+IG_FOLLOW;
+          '<p class="sub">'+escHtml((r&&r.message)||'Recibimos tus datos. Te contactamos para decirte si calificás.')+'</p>'+IG_FOLLOW;
         sv.style.display='block';
         try{$('card').scrollIntoView({block:'start',behavior:'smooth'});}catch(_){}}
       function onFail(err){
-        btn.disabled=false;btn.textContent='Enviar mis datos';
+        btn.disabled=false;btn.textContent='Quiero que me evalúen';
         msg.className='err';msg.style.display='block';
         msg.textContent=(err&&err.message)?err.message:'No se pudo enviar. Recargá la página e intentá de nuevo.';}
       f.addEventListener('submit',function(e){
@@ -2779,6 +2874,41 @@ function prospectoFormHtml_() {
           new Promise(function(res){setTimeout(function(){res(DEV_INFO||{});},4000);}) // al vencer, manda lo ya recolectado (no {})
         ]).then(enviar);
       });
+      /* ===== Calculadora orientativa (15/30/90 días) — NO toca el envío del formulario ===== */
+      (function(){
+        var MAXAMT=${loanMax_()};
+        var amt=$('pamt'), res=$('pres'), pmax=$('pmax'), terms=document.querySelectorAll('.pterm'), days=0;
+        if(!amt)return;
+        function fmt(n){try{return n.toLocaleString('es-AR',{style:'currency',currency:'ARS'});}catch(e){return '$'+Math.round(n);}}
+        function groupNum(d){var o='',c=0;for(var i=d.length-1;i>=0;i--){o=d.charAt(i)+o;c++;if(c%3===0&&i>0)o='.'+o;}return o;}
+        function parseAmt(v){var d=String(v==null?'':v).replace(/[^0-9]/g,'');return d?parseInt(d,10):0;}
+        function rateFor(d){return d===15?0.25:d===30?0.5:1;}
+        function cuotasFor(d){return d===90?3:1;}
+        function addDays(base,n){var t=new Date(base.getTime());t.setDate(t.getDate()+n);return t;}
+        function fmtD(dt){return ('0'+dt.getDate()).slice(-2)+'/'+('0'+(dt.getMonth()+1)).slice(-2)+'/'+dt.getFullYear();}
+        function recalc(){
+          var a=parseAmt(amt.value);
+          if(a>MAXAMT){res.style.display='none';pmax.style.display='block';
+            pmax.innerHTML='El monto máximo por préstamo es <b>'+fmt(MAXAMT)+'</b>. Probá con un monto menor.';return;}
+          pmax.style.display='none';
+          if(!(a>0)||!days){res.style.display='none';return;}
+          var rate=rateFor(days),nc=cuotasFor(days),total=a*(1+rate),cuota=total/nc;
+          $('pGiven').textContent=fmt(a);
+          $('pIntLbl').textContent='Interés ('+Math.round(rate*100)+'%)';
+          $('pInt').textContent='+ '+fmt(a*rate);
+          $('pTot').textContent=fmt(total);
+          var t=new Date();t.setHours(0,0,0,0);
+          if(nc===1){$('pSched').innerHTML='En <b style="color:#eaf1fb">1 pago</b> — aprox. el '+fmtD(addDays(t,days))+' ('+days+' días desde la aprobación).';}
+          else{$('pSched').innerHTML='En <b style="color:#eaf1fb">'+nc+' cuotas de '+fmt(cuota)+'</b> — aprox. '+fmtD(addDays(t,30))+' · '+fmtD(addDays(t,60))+' · '+fmtD(addDays(t,90))+'.';}
+          res.style.display='block';
+        }
+        amt.addEventListener('input',function(){var d=amt.value.replace(/[^0-9]/g,'').replace(/^0+/,'');amt.value=d?groupNum(d):'';recalc();});
+        function pick(el){for(var i=0;i<terms.length;i++)terms[i].classList.remove('sel');el.classList.add('sel');days=parseInt(el.getAttribute('data-days'),10);recalc();}
+        for(var i=0;i<terms.length;i++){(function(el){
+          el.addEventListener('click',function(){pick(el);});
+          el.addEventListener('keydown',function(ev){var k=ev.keyCode||ev.which;if(ev.key===' '||ev.key==='Enter'||k===13||k===32){ev.preventDefault();pick(el);}});
+        })(terms[i]);}
+      })();
       /* ===== Splash: arranque seguro empresarial -> handoff al formulario (ES5) ===== */
       (function(){
         var splash=$('splash'), card=$('card');
@@ -2891,10 +3021,10 @@ function submitProspecto(form) {
           row_('Estado', 'NUEVO') +
           (waContact ? row_('WhatsApp', '<a href="' + waContact + '">📲 Escribir al prospecto</a>') : '') +
           '</table>' +
-          '<p>Revisalo en la hoja <b>Prospectos</b>. Cuando haya cupo, tildá <b>Aprobar y avisar 📲</b> para enviarle el enlace del formulario de solicitud, o <b>Rechazar?</b> para descartarlo.</p>');
+          '<p>Revisalo en la hoja <b>Prospectos</b>. Si califica, tildá <b>Aprobar y avisar 📲</b> para enviarle el enlace del formulario de solicitud, o <b>Rechazar?</b> para descartarlo.</p>');
       }
     } catch (e) { logError_('submitProspecto:lenderEmail', e); }
 
-    return { ok: true, name: name, message: '¡Gracias! Guardamos tus datos. Apenas haya fondos disponibles te avisamos.' };
+    return { ok: true, name: name, message: '¡Gracias! Recibimos tus datos. Te contactamos para decirte si calificás.' };
   });
 }
