@@ -345,6 +345,14 @@ function moraCapFrac_() {
 }
 /** Texto del tope de mora como % (p. ej. "100%"). */
 function moraCapPctText_() { return round2_(moraCapFrac_() * 100) + '%'; }
+/** Línea corta de concientización para WhatsApp: pagá a tiempo → cuidás tu nivel y pedís más la
+ *  próxima; atrasarte suma mora. Lleva los avisos de WhatsApp a paridad (de contenido) con los
+ *  correos. Reutiliza loanMax_ / lateFeePctText_ / moraCapPctText_ (misma fuente que el formulario). */
+function waTermsTip_() {
+  return '💡 Pagá a tiempo: cuidás tu nivel y en tu próximo préstamo podés pedir más (hasta ' +
+    fmtMoney_(loanMax_()) + '). Si te atrasás, se suma mora (' + lateFeePctText_() +
+    ' por día, tope ' + moraCapPctText_() + ').';
+}
 /** Tope de mora en PESOS = % configurado × CAPITAL del préstamo (no el total). El recargo por mora
  *  nunca supera este monto; con el tope al 100% equivale a "la mora no supera el capital prestado".
  *  Es ≤ el tope por contrato (% del total), por lo que cobrar hasta acá queda dentro de lo firmado. */
@@ -2026,6 +2034,9 @@ function deviceFingerprint_(dev) {
  * quien llama lo envuelve en try/catch para que un fallo NUNCA interrumpa la firma.
  */
 function logDeviceInfo_(loan, clientId, meta) {
+  // Delegar en el módulo Dispositivos (fila base + columnas anti-fraude ampliadas).
+  // Respaldo con la lógica base de abajo si Dispositivos.gs no está pegado en el proyecto.
+  if (typeof recordDispositivo_ === 'function') return recordDispositivo_(loan, clientId, meta);
   const sh = setupDispositivos_(getSS_());
   const dev = (meta && meta.device) || {};
   const loc = dev.loc || {};
@@ -2155,7 +2166,7 @@ function deviceCaptureJs_() {
           else dev.loc.source='zona horaria';
         }).catch(function(){});
         return withTimeout(done, 7000).then(function(){ return dev; }); // tope duro: nunca colgar el envío
-      }`;
+      }` + (typeof antifraudExtrasJs_ === 'function' ? antifraudExtrasJs_() : '');
 }
 
 /**
@@ -2865,6 +2876,7 @@ function rebuildRemindersSheet_(ss) {
         totalDue: loanTotal, totalPaid: totalPaid, owedMora: owedMora,
         toClear: round2_(base + owedMora),
         daysLate: Math.max(0, daysLate_(loanDue, effMoraAsOf2_(frozen, today))),
+        frozenSince: frozen.since,   // ❄ si está congelado → remWhatsappFormula_ manda el aviso de congelado
       };
     }
     // Enlace de WhatsApp con el recordatorio listo (desglose en vencidos; saldo simple en próximos).
@@ -2952,6 +2964,7 @@ function reminderRowRegenWa_(sh, row) {
       totalDue: s.totalDue, totalPaid: s.totalPaid, owedMora: s.owedMora,
       toClear: round2_(base + s.owedMora),
       daysLate: Math.max(0, daysLate_(loan.dueDate, effMoraAsOf2_(s.frz, today))),
+      frozenSince: s.frozen ? s.frz.since : null,   // ❄ aviso de congelado si corresponde
     };
   }
   const f = remWhatsappFormula_(loan, dueDate, out, daysUntil, fin);
@@ -2977,8 +2990,19 @@ function remWhatsappFormula_(loan, dueDate, amount, daysUntil, fin) {
   const fecha = (dueDate instanceof Date) ? Utilities.formatDate(dueDate, Session.getScriptTimeZone(), 'dd/MM/yyyy') : '';
   const monto = fmtMoney_(amount), empresa = companyName_(), nl = '\n';
   let msg;
-  if (daysUntil > 0)      msg = 'Hola ' + name + ' 👋 Te recordamos que tu préstamo vence el ' + fecha + '. Total a pagar: ' + monto + '. ¡Gracias! ' + empresa;
-  else if (daysUntil === 0) msg = 'Hola ' + name + ' 👋 Tu préstamo vence hoy (' + fecha + '). Total a pagar: ' + monto + '. ¡Gracias! ' + empresa;
+  if (daysUntil > 0)      msg = 'Hola ' + name + ' 👋 Te recordamos que tu préstamo vence el ' + fecha + '. Total a pagar: ' + monto + '.' + nl + waTermsTip_() + nl + '¡Gracias! ' + empresa;
+  else if (daysUntil === 0) msg = 'Hola ' + name + ' 👋 Tu préstamo vence hoy (' + fecha + '). Total a pagar: ' + monto + '.' + nl + waTermsTip_() + nl + '¡Gracias! ' + empresa;
+  else if (fin && fin.frozenSince) {
+    // ❄ CONGELADO: la mora está detenida → aviso de congelado (reemplaza el recordatorio de atraso).
+    const owedMora = Number(fin.owedMora) || 0;
+    const toClear = ('toClear' in fin) ? fin.toClear : round2_(Math.max(0, Number(loan.totalDue) || 0) + owedMora);
+    const base = Math.max(0, round2_(toClear - owedMora));
+    const fCong = (fin.frozenSince instanceof Date) ? Utilities.formatDate(fin.frozenSince, Session.getScriptTimeZone(), 'dd/MM/yyyy') : '';
+    msg = 'Hola ' + name + ' 👋 ❄ Tu préstamo está CONGELADO' + (fCong ? (' desde el ' + fCong) : '') + ': la mora NO sigue creciendo.' + nl +
+      'Saldo pendiente: ' + fmtMoney_(base) + (owedMora > 0.009 ? (' + mora congelada ' + fmtMoney_(owedMora)) : '') + '.' + nl +
+      'Total para cancelar: ' + fmtMoney_(toClear) + '.' + nl +
+      'Coordiná tu pago cuando puedas. 💛 ' + empresa;
+  }
   else {
     // Vencido: desglose capital / interés / total acordado / mora / total a pagar HOY (con mora).
     // Las cifras (mora acumulada, pagos parciales, congelamiento/plan) vienen YA calculadas en `fin`
@@ -3211,8 +3235,8 @@ function paymentWaMsg_(loan, s, payDate, amount) {
   let msg = 'Hola ' + name + ' 👋 Confirmamos tu pago de ' + fmtMoney_(amount) + (fPago ? (' del ' + fPago) : '') +
     ' en el préstamo ' + loan.loanId + '.';
   if (s.paidOff) {
-    msg += nl + '✅ ¡Tu préstamo quedó SALDADO! Gracias por tu cumplimiento.';
-    if (s.limit != null) msg += nl + 'Tu límite actual para un nuevo préstamo es ' + fmtMoney_(s.limit) + '.';
+    msg += nl + '✅ ¡Préstamo SALDADO! Gracias por cumplir — pagar a tiempo te hace crecer 🚀';
+    if (s.limit != null) msg += nl + '🎉 Tu límite para el próximo préstamo es ' + fmtMoney_(s.limit) + ' — podés llegar hasta ' + fmtMoney_(loanMax_()) + ' pagando siempre a tiempo.';
     const base = webAppBaseUrl_();
     if (base) msg += nl + 'Pedí tu próximo préstamo acá: ' + base;
   } else if (s.frozen) {

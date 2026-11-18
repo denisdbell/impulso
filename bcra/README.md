@@ -151,10 +151,29 @@ faltantes se bajan en segundo plano (se puede desactivar en *Options*); exportá
 cualquier ranking o una ficha a Markdown desde el menú. Abrí otra planilla con
 *File ▸ Open workbook…*.
 
-The app adds two **anti-fraud** sections to the sidebar: **🚩 Fraude**
-(cross-record signals, computed on load) and **🪪 DNI** (OCR verification, triggered
-by a button). Both also appear as cards in the **Persona** view and export to
-Markdown. The same reports are available from the command line.
+The app adds three **anti-fraud** sections to the sidebar: **🚩 Fraude**
+(cross-record signals, computed on load), **🪪 DNI** (OCR verification, triggered
+by a button), and **🖥 Devices** (device & network insights from the «Dispositivos»
+sheet — shared devices/IPs/GPS, automation, IP-vs-address and more). Fraude and DNI
+also appear as cards in the **Persona** view; all export to Markdown and are
+available from the command line.
+
+### Device insights (`analyze_devices.py`)
+
+Mines the **«Dispositivos»** sheet (one row per public submission — application,
+prospect, signing, freeze/plan) for device/network leads, **no OCR and no new
+dependencies**. Surfaces: **clusters** — the same device fingerprint / IP / GPS /
+persistent token used by several *distinct people* (spanning applicants, prospects
+AND loans; a person's own repeat submissions are folded, so only genuine
+cross-person sharing shows); **flagged records** — automation (webdriver),
+IP-vs-declared-address mismatch, bot-fast dwell, VPN/hosting IP, locale/clock
+inconsistency, pasted identity, EXIF photo mismatch; and a searchable **device log**.
+Every column is read by header name and is optional, so it works on the current
+schema and on an enriched one (new columns light up automatically). Risk is **High**
+(shared device/token, webdriver) · **Review** (shared IP/GPS, geo-mismatch, …) · **OK**.
+Indicative leads for manual review, not verdicts.
+
+    python3 bcra/analyze_devices.py --xlsx out/_impulso.xlsx
 
 > _Note: these two features (GUI text, labels and reports) are intentionally in
 > **English**, matching the rest of the bcra tooling (`report_gui.py`,

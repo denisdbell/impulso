@@ -39,6 +39,7 @@ import analyze_bcra
 import analyze_impulso
 import analyze_combined
 import analyze_fraud  # cross-record fraud signals (pure workbook read — no extra deps)
+import analyze_devices  # «Dispositivos» device/fraud insights (pure workbook read)
 import verify_dni     # DNI photo OCR vs Clientes (Tesseract; lazy-imported inside)
 import fetch_dni      # download the DNI photos from Drive (service account; lazy-imported)
 import fetch_impulso  # re-download the workbook from the live Google Sheet on reload
@@ -109,6 +110,7 @@ class DataService:
         self.clients = {}
         self.dni = []       # DNI OCR verification records (filled on demand by a scan)
         self.fraud = []     # cross-record fraud signals (filled on every load)
+        self.devices = {}   # «Dispositivos» device/fraud insights (filled on every load)
         self.loaded_at = None
 
     # ---- whole portfolio ----
@@ -151,6 +153,11 @@ class DataService:
             self.fraud = analyze_fraud.build_fraud(str(self.xlsx), dni_records=self.dni or None, today=today)
         except Exception:  # noqa: BLE001 — a fraud-scan hiccup must not break the dashboard
             self.fraud = []
+        progress("Device insights…")
+        try:
+            self.devices = analyze_devices.build_devices(str(self.xlsx), clients=self.clients, today=today)
+        except Exception:  # noqa: BLE001 — a device-scan hiccup must not break the dashboard
+            self.devices = {}
         self.loaded_at = datetime.datetime.now()
 
     def verify_dni_scan(self, fetch=True, progress=lambda m: None):
@@ -242,6 +249,46 @@ class DataService:
                 "signals": ", ".join(s["label"] for s in r["signals"]) or "—",
                 "decision": dmap.get(r["riesgo"], "NO RECORD"),
                 "token": r["cuil"] or r["dni"] or r["client_id"],
+            })
+        return out
+
+    # ---- devices («Dispositivos») ----
+    _DEV_DEC = {"High": "REJECT", "Review": "REVIEW", "OK": "OK"}
+
+    def device_summary(self):
+        return (self.devices or {}).get("summary", {})
+
+    def device_cluster_rows(self):
+        out = []
+        for c in (self.devices or {}).get("clusters", []):
+            token = next((p["token"] for p in c["people"] if p.get("token")), "")
+            out.append({
+                "riesgo": c["riesgo"], "kind": c["kind"], "key": c["key_short"],
+                "n": c["n"], "name": c["who"], "cuil": c["key_short"], "last": c["last"],
+                "decision": self._DEV_DEC.get(c["riesgo"], "NO RECORD"), "token": token,
+            })
+        return out
+
+    def device_flag_rows(self):
+        out = []
+        for f in (self.devices or {}).get("flags", []):
+            out.append({
+                "riesgo": f["riesgo"], "name": f["name"], "dni": f["dni"], "when": f["when"],
+                "signals": f["flagtext"], "cuil": f["dni"],
+                "decision": self._DEV_DEC.get(f["riesgo"], "NO RECORD"), "token": f["token"],
+            })
+        return out
+
+    def device_log_rows(self):
+        out = []
+        for e in (self.devices or {}).get("log", []):
+            osb = " · ".join(x for x in (e["os"], e["browser"]) if x)
+            out.append({
+                "when": e.get("when", ""), "name": e["name"] or "—", "dni": e["dni"] or "—",
+                "loan": e["loan"] or "—", "os": osb or "—", "ip": e["ip"] or "—",
+                "loc": (e["iploc"] or "—")[:60], "dwell": ("" if e["dwell"] is None else int(e["dwell"])),
+                "wd": "SÍ" if e["webdriver"] else "—", "cuil": e["dni"],
+                "decision": self._DEV_DEC.get(e["riesgo"], "OK"), "token": e["token"],
             })
         return out
 
@@ -637,7 +684,7 @@ class App(tk.Tk):
                            ("bcra", "🏦  BCRA bureau"), ("impulso", "💳  Impulso"),
                            ("loans_due", "📅  Loans by month"),
                            ("fraud", "🚩  Fraude"), ("dni", "🪪  DNI"),
-                           ("person", "🔍  Person")]:
+                           ("devices", "🖥  Devices"), ("person", "🔍  Person")]:
             b = tk.Label(self.side, text="   " + label, bg=SIDEBAR, fg="#e5e7eb",
                          font=self.fonts["nav"], anchor="w", padx=8, pady=10, cursor="hand2")
             b.pack(fill="x", padx=8, pady=1)
@@ -664,6 +711,7 @@ class App(tk.Tk):
         self._build_rankings()
         self._build_fraud()
         self._build_dni()
+        self._build_devices()
         self._build_person()
         self._build_loans_due()
         self.show_page("overview")
@@ -932,6 +980,58 @@ class App(tk.Tk):
              ("n", "#", 44, "center", True), ("signals", "Signals", 440, "w", False)],
             lambda: self.data.fraud_rows(), "fraud")
 
+    def _build_devices(self):
+        page = ttk.Frame(self.content, style="TFrame")
+        self.pages["devices"] = page
+        head = ttk.Frame(page, style="TFrame")
+        head.pack(fill="x")
+        ttk.Label(head, text="Devices & fraud", style="H1.TLabel").pack(side="left")
+        ttk.Button(head, text="Export .md", command=lambda: self._export_named("devices")).pack(side="right")
+        ttk.Label(page, text="Signals mined from the «Dispositivos» sheet — shared devices / IPs / GPS, "
+                             "automation, IP-vs-address and more. Indicative leads across applicants, "
+                             "prospects and loans. Double-click a row to open the person.",
+                  style="Muted.TLabel").pack(anchor="w", pady=(2, 10))
+        self.dev_cards = ttk.Frame(page, style="TFrame")
+        self.dev_cards.pack(fill="x")
+        nb = ttk.Notebook(page)
+        nb.pack(fill="both", expand=True, pady=(14, 0))
+        self.dev_panels = {}
+        specs = [
+            ("clusters", "Shared devices / IPs", [
+                ("riesgo", "Risk", 70, "center", False), ("kind", "Type", 80, "center", False),
+                ("key", "Key", 130, "w", False), ("n", "People", 64, "center", True),
+                ("name", "Who", 440, "w", False), ("last", "Last seen", 130, "center", False)]),
+            ("flags", "Flagged records", [
+                ("riesgo", "Risk", 70, "center", False), ("name", "Client", 210, "w", False),
+                ("dni", "DNI", 100, "center", False), ("when", "When", 130, "center", False),
+                ("signals", "Flags", 430, "w", False)]),
+            ("log", "Device log", [
+                ("when", "When", 130, "center", False), ("name", "Name", 170, "w", False),
+                ("dni", "DNI", 90, "center", False), ("loan", "Form", 90, "center", False),
+                ("os", "Device / browser", 190, "w", False), ("ip", "IP", 120, "w", False),
+                ("loc", "Location (IP)", 230, "w", False), ("dwell", "Dwell s", 60, "center", True),
+                ("wd", "WD", 44, "center", False)]),
+        ]
+        for key, label, cols in specs:
+            panel = RankingPanel(nb, cols, self.open_person, self.fonts)
+            nb.add(panel, text=label)
+            self.dev_panels[key] = panel
+
+    def _refresh_devices(self):
+        s = self.data.device_summary()
+        for w in self.dev_cards.winfo_children():
+            w.destroy()
+        hot = lambda n, dec="REVIEW": (DECISION_COLOR[dec] if n else INK)
+        self._card(self.dev_cards, "Records", str(s.get("records", 0)))
+        self._card(self.dev_cards, "Unique devices", str(s.get("unique_fp", 0)))
+        self._card(self.dev_cards, "Shared devices", str(s.get("shared_fp", 0)), hot(s.get("shared_fp"), "REJECT"))
+        self._card(self.dev_cards, "Shared IPs", str(s.get("shared_ip", 0)), hot(s.get("shared_ip")))
+        self._card(self.dev_cards, "Webdriver", str(s.get("webdriver", 0)), hot(s.get("webdriver"), "REJECT"))
+        self._card(self.dev_cards, "Geo-mismatch", str(s.get("geo_mismatch", 0)), hot(s.get("geo_mismatch")))
+        self.dev_panels["clusters"].set_rows(self.data.device_cluster_rows())
+        self.dev_panels["flags"].set_rows(self.data.device_flag_rows())
+        self.dev_panels["log"].set_rows(self.data.device_log_rows())
+
     def _build_dni(self):
         page = ttk.Frame(self.content, style="TFrame")
         self.pages["dni"] = page
@@ -1076,6 +1176,7 @@ class App(tk.Tk):
             panel.set_rows(panel._rows_fn())
         self._refresh_overview()
         self._refresh_loans_due()
+        self._refresh_devices()
         # person search choices
         choices = self.data.people_choices()
         self._cb_map = {label: token for label, token in choices}
@@ -1561,7 +1662,7 @@ class App(tk.Tk):
             self.reload()
 
     def _export_ranking(self):
-        self._export_named(self._active if self._active in ("combined", "bcra", "impulso", "fraud", "dni") else "combined")
+        self._export_named(self._active if self._active in ("combined", "bcra", "impulso", "fraud", "dni", "devices") else "combined")
 
     def _export_named(self, key):
         if not self.data.loaded_at:
@@ -1575,6 +1676,9 @@ class App(tk.Tk):
         elif key == "fraud":
             text = analyze_fraud.render_md(self.data.fraud)
             default = "_fraude.md"
+        elif key == "devices":
+            text = analyze_devices.render_md(self.data.devices)
+            default = "_dispositivos.md"
         elif key == "dni":
             text = verify_dni.render_md(self.data.dni)
             default = "_dni.md"
