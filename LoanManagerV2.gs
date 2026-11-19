@@ -2987,7 +2987,7 @@ function remWhatsappFormula_(loan, dueDate, amount, daysUntil, fin) {
   const num = waNumberAR_(loan && loan.phone);
   if (!num) return '';
   const name = String((loan && loan.name) || '').trim() || 'cliente';
-  const fecha = (dueDate instanceof Date) ? Utilities.formatDate(dueDate, Session.getScriptTimeZone(), 'dd/MM/yyyy') : '';
+  const fecha = fechaEnPalabras_(dueDate);
   const monto = fmtMoney_(amount), empresa = companyName_(), nl = '\n';
   let msg;
   if (daysUntil > 0)      msg = 'Hola ' + name + ' 👋 Te recordamos que tu préstamo vence el ' + fecha + '. Total a pagar: ' + monto + '.' + nl + waTermsTip_() + nl + '¡Gracias! ' + empresa;
@@ -2997,7 +2997,7 @@ function remWhatsappFormula_(loan, dueDate, amount, daysUntil, fin) {
     const owedMora = Number(fin.owedMora) || 0;
     const toClear = ('toClear' in fin) ? fin.toClear : round2_(Math.max(0, Number(loan.totalDue) || 0) + owedMora);
     const base = Math.max(0, round2_(toClear - owedMora));
-    const fCong = (fin.frozenSince instanceof Date) ? Utilities.formatDate(fin.frozenSince, Session.getScriptTimeZone(), 'dd/MM/yyyy') : '';
+    const fCong = fechaEnPalabras_(fin.frozenSince);
     msg = 'Hola ' + name + ' 👋 ❄ Tu préstamo está CONGELADO' + (fCong ? (' desde el ' + fCong) : '') + ': la mora NO sigue creciendo.' + nl +
       'Saldo pendiente: ' + fmtMoney_(base) + (owedMora > 0.009 ? (' + mora congelada ' + fmtMoney_(owedMora)) : '') + '.' + nl +
       'Total para cancelar: ' + fmtMoney_(toClear) + '.' + nl +
@@ -3054,6 +3054,18 @@ function planFormWaFormula_(loan) {
 
 /** Días de la semana en español (0=domingo) para los textos de fecha límite de cobranza. */
 const DIAS_SEMANA_ES = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+
+/** Fecha en palabras (es-AR) para los mensajes de WhatsApp: "26 de noviembre de 2026" en vez de
+ *  "26/11/2026" (evita la ambigüedad día/mes y se lee más natural). Reusa MESES_ES (en minúscula,
+ *  porque va dentro de la oración). Devuelve '' si no es una fecha. */
+function fechaEnPalabras_(d) {
+  if (!(d instanceof Date) || isNaN(d.getTime())) return '';
+  const tz = Session.getScriptTimeZone();
+  const dia = Number(Utilities.formatDate(d, tz, 'd'));
+  const mes = Number(Utilities.formatDate(d, tz, 'M')) - 1;
+  const anio = Utilities.formatDate(d, tz, 'yyyy');
+  return dia + ' de ' + MESES_ES[mes].toLowerCase() + ' de ' + anio;
+}
 
 /** Aviso formal de COBRANZA (mora tardía) para un préstamo vencido, según la plantilla acordada:
  *  encabezado con datos del préstamo y estado de pagos, DETALLE de la deuda, cláusula del tope del
@@ -3199,10 +3211,10 @@ function loanWaStatus_(loan) {
 
 /** Líneas de estado por cuota para el mensaje: ✅ pagada · 🔸 parcial · ⬜ pendiente (con vencimiento). */
 function cuotaLines_(cuotas) {
-  const tz = Session.getScriptTimeZone(), n = cuotas.length;
+  const n = cuotas.length;
   return cuotas.map(function (c) {
     const etq = 'Cuota ' + c.num + '/' + n;
-    const venc = c.due instanceof Date ? (' (vence ' + Utilities.formatDate(c.due, tz, 'dd/MM/yyyy') + ')') : '';
+    const venc = c.due instanceof Date ? (' (vence ' + fechaEnPalabras_(c.due) + ')') : '';
     if (c.saldo <= 0.009) return '✅ ' + etq + ': ' + fmtMoney_(c.monto) + ' PAGADA';
     if (c.pagado > 0.009) return '🔸 ' + etq + ': pagaste ' + fmtMoney_(c.pagado) + ' de ' + fmtMoney_(c.monto) + ', falta ' + fmtMoney_(c.saldo) + venc;
     return '⬜ ' + etq + ': ' + fmtMoney_(c.monto) + ' pendiente' + venc;
@@ -3228,10 +3240,10 @@ function cuotasHtmlTable_(cuotas) {
 /** Arma el TEXTO del aviso de pago según el estado del préstamo (saldado / debe / cuotas / congelado /
  *  en plan). s = loanWaStatus_(loan). Usa saltos de línea reales (encodeURIComponent → %0A en wa.me). */
 function paymentWaMsg_(loan, s, payDate, amount) {
-  const tz = Session.getScriptTimeZone(), nl = '\n', empresa = companyName_();
+  const nl = '\n', empresa = companyName_();
   const name = String((loan && loan.name) || '').trim() || 'cliente';
-  const fPago = (payDate instanceof Date) ? Utilities.formatDate(payDate, tz, 'dd/MM/yyyy') : String(payDate || '');
-  const fVenc = (loan && loan.dueDate instanceof Date) ? Utilities.formatDate(loan.dueDate, tz, 'dd/MM/yyyy') : '';
+  const fPago = (payDate instanceof Date) ? fechaEnPalabras_(payDate) : String(payDate || '');
+  const fVenc = fechaEnPalabras_(loan && loan.dueDate);
   let msg = 'Hola ' + name + ' 👋 Confirmamos tu pago de ' + fmtMoney_(amount) + (fPago ? (' del ' + fPago) : '') +
     ' en el préstamo ' + loan.loanId + '.';
   if (s.paidOff) {
@@ -3240,7 +3252,7 @@ function paymentWaMsg_(loan, s, payDate, amount) {
     const base = webAppBaseUrl_();
     if (base) msg += nl + 'Pedí tu próximo préstamo acá: ' + base;
   } else if (s.frozen) {
-    const fSince = s.frz.since instanceof Date ? Utilities.formatDate(s.frz.since, tz, 'dd/MM/yyyy') : '';
+    const fSince = fechaEnPalabras_(s.frz.since);
     msg += nl + '❄ Tu préstamo está CONGELADO' + (fSince ? (' desde el ' + fSince) : '') + ': la mora NO sigue creciendo.';
     msg += nl + 'Saldo pendiente: ' + fmtMoney_(s.baseOwed) + (s.mora > 0.009 ? (' + mora congelada ' + fmtMoney_(s.mora)) : '') + '.';
     msg += nl + 'Total para cancelar: ' + fmtMoney_(s.toClear) + '.';
@@ -5316,7 +5328,7 @@ function reminderHtml_(loan) {
   if (moraNow > 0 || late > 0) {
     const feeAccum = moraNow;               // recargo por cuota (correcto para pago único y en cuotas)
     const capped = feeAccum >= feeCap;
-    feeLine = '<p><b>Recargo por mora acumulado:</b> ' + fmtMoney_(feeAccum) +
+    feeLine = '<p><b>Recargo por mora acumulado:</b> <b style="color:#cc0000">' + fmtMoney_(feeAccum) + '</b>' +
       ' (' + lateFeePctText_() + ' por día sobre las cuotas vencidas' +
       (moraGrace > 0 ? ', tras ' + moraGrace + ' día(s) de gracia' : '') +
       (capped ? ', tope del ' + moraCapPctText_() + ' del capital alcanzado' : '') + ').' +
@@ -5470,21 +5482,21 @@ function receiptHtml_(loan, date, amount, out, s) {
   let html = '<p>Estimado/a ' + esc_(loan.name) + ',</p>' +
     '<p>Confirmamos su pago del préstamo <b>' + esc_(loan.loanId) + '</b>.</p>' +
     '<table style="border-collapse:collapse">' +
-    row_('Fecha de pago', fmtDate_(date)) +
-    row_('Monto pagado',  fmtMoney_(amount));
+    row_('Fecha de pago', '<b>' + fmtDate_(date) + '</b>') +
+    row_('Monto pagado',  '<b>' + fmtMoney_(amount) + '</b>');
   if (!cleared) {
     if (s && s.multiCuota && s.cuotas.length) {
       html += row_('Estado de cuotas', cuotasHtmlTable_(s.cuotas));
       if (s.late && s.mora > 0.009) {
         html += row_('Saldo pendiente',     '<b>' + fmtMoney_(s.baseOwed) + '</b>') +
-                row_('Mora por atraso',      fmtMoney_(s.mora)) +
+                row_('Mora por atraso',      '<b style="color:#cc0000">' + fmtMoney_(s.mora) + '</b>') +
                 row_('Total para cancelar', '<b>' + fmtMoney_(s.toClear) + '</b>');
       } else {
         html += row_('Saldo total pendiente', '<b>' + fmtMoney_(s.baseOwed) + '</b>');
       }
     } else if (s && s.frozen) {
       html += row_('Saldo pendiente', '<b>' + fmtMoney_(s.baseOwed) + '</b>');
-      if (s.mora > 0.009) html += row_('Mora congelada', fmtMoney_(s.mora));
+      if (s.mora > 0.009) html += row_('Mora congelada', '<b style="color:#cc0000">' + fmtMoney_(s.mora) + '</b>');
       html += row_('Total para cancelar', '<b>' + fmtMoney_(s.toClear) + '</b>');
     } else if (s && s.onPlan) {
       if (s.cuotas.length) html += row_('Cuotas del plan', cuotasHtmlTable_(s.cuotas));
@@ -5493,7 +5505,7 @@ function receiptHtml_(loan, date, amount, out, s) {
       const owed = s ? s.baseOwed : out;
       html += row_('Saldo pendiente', '<b>' + fmtMoney_(owed) + '</b>');
       if (s && s.late && s.mora > 0.009) {
-        html += row_('Mora por atraso',      fmtMoney_(s.mora)) +
+        html += row_('Mora por atraso',      '<b style="color:#cc0000">' + fmtMoney_(s.mora) + '</b>') +
                 row_('Total para cancelar', '<b>' + fmtMoney_(s.toClear) + '</b>');
       }
     }
@@ -6701,7 +6713,7 @@ function lookupBalance(loanId, dni) {
     const out = computeOutstanding_(loan.principal, rate, loan.loanDate, loanPayments_(loan.loanId), new Date(), new Date(9999, 0, 1), moraOff ? 0 : undefined, undefined, undefined, loanSchedule_(loan));
     return {
       ok: true, html: '<b>' + esc_(loan.name) + '</b><br>Préstamo: ' + esc_(loan.loanId) +
-        '<br>Total a pagar: ' + fmtMoney_(loan.totalDue) + '<br>Vencimiento: ' + fmtDate_(loan.dueDate) +
+        '<br>Total a pagar: <b>' + fmtMoney_(loan.totalDue) + '</b><br>Vencimiento: <b>' + fmtDate_(loan.dueDate) + '</b>' +
         '<br><b>Saldo pendiente: ' + fmtMoney_(out) + '</b>'
     };
   });
@@ -6818,9 +6830,9 @@ function freezeRequestFormHtml_(loanId, token) {
           LOANDATA=r;
           $('det').innerHTML='<table class="terms">'+
             '<tr><td class="k">Préstamo</td><td>'+esc(r.name)+' — '+esc(r.loanId)+'</td></tr>'+
-            '<tr><td class="k">Capital</td><td>'+money(r.principal)+'</td></tr>'+
-            '<tr><td class="k">Vencimiento</td><td>'+esc(r.dueDateFmt)+' ('+r.daysLate+' día(s) de atraso)</td></tr>'+
-            '<tr><td class="k">Recargo por mora</td><td>'+money(r.mora)+'</td></tr>'+
+            '<tr><td class="k">Capital</td><td><b>'+money(r.principal)+'</b></td></tr>'+
+            '<tr><td class="k">Vencimiento</td><td><b>'+esc(r.dueDateFmt)+'</b> ('+r.daysLate+' día(s) de atraso)</td></tr>'+
+            '<tr><td class="k">Recargo por mora</td><td><b style="color:#cc0000">'+money(r.mora)+'</b></td></tr>'+
             '<tr><td class="k">Saldo con mora (hoy)</td><td class="big">'+money(r.balance)+'</td></tr></table>';
           finishProgress(function(){ $('loadingView').classList.add('hide'); $('planview').classList.remove('hide'); recalc(); revalidate(); });
         }).withFailureHandler(function(e){ stopProgress(); $('loadingView').classList.add('hide'); $('gate').classList.remove('hide'); gerr((e&&e.message)||e); }).lookupFreezeLoan($('loan').value,$('dni').value,TOKEN);
