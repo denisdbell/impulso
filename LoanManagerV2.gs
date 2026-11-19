@@ -604,8 +604,16 @@ function applyFeatureUpdates() {
       'Instagram (usuario)',
       // Cobranza: número de contacto (WhatsApp/llamada) y texto del mensaje de WhatsApp.
       'Teléfono de cobranza (WhatsApp/llamada)', 'Mensaje de WhatsApp de cobranza',
+      // Auto-aprobación inmediata de clientes recurrentes sin deuda vigente (apagada por defecto).
+      'Auto-aprobar recurrentes (SÍ/NO)', 'Auto-aprobar: monto máximo',
+      'Auto-aprobar: exigir estado al día (SÍ/NO)', 'Auto-aprobar: exigir BCRA OK (SÍ/NO)',
     ]);
     done.push(nAdded ? (nAdded + ' ajuste(s) nuevo(s) en «Configuración»') : '«Configuración» ya estaba al día');
+    // Prefill de los interruptores de auto-aprobación (NO) si quedaron en blanco, para que sean visibles/editables.
+    try {
+      ['Auto-aprobar recurrentes (SÍ/NO)', 'Auto-aprobar: exigir estado al día (SÍ/NO)', 'Auto-aprobar: exigir BCRA OK (SÍ/NO)']
+        .forEach(function (k) { if (String(getSetting_(k) || '').trim() === '') setSetting_(k, 'NO'); });
+    } catch (e) { logError_('applyFeatureUpdates:autoAprobarPrefill', e); }
     // Prefill del tope de concentración (10%) si quedó en blanco, para que sea visible/editable.
     try {
       const stsh = ss.getSheetByName(CFG.SHEETS.SETTINGS);
@@ -933,6 +941,15 @@ function setupSettings_(ss) {
     ['Horizonte de protección del crecimiento (días)', '60'],
     ['Ventana para estimar el ritmo de colocación (días)', '60'],
     ['Aceptar solicitudes de préstamo (SÍ/NO)', 'SÍ'],
+    // Auto-aprobación INMEDIATA de clientes recurrentes SIN deuda vigente (apagada por defecto).
+    // Al enviarse la solicitud, si quien aplica YA es cliente y no tiene ningún préstamo vigente
+    // (todos PAGADO/SALDADO), se aprueba al instante por el MISMO camino que la casilla «Verificado?»
+    // y se le envía el contrato para firmar. Las reglas de negocio (límite por historial, fondos,
+    // bloqueo, fotos/referencias…) se siguen aplicando: lo que no cumpla queda para revisión manual.
+    ['Auto-aprobar recurrentes (SÍ/NO)', 'NO'],
+    ['Auto-aprobar: monto máximo', ''],                       // tope extra opcional; vacío/0 = solo el límite por historial
+    ['Auto-aprobar: exigir estado al día (SÍ/NO)', 'NO'],     // opcional: historial sin mora ni baja de nivel
+    ['Auto-aprobar: exigir BCRA OK (SÍ/NO)', 'NO'],           // opcional: BCRA con decisión OK (suma latencia)
     ['Capturar ubicación en la firma (SÍ/NO)', 'SÍ'],
     // Seguridad de los enlaces de autogestión (firma/saldo/congelar/plan): token por préstamo + anti-fuerza bruta.
     ['Vigencia del enlace (minutos)', '1440'],

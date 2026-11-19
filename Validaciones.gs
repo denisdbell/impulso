@@ -775,8 +775,23 @@ function submitIntakeSmart(form) {
         logDeviceInfo_({ loanId: '(solicitud)', clientId: clientId, dni: dnV.norm, name: name, email: emV.norm, direccion: address }, clientId, devMeta);
     } catch (e) { logError_('submitIntakeSmart:dispositivo', e); }
 
-    // Correo de confirmación al solicitante.
+    // ── Auto-aprobación INMEDIATA de clientes recurrentes SIN deuda vigente ──────────────
+    // Si corresponde (ver autoAprobarRecurrenteOk_), se aprueba AL INSTANTE por el MISMO camino que
+    // la casilla "Verificado?" (verifyApplicantV2_, SIN anular límites): la fila se MUEVE a
+    // "Prestatarios" y se le envía el contrato para firmar. Lo que no cumpla una regla de negocio se
+    // rebota solo a revisión MANUAL (verifyApplicantV2_ deja el motivo en "Resultado"). Un fallo acá
+    // NUNCA interrumpe la solicitud: el solicitante siempre recibe su acuse.
+    let autoAprobado = false, autoLoanId = '';
     try {
+      if (autoAprobarRecurrenteOk_(isReturning, clientId, dnV.norm, amount, warnings)) {
+        const resAuto = verifyApplicantV2_(nb, row, false);
+        if (resAuto && resAuto.ok) { autoAprobado = true; autoLoanId = String(resAuto.loanId || ''); }
+      }
+    } catch (e) { logError_('submitIntakeSmart:autoAprobar', e); }
+
+    // Correo de confirmación al solicitante (solo si NO se auto-aprobó: en ese caso ya recibió el
+    // contrato para firmar, que hace de acuse).
+    if (!autoAprobado) try {
       sendBrandedEmail_(emV.norm, 'Solicitud recibida',
         'Estimado/a ' + name + ', recibimos su solicitud de préstamo por ' + fmtMoney_(amount) + '. La revisaremos y nos pondremos en contacto.',
         '<p>Estimado/a ' + esc_(name) + ',</p><p>Recibimos su solicitud de préstamo por <b>' + fmtMoney_(amount) +
@@ -789,7 +804,7 @@ function submitIntakeSmart(form) {
       if (recipients.length) {
         const avail = fundStats_().net; // neto real: puede ser negativo (sobregiro)
         const warnHtml = warnings.length ? '<p style="color:#a50e0e"><b>⚠ Revisar:</b> ' + esc_(warnings.join(' ')) + '</p>' : '';
-        sendBrandedEmail_(recipients.join(','), 'Nueva solicitud de préstamo — ' + name,
+        sendBrandedEmail_(recipients.join(','), (autoAprobado ? '✓ Aprobado automáticamente — ' : 'Nueva solicitud de préstamo — ') + name,
           'Nueva solicitud de ' + name + ' por ' + fmtMoney_(amount) + ' a ' + termLabelDays_(term) + '.',
           '<p>Se recibió una <b>nueva solicitud de préstamo</b>' + (isReturning ? ' de un <b>cliente existente</b> (' + esc_(clientId) + ')' : ' de un <b>cliente nuevo</b>') + '.</p>' + warnHtml +
           '<table style="border-collapse:collapse">' +
@@ -814,7 +829,9 @@ function submitIntakeSmart(form) {
           row_('Foto del dorso del DNI', cuilUrl ? '<a href="' + cuilUrl + '">Ver documento</a>' : '— (cliente ya verificado)') +
           row_('Efectivo disponible para prestar', (avail < amount ? '<b style="color:#900">' : '<b>') + fmtMoney_(avail) + '</b>' + (avail < amount ? ' ⚠ fondo insuficiente' : '')) +
           '</table>' +
-          '<p>Revísela en la hoja <b>Nuevos Prestatarios</b> y tilde <b>Verificado?</b> para aprobar o <b>Rechazar?</b> para archivar.</p>');
+          (autoAprobado
+            ? '<p style="color:#137333"><b>✓ Aprobado automáticamente</b> (cliente recurrente sin deuda vigente). Préstamo <b>' + esc_(autoLoanId) + '</b> — se le envió el contrato para firmar. No requiere acción.</p>'
+            : '<p>Revísela en la hoja <b>Nuevos Prestatarios</b> y tilde <b>Verificado?</b> para aprobar o <b>Rechazar?</b> para archivar.</p>'));
       }
     } catch (e) { logError_('submitIntakeSmart:lenderEmail', e); }
 
@@ -824,9 +841,60 @@ function submitIntakeSmart(form) {
       term: term, termLabel: termLabelDays_(term), ratePct: termRatePctDays_(term),
       amountFmt: fmtMoney_(amount), interestFmt: fmtMoney_(interest), totalFmt: fmtMoney_(total),
       warnings: warnings,
-      message: '¡Solicitud recibida! Gracias, ' + name + '.',
+      autoAprobado: autoAprobado, loanId: autoLoanId,
+      message: autoAprobado
+        ? '¡Aprobado al instante, ' + name + '! Te enviamos el contrato a tu correo para que lo firmes.'
+        : '¡Solicitud recibida! Gracias, ' + name + '.',
     };
   });
+}
+
+/* ===================== AUTO-APROBACIÓN DE RECURRENTES (inmediata) ===================== */
+// Clientes que VUELVEN y NO tienen deuda vigente se aprueban AL INSTANTE desde submitIntakeSmart,
+// por el MISMO camino que la casilla "Verificado?" (verifyApplicantV2_, SIN anular límites). Apagada
+// por defecto (Configuración). Estas funciones solo DECIDEN si intentar; las reglas de negocio
+// absolutas las aplica verifyApplicantV2_ al aprobar y rebotan a revisión manual lo que no cumpla.
+
+/** Lee un ajuste SÍ/NO de "Configuración". Vacío o cualquier otro valor = NO (apagado). */
+function settingSiNo_(key) {
+  const v = String(getSetting_(key) || '').trim().toUpperCase();
+  return v === 'SÍ' || v === 'SI';
+}
+
+/** ¿Está activa la auto-aprobación inmediata de clientes recurrentes? (Configuración; apagada por defecto). */
+function autoAprobarActivo_() { return settingSiNo_('Auto-aprobar recurrentes (SÍ/NO)'); }
+
+/**
+ * ¿Corresponde INTENTAR la auto-aprobación inmediata de esta solicitud? Reglas (todas obligatorias):
+ *   • "Auto-aprobar recurrentes (SÍ/NO)" = SÍ (apagado por defecto),
+ *   • el cliente YA existe (vuelve) y tiene ID,
+ *   • NO tiene ningún préstamo vigente (clientLoanCount_ == 0 → todos PAGADO/SALDADO, sin activos ni vencidos),
+ *   • sin advertencias de contacto duplicado (si las hay → revisión manual).
+ * Palancas OPCIONALES (apagadas por defecto) que SOLO restringen:
+ *   • "Auto-aprobar: monto máximo" (> 0): el monto no puede superarlo,
+ *   • "Auto-aprobar: exigir estado al día (SÍ/NO)": historial sin mora vigente ni baja de nivel,
+ *   • "Auto-aprobar: exigir BCRA OK (SÍ/NO)": BCRA con decisión "OK" (ante error/duda → manual).
+ * Las reglas ABSOLUTAS (bloqueo V-33, límite por historial V-32, fondos V-09, concentración V-10,
+ * fotos/referencias/titular) NO se evalúan acá: las aplica verifyApplicantV2_ al aprobar. Solo lectura.
+ */
+function autoAprobarRecurrenteOk_(isReturning, clientId, dni, amount, warnings) {
+  if (!autoAprobarActivo_()) return false;
+  if (!isReturning || !clientId) return false;
+  if (warnings && warnings.length) return false;               // contacto duplicado → revisión manual
+  if (clientLoanCount_(clientId) !== 0) return false;          // tiene préstamo vigente
+  const topeExtra = settingMoney_('Auto-aprobar: monto máximo', 0);
+  if (topeExtra > 0 && Number(amount) > topeExtra) return false;
+  if (settingSiNo_('Auto-aprobar: exigir estado al día (SÍ/NO)')) {
+    const h = repaymentHistory_(dni);
+    if (h.everDefaulted || h.demotionSteps > 0) return false;
+  }
+  if (settingSiNo_('Auto-aprobar: exigir BCRA OK (SÍ/NO)')) {
+    try {
+      const r = consultarBcra_(dni);
+      if (!r || String(r.decision || '').trim().toUpperCase() !== 'OK') return false;
+    } catch (e) { logError_('autoAprobarRecurrenteOk_:bcra', e); return false; }  // ante duda → manual
+  }
+  return true;
 }
 
 /* ============ VALIDADORES DE APROBACIÓN / INTEGRIDAD ============ */
