@@ -95,17 +95,19 @@ const VALIDATION_RULES = [
   ['V-23', 'Desembolso', 'Firma', 'Advertir si se desembolsa con Estado de Firma = PENDIENTE.', 'El contrato no está firmado. ¿Desembolsar igual?', 'ADVIERTE', 'ALTA'],
   ['V-24', 'Envío', 'Correo', 'Antes de enviar, verificar Correo válido = SÍ. Si no, registrar en Errores y avisar.', 'No se puede enviar: el correo del cliente es inválido.', 'BLOQUEA', 'ALTA'],
   ['V-26', 'Formulario', 'Compromiso de pago', 'Acuse explícito obligatorio: devolución total al vencimiento, recargo por mora, acciones legales ante el impago y comunicación/plan de pago ante atrasos (condición para préstamos futuros).', 'Debe aceptar los compromisos de pago para enviar la solicitud.', 'BLOQUEA', 'ALTA'],
-  ['V-27', 'Formulario', 'Referencias', 'Dos referencias obligatorias (1.ª familiar no conviviente, 2.ª no familiar) con nombre (mín. 10 caracteres), vínculo y teléfono argentino válido.', 'Completá las dos referencias con nombre (mín. 10 caracteres) y un teléfono argentino válido.', 'BLOQUEA', 'MEDIA'],
-  ['V-28', 'Formulario', 'Referencias', 'El teléfono de una referencia no puede ser igual al del solicitante ni repetirse entre las dos referencias.', 'El teléfono de una referencia no puede ser el del solicitante ni repetirse entre referencias.', 'BLOQUEA', 'MEDIA'],
+  ['V-27', 'Formulario', 'Referencias', 'Tres referencias obligatorias (1.ª familiar no conviviente, 2.ª no familiar, 3.ª adicional de confianza) con nombre (mín. 10 caracteres), vínculo y teléfono argentino válido.', 'Completá las tres referencias con nombre (mín. 10 caracteres) y un teléfono argentino válido.', 'BLOQUEA', 'MEDIA'],
+  ['V-28', 'Formulario', 'Referencias', 'El teléfono de una referencia no puede ser igual al del solicitante ni repetirse entre las tres referencias.', 'El teléfono de una referencia no puede ser el del solicitante ni repetirse entre referencias.', 'BLOQUEA', 'MEDIA'],
   ['V-29', 'Formulario', 'Monto', 'El monto no puede superar el tope configurable (por defecto $500.000).', 'El monto máximo por préstamo es $500.000.', 'BLOQUEA', 'ALTA'],
   ['V-30', 'Formulario', 'Monto/Plazo', 'El plazo/tasa/cuotas se DERIVAN del monto: ≤$150.000→elige 15d/25% o 30d/50% (1 cuota); $150.000–$299.999→30d/50%/1; ≥$300.000→90d/100% en 3 a 6 cuotas mensuales (según el monto).', 'El plazo se calcula según el monto.', 'BLOQUEA', 'ALTA'],
   ['V-31', 'Alta', 'Cuotas', 'Préstamo grande (≥$300.000): cronograma de 3 a 6 cuotas mensuales según el monto (cada cuota ≈ ≤ la "Cuota manejable objetivo"), cada una = Total÷nº.', '—', 'AUTOMÁTICO', 'ALTA'],
   ['V-32', 'Aprobación', 'Monto', 'Escalera de graduación: el monto ≤ límite por historial de repago del prestatario. Para subir de nivel hay que haber DEVUELTO A TIEMPO un préstamo cuyo Capital sea ≥ el límite del nivel anterior (muchos préstamos chicos NO promueven). Los atrasos GRADÚAN la escalera: ≤3 días la congelan, 4–15 días bajan un nivel (recuperable con repagos a tiempo), >15 días o un préstamo VENCIDO sin pagar reinician a Inicial.', 'Supera el límite por historial del prestatario. Se amplía devolviendo a tiempo un préstamo de al menos el tope actual (no basta con montos chicos), o con «Anular límites».', 'BLOQUEA', 'ALTA'],
   ['V-33', 'Formulario y Aprobación', 'Cliente', 'Cliente BLOQUEADO (columna «Bloqueado» = SÍ en Clientes): se rechaza toda solicitud y aprobación que coincida por correo, DNI, CUIL o teléfono. ABSOLUTO: no se anula con «Anular límites». Desbloquear = vaciar la columna «Bloqueado».', 'No es posible procesar solicitudes para este cliente. Ante cualquier duda, comunicate con el prestamista.', 'BLOQUEA', 'ALTA'],
-  ['V-34', 'Aprobación', 'Referencias', 'Al menos UNA referencia debe estar VALIDADA (casilla «Ref 1 Validada?» o «Ref 2 Validada?» = SÍ) en «Nuevos Prestatarios» antes de aprobar/otorgar el préstamo. No se anula con «Anular límites».', 'Validá al menos una referencia antes de aprobar el préstamo.', 'BLOQUEA', 'ALTA'],
+  ['V-34', 'Aprobación', 'Referencias', 'Al menos UNA referencia debe estar VALIDADA (casilla «Ref 1/2/3 Validada?» = SÍ) en «Nuevos Prestatarios» antes de aprobar/otorgar el préstamo. No se anula con «Anular límites».', 'Validá al menos una referencia antes de aprobar el préstamo.', 'BLOQUEA', 'ALTA'],
   ['V-35', 'Formulario', 'Nombre', 'El nombre del solicitante y el de cada referencia deben tener al menos 10 caracteres.', 'El nombre debe tener al menos 10 caracteres.', 'BLOQUEA', 'MEDIA'],
   ['V-36', 'Formulario y Aprobación', 'Cuenta de terceros', 'Si el dinero se recibe en una cuenta que NO es del solicitante (métodos distintos de Efectivo), es OBLIGATORIO declarar al titular: nombre (mín. 10 caracteres), DNI válido, correo válido, teléfono válido y fotos del DNI (frente y dorso). El DNI, el correo y el teléfono del titular deben ser DISTINTOS de los del solicitante (el nombre puede coincidir). El titular será notificado y recibirá una copia del contrato. Antes de aprobar, el titular debe CONFIRMAR su conformidad (casilla «Titular acepta?» en Nuevos Prestatarios, pedible con «Avisar al titular 📲»): ABSOLUTO, no se anula con «Anular límites». Sin estos datos la solicitud NO se procesa.', 'Para enviar el dinero a la cuenta de un tercero, completá los datos del titular (nombre, DNI, correo, teléfono y fotos del DNI) y obtené su conformidad. Sin esta información el préstamo no puede procesarse.', 'BLOQUEA', 'ALTA'],
   ['V-37', 'Formulario', 'Cuenta destino', 'La cuenta destino (alias, CBU o CVU donde se recibe el dinero) es obligatoria para todo método que no sea Efectivo.', 'Ingresá la cuenta (alias, CBU o CVU) donde vas a recibir el dinero.', 'BLOQUEA', 'MEDIA'],
+  ['V-38', 'Formulario y Aprobación', 'Referencias', 'A lo sumo UNA de las tres referencias puede ser cliente existente de Impulso Crédito (coincidencia del teléfono normalizado contra «Clientes», en cualquier casillero). Dos o más referencias-cliente → se bloquea el envío y la aprobación. No se anula con «Anular límites».', 'Como máximo una de tus referencias puede ser cliente nuestro. Reemplazá alguna referencia por una persona que no sea cliente.', 'BLOQUEA', 'ALTA'],
+  ['V-39', 'Formulario y Aprobación', 'Anti-fraude', 'Máximo configurable («Máximo de personas por dispositivo/ubicación», por defecto 2) de personas DISTINTAS (por DNI) que comparten la misma IP (ventana en días), huella/token del dispositivo, ubicación GPS (radio en metros) o domicilio declarado normalizado. Bloquea el envío del formulario y la aprobación detallando cada señal excedida, su valor y la cantidad de personas; al solicitante no se le muestran los DNI de terceros. Se anula con «Anular límites» SOLO en la aprobación. Interruptor: «Límite por dispositivo/ubicación (SÍ/NO)».', 'Se superó el máximo de personas que pueden solicitar desde el mismo dispositivo o ubicación.', 'BLOQUEA', 'ALTA'],
 ];
 
 /* ==================== VALIDADORES DE CAMPO ==================== */
@@ -194,6 +196,14 @@ function normName_(v) {
     .toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
+/** V-39 — normaliza una dirección para comparación: minúsculas, sin acentos,
+ *  puntuación → espacio, espacios colapsados. '' si queda demasiado corta para comparar. */
+function normAddress_(v) {
+  const n = String(v == null ? '' : v).normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().replace(/[^a-z0-9ñ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return n.length >= 8 ? n : '';
+}
+
 /**
  * Lee todas las filas de Clientes como objetos {id,name,email,dni,phone,row}.
  * Memoizado por ejecución (_clientesRowsCache): en una solicitud se llama 5+
@@ -213,10 +223,11 @@ function clientesRows_() {
     cAddr = ccol_('Dirección', 13),
     cR1N = ccol_('Ref 1 Nombre', 0), cR1R = ccol_('Ref 1 Vínculo', 0), cR1P = ccol_('Ref 1 Teléfono', 0),
     cR2N = ccol_('Ref 2 Nombre', 0), cR2R = ccol_('Ref 2 Vínculo', 0), cR2P = ccol_('Ref 2 Teléfono', 0),
+    cR3N = ccol_('Ref 3 Nombre', 0), cR3R = ccol_('Ref 3 Vínculo', 0), cR3P = ccol_('Ref 3 Teléfono', 0),
     cBloq = ccol_('Bloqueado', 0), cBloqM = ccol_('Motivo de bloqueo', 0),
     cNoRec = ccol_('Recordatorios desactivados', 0);
   const width = Math.max(cId, cName, cEmail, cDni, cPhone, cDniN, cEmailN, cPhoneN, cCuil, cAddr,
-    cR1N, cR1R, cR1P, cR2N, cR2R, cR2P, cBloq, cBloqM, cNoRec);
+    cR1N, cR1R, cR1P, cR2N, cR2R, cR2P, cR3N, cR3R, cR3P, cBloq, cBloqM, cNoRec);
   const cell = (r, c) => c ? String(r[c - 1] || '').trim() : '';
   const data = sh.getRange(2, 1, sh.getLastRow() - 1, width).getValues();
   _clientesRowsCache = data.map((r, i) => ({
@@ -226,6 +237,7 @@ function clientesRows_() {
     address: cAddr ? String(r[cAddr - 1] || '').trim() : '',
     ref1Name: cell(r, cR1N), ref1Rel: cell(r, cR1R), ref1Phone: cell(r, cR1P),
     ref2Name: cell(r, cR2N), ref2Rel: cell(r, cR2R), ref2Phone: cell(r, cR2P),
+    ref3Name: cell(r, cR3N), ref3Rel: cell(r, cR3R), ref3Phone: cell(r, cR3P),
     dniNorm: normDni_(r[cDniN - 1] || r[cDni - 1]),
     emailNorm: normEmail_(r[cEmailN - 1] || r[cEmail - 1]),
     phoneNorm: String(r[cPhoneN - 1] || '').trim() || normPhoneE164_(r[cPhone - 1]),
@@ -259,6 +271,131 @@ function emailDupOtherDni_(emailNorm, dniNorm) {
 function phoneDupOtherDni_(phoneNorm, dniNorm) {
   if (!phoneNorm) return [];
   return clientesRows_().filter(o => o.phoneNorm === phoneNorm && o.dniNorm && o.dniNorm !== dniNorm);
+}
+/** V-38 — cliente EXISTENTE cuyo teléfono normalizado coincide con el de una referencia.
+ *  Excluye al propio solicitante (ese caso ya lo bloquea V-28). null si no hay coincidencia. */
+function refClienteMatch_(phoneN, selfDniNorm) {
+  if (!phoneN) return null;
+  return clientesRows_().filter(o => o.phoneNorm && o.phoneNorm === phoneN && o.dniNorm !== selfDniNorm)[0] || null;
+}
+
+/* ============ LÍMITE POR DISPOSITIVO/UBICACIÓN (V-39) ============
+ * Máximo configurable de personas DISTINTAS (por DNI) que comparten la misma IP,
+ * huella/token del dispositivo, ubicación GPS o domicilio declarado. Señales técnicas:
+ * hoja "Dispositivos" (capa de lectura en Dispositivos.gs); domicilio: hoja "Clientes".
+ * Corre en el formulario (bloquea el envío) y al aprobar (se anula con «Anular límites»). */
+
+/** Ajustes del límite V-39 desde "Configuración". */
+function v39Config_() {
+  return {
+    on: settingSiNo_('Límite por dispositivo/ubicación (SÍ/NO)'),
+    max: Math.max(1, Math.round(settingMoney_('Máximo de personas por dispositivo/ubicación', 2))),
+    radioM: settingMoney_('Radio GPS de coincidencia (metros)', 50),
+    ipDias: (typeof settingDays_ === 'function') ? settingDays_('Ventana de coincidencia de IP (días)', 30) : 30,
+  };
+}
+
+/** Etiqueta "DNI 30111222 (C-0012)" para la persona identificada por dniNorm (o ID de cliente). */
+function v39Quien_(k) {
+  k = String(k || '').trim();
+  if (/^\d{7,8}$/.test(k)) {
+    const c = clienteByDni_(k);
+    return 'DNI ' + k + (c && c.id ? ' (' + c.id + ')' : '');
+  }
+  return k;
+}
+
+/**
+ * V-39 — evalúa TODAS las señales del solicitante contra el histórico.
+ *   sig = { dniNorm, clientId, ip, deviceFp, token, gps:'lat,long', address }
+ * Devuelve { ok, exceeded:[{senal, etiqueta, valor, otros:[dni…], max}]|null, alertas:[texto…] }.
+ *   exceeded = señales que SUPERAN el máximo (todas, no solo la primera);
+ *   alertas  = coincidencias que NO lo superan (p. ej. 2 convivientes con el máximo en 2),
+ *              para la columna informativa «Alerta ubicación/dispositivo».
+ */
+function checkUbicacionV39_(sig) {
+  const cfg = v39Config_();
+  if (!cfg.on) return { ok: true, exceeded: null, alertas: [] };
+  sig = sig || {};
+  const senales = [];
+  // Señales técnicas registradas en "Dispositivos" (IP / huella / token / GPS).
+  if (typeof contarCoincidenciasSenales_ === 'function') {
+    const gps = (typeof parseGps_ === 'function') ? parseGps_(sig.gps) : null;
+    const m = contarCoincidenciasSenales_({
+      dniNorm: String(sig.dniNorm || ''), clientId: String(sig.clientId || ''),
+      ip: String(sig.ip || '').trim(), deviceFp: String(sig.deviceFp || '').trim(),
+      token: String(sig.token || '').trim(), gps: gps,
+    }, cfg);
+    senales.push({ senal: 'ip', etiqueta: 'la misma IP', valor: String(sig.ip || '').trim(), otros: m.ip });
+    senales.push({ senal: 'fp', etiqueta: 'el mismo dispositivo (huella)', valor: String(sig.deviceFp || '').trim(), otros: m.fp });
+    senales.push({ senal: 'token', etiqueta: 'el mismo dispositivo (token)', valor: String(sig.token || '').trim(), otros: m.token });
+    senales.push({ senal: 'gps', etiqueta: 'la misma ubicación GPS', valor: String(sig.gps || '').trim(), otros: m.gps });
+  }
+  // Domicilio declarado: comparación normalizada contra "Clientes" (excluye al propio solicitante).
+  const addrN = normAddress_(sig.address);
+  if (addrN) {
+    const otros = new Set();
+    clientesRows_().forEach(o => {
+      if (!o.dniNorm || (sig.dniNorm && o.dniNorm === sig.dniNorm)) return;
+      if (normAddress_(o.address) === addrN) otros.add(o.dniNorm);
+    });
+    senales.push({ senal: 'addr', etiqueta: 'el mismo domicilio declarado', valor: String(sig.address || '').trim(), otros: otros });
+  }
+  const exceeded = [], alertas = [];
+  senales.forEach(s => {
+    if (!s.valor || !s.otros || !s.otros.size) return;
+    const otrosArr = Array.from(s.otros);
+    if (1 + otrosArr.length > cfg.max) {
+      exceeded.push({ senal: s.senal, etiqueta: s.etiqueta, valor: s.valor, otros: otrosArr, max: cfg.max });
+    } else {
+      alertas.push('Comparte ' + s.etiqueta + ' con ' + otrosArr.length + ' persona(s): ' + otrosArr.map(v39Quien_).join(', '));
+    }
+  });
+  return { ok: !exceeded.length, exceeded: exceeded.length ? exceeded : null, alertas: alertas };
+}
+
+/** V-39 — mensaje DETALLADO para el solicitante: cada señal excedida con su valor, la
+ *  cantidad de personas y el máximo. NO incluye los DNI de terceros (Ley 25.326). */
+function v39MensajeSolicitante_(exceeded) {
+  const lineas = (exceeded || []).map(e =>
+    '• Compartís ' + e.etiqueta + (e.valor ? ' (' + e.valor + ')' : '') + ' con ' + e.otros.length +
+    ' persona(s) que ya solicitaron: con tu solicitud serían ' + (e.otros.length + 1) +
+    ' y el máximo permitido es ' + e.max + '.');
+  return 'No podemos procesar tu solicitud: se superó el máximo de personas que pueden solicitar desde el mismo dispositivo o ubicación.\n' +
+    lineas.join('\n') + '\nSi creés que es un error, comunicate con el prestamista.';
+}
+
+/** V-39 — mensaje para el PRESTAMISTA: igual de detallado pero CON las personas por señal. */
+function v39MensajePrestamista_(exceeded) {
+  const det = (exceeded || []).map(e =>
+    'comparte ' + e.etiqueta + (e.valor ? ' «' + e.valor + '»' : '') + ' con ' + e.otros.length +
+    ' persona(s): ' + e.otros.map(v39Quien_).join(', ') + ' — máximo ' + e.max);
+  return 'V-39 — ' + det.join(' · ') + '. Usá «Anular límites» para aprobar igual.';
+}
+
+/**
+ * V-39 al APROBAR: recupera las señales del solicitante desde su ÚLTIMA fila de
+ * "Dispositivos" (si el navegador bloqueó la captura puede no existir: queda solo el
+ * domicilio) y evalúa el límite. Devuelve { ok, msg } con el detalle para el prestamista.
+ */
+function v39ForApproval_(dniNorm, clientId, address) {
+  const cfg = v39Config_();
+  if (!cfg.on) return { ok: true, msg: '' };
+  let own = null;
+  if (typeof dispositivosSignalRows_ === 'function') {
+    const rows = dispositivosSignalRows_();
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const r = rows[i];
+      if ((dniNorm && r.dniNorm === dniNorm) || (clientId && r.clientId === clientId)) { own = r; break; }
+    }
+  }
+  const res = checkUbicacionV39_({
+    dniNorm: dniNorm, clientId: clientId,
+    ip: own ? own.ip : '', deviceFp: own ? own.fp : '', token: own ? own.token : '',
+    gps: (own && own.gps) ? (own.gps.lat + ',' + own.gps.lon) : '',
+    address: address,
+  });
+  return { ok: res.ok, msg: res.ok ? '' : v39MensajePrestamista_(res.exceeded) };
 }
 
 /* ==================== BLOQUEO DE CLIENTES (V-33) ==================== */
@@ -477,7 +614,7 @@ function lookupClienteForIntake(email, dni) {
       ok: true,
       dniValid: dnV.ok, dniMsg: dnV.msg,
       emailValid: emV.ok, emailMsg: emV.msg,
-      found: false, client: null, conflict: false, conflictField: '', hasRefs: false,
+      found: false, client: null, conflict: false, conflictField: '', hasRefs: false, hasRef3: false,
     };
     if (!dnV.ok || !emV.ok) return res;   // se necesitan correo y DNI válidos
     // V-33 — cliente bloqueado: se corta en el paso 1 (mensaje genérico, sin detalles).
@@ -516,9 +653,12 @@ function lookupClienteForIntake(email, dni) {
       res.found = true;                   // mismo cliente (DNI + correo)
       res.client = { clientId: cByDni.id, name: cByDni.name, phone: cByDni.phone, email: cByDni.email, cuil: cByDni.cuil || '', address: cByDni.address || '',
         ref1Name: cByDni.ref1Name || '', ref1Rel: cByDni.ref1Rel || '', ref1Phone: cByDni.ref1Phone || '',
-        ref2Name: cByDni.ref2Name || '', ref2Rel: cByDni.ref2Rel || '', ref2Phone: cByDni.ref2Phone || '' };
-      // ¿Ya tiene DOS referencias completas registradas? → se reutilizan (no re-pedir).
+        ref2Name: cByDni.ref2Name || '', ref2Rel: cByDni.ref2Rel || '', ref2Phone: cByDni.ref2Phone || '',
+        ref3Name: cByDni.ref3Name || '', ref3Rel: cByDni.ref3Rel || '', ref3Phone: cByDni.ref3Phone || '' };
+      // ¿Ya tiene las dos primeras referencias completas? → se precargan (editable).
       res.hasRefs = !!(cByDni.ref1Name && cByDni.ref1Phone && cByDni.ref2Name && cByDni.ref2Phone);
+      // ¿Tiene también la tercera? Si no, el formulario la pide antes de continuar.
+      res.hasRef3 = !!(cByDni.ref3Name && cByDni.ref3Phone);
       res.activeLoans = clientLoanCount_(cByDni.id);
       return res;
     }
@@ -645,22 +785,27 @@ function submitIntakeSmart(form) {
     if (termRateDays_(term) == null) throw new Error('Plazo inválido (derivado del monto).'); // V-30
     if (!notes) throw new Error('Las notas / motivo son obligatorias.');
 
-    // V-27 — dos referencias. Cliente que vuelve con referencias completas registradas → se
-    // REUTILIZAN (no se re-piden). Cliente nuevo (o existente sin referencias) → obligatorias.
+    // V-27 — tres referencias. Cliente que vuelve con las TRES referencias completas
+    // registradas → se REUTILIZAN (no se re-piden). Cliente nuevo (o existente con
+    // referencias incompletas, p. ej. sin la 3.ª) → obligatorias.
     const reuseRefs = isReturning && String(form.reuseRefs || '') === '1' && existing &&
       String(existing.ref1Name || '').trim() && String(existing.ref1Phone || '').trim() &&
-      String(existing.ref2Name || '').trim() && String(existing.ref2Phone || '').trim();
-    let ref1Name, ref1Rel, ref1PhoneN, ref2Name, ref2Rel, ref2PhoneN;
+      String(existing.ref2Name || '').trim() && String(existing.ref2Phone || '').trim() &&
+      String(existing.ref3Name || '').trim() && String(existing.ref3Phone || '').trim();
+    let ref1Name, ref1Rel, ref1PhoneN, ref2Name, ref2Rel, ref2PhoneN, ref3Name, ref3Rel, ref3PhoneN;
     if (reuseRefs) {
       ref1Name = String(existing.ref1Name).trim(); ref1Rel = String(existing.ref1Rel || '').trim(); ref1PhoneN = String(existing.ref1Phone).trim();
       ref2Name = String(existing.ref2Name).trim(); ref2Rel = String(existing.ref2Rel || '').trim(); ref2PhoneN = String(existing.ref2Phone).trim();
+      ref3Name = String(existing.ref3Name).trim(); ref3Rel = String(existing.ref3Rel || '').trim(); ref3PhoneN = String(existing.ref3Phone).trim();
     } else {
       ref1Name = String(form.ref1Name || '').trim(); ref1Rel = String(form.ref1Rel || '').trim();
       ref2Name = String(form.ref2Name || '').trim(); ref2Rel = String(form.ref2Rel || '').trim();
-      const ref1Ph = vPhone_(form.ref1Phone), ref2Ph = vPhone_(form.ref2Phone);
+      ref3Name = String(form.ref3Name || '').trim(); ref3Rel = String(form.ref3Rel || '').trim();
+      const ref1Ph = vPhone_(form.ref1Phone), ref2Ph = vPhone_(form.ref2Phone), ref3Ph = vPhone_(form.ref3Phone);
       if (!ref1Name || ref1Name.length < 10 || !ref1Rel || !ref1Ph.ok) throw new Error('Completá la Referencia 1: nombre (mín. 10 caracteres), vínculo y un teléfono argentino válido.'); // V-27 / V-35
       if (!ref2Name || ref2Name.length < 10 || !ref2Rel || !ref2Ph.ok) throw new Error('Completá la Referencia 2: nombre (mín. 10 caracteres), vínculo y un teléfono argentino válido.'); // V-27 / V-35
-      ref1PhoneN = ref1Ph.norm; ref2PhoneN = ref2Ph.norm;
+      if (!ref3Name || ref3Name.length < 10 || !ref3Rel || !ref3Ph.ok) throw new Error('Completá la Referencia 3: nombre (mín. 10 caracteres), vínculo y un teléfono argentino válido.'); // V-27 / V-35
+      ref1PhoneN = ref1Ph.norm; ref2PhoneN = ref2Ph.norm; ref3PhoneN = ref3Ph.norm;
     }
 
     // V-26 — compromiso de pago: acuse explícito obligatorio (devolución, mora, consecuencias legales
@@ -678,12 +823,46 @@ function submitIntakeSmart(form) {
     if (emailDup.length) warnings.push('Este correo ya figura para otro solicitante (' + emailDup.map(x => x.id).join(', ') + ').');
     const phoneDup = phone ? phoneDupOtherDni_(phone, dnV.norm) : [];
     if (phoneDup.length) warnings.push('Este teléfono ya figura para otro solicitante (' + phoneDup.map(x => x.id).join(', ') + ').');
-    // V-28 (BLOQUEA) — el teléfono de una referencia no puede ser el del solicitante ni repetirse entre referencias.
-    if (!reuseRefs) {
-      if (phone && (ref1PhoneN === phone || ref2PhoneN === phone))
+    // V-28 (BLOQUEA) — el teléfono de una referencia no puede ser el del solicitante ni repetirse
+    // entre las tres referencias. Se compara contra el E.164 del solicitante (el teléfono de un
+    // cliente que vuelve llega crudo desde "Clientes") y corre SIEMPRE, aun con referencias en
+    // archivo (datos previos a la regla).
+    {
+      const appPhoneN = normPhoneE164_(phone) || String(phone || '').trim();
+      if (appPhoneN && (ref1PhoneN === appPhoneN || ref2PhoneN === appPhoneN || ref3PhoneN === appPhoneN))
         throw new Error('El teléfono de una referencia no puede ser el mismo que el del solicitante.');
-      if (ref1PhoneN && ref1PhoneN === ref2PhoneN)
-        throw new Error('Las dos referencias no pueden tener el mismo teléfono.');
+      if ((ref1PhoneN && (ref1PhoneN === ref2PhoneN || ref1PhoneN === ref3PhoneN)) ||
+          (ref2PhoneN && ref2PhoneN === ref3PhoneN))
+        throw new Error('Las referencias no pueden repetir el mismo teléfono.');
+    }
+    // V-38 (BLOQUEA) — a lo sumo UNA de las tres referencias puede ser cliente existente.
+    // No se revela cuál ni quién (evita enumerar clientes); el detalle va al prestamista.
+    const refCli = [refClienteMatch_(ref1PhoneN, dnV.norm), refClienteMatch_(ref2PhoneN, dnV.norm), refClienteMatch_(ref3PhoneN, dnV.norm)];
+    if (refCli.filter(Boolean).length > 1)
+      throw new Error('Como máximo una de tus referencias puede ser cliente nuestro. Reemplazá alguna referencia por una persona que no sea cliente.');
+
+    // V-39 (BLOQUEA) — límite de personas distintas por IP/dispositivo/GPS/domicilio. Corre ANTES
+    // de cualquier escritura (alta de cliente, fotos, fila en "Nuevos Prestatarios"). Un error
+    // interno del control nunca bloquea la solicitud (fail-open; la aprobación re-chequea).
+    const devFp = (typeof deviceFingerprint_ === 'function') ? deviceFingerprint_((meta && meta.device) || {}) : '';
+    let v39 = null;
+    try {
+      const dloc = (meta && meta.device && meta.device.loc) || {};
+      v39 = checkUbicacionV39_({
+        dniNorm: dnV.norm, clientId: existing ? existing.id : '',
+        ip: String((meta && meta.ip) || ''), deviceFp: devFp,
+        token: String((meta && meta.device && meta.device.token) || ''),
+        gps: String(dloc.gps || ''), address: address,
+      });
+    } catch (e) { logError_('submitIntakeSmart:v39', e); }
+    if (v39 && !v39.ok) {
+      // Rastro forense del intento bloqueado (sin crear cliente ni fila de solicitud).
+      try {
+        const devMetaBlq = Object.assign({}, meta, { deviceFp: devFp });
+        if (typeof logDeviceInfo_ === 'function')
+          logDeviceInfo_({ loanId: '(bloqueada V-39)', clientId: existing ? existing.id : '', dni: dnV.norm, name: name, email: emV.norm, direccion: address }, existing ? existing.id : '', devMetaBlq);
+      } catch (e) { logError_('submitIntakeSmart:v39Log', e); }
+      throw new Error(v39MensajeSolicitante_(v39.exceeded));
     }
 
     const rate = termRateDays_(term), interest = round2_(amount * rate), total = round2_(amount * (1 + rate));
@@ -734,8 +913,11 @@ function submitIntakeSmart(form) {
         'Dirección': safeCell_(address),
         'Ref 1 Nombre': safeCell_(ref1Name), 'Ref 1 Vínculo': safeCell_(ref1Rel), 'Ref 1 Teléfono': ref1PhoneN,
         'Ref 2 Nombre': safeCell_(ref2Name), 'Ref 2 Vínculo': safeCell_(ref2Rel), 'Ref 2 Teléfono': ref2PhoneN,
+        'Ref 3 Nombre': safeCell_(ref3Name), 'Ref 3 Vínculo': safeCell_(ref3Rel), 'Ref 3 Teléfono': ref3PhoneN,
         'Compromiso aceptado': new Date(),
         '¿Cuenta propia?': isThirdParty ? 'No (tercero)' : 'Sí',
+        // V-39: coincidencias que NO superan el máximo (informativas para el prestamista).
+        'Alerta ubicación/dispositivo': (v39 && v39.alertas && v39.alertas.length) ? safeCell_('⚠ ' + v39.alertas.join(' · ')) : '',
       };
       if (isThirdParty) {
         nbFields['Titular de la cuenta'] = safeCell_(holderName);
@@ -755,12 +937,14 @@ function submitIntakeSmart(form) {
       const refWaH = headerMap_(nb);
       if (refWaH['Avisar Ref 1 📲']) { const fr1 = refWaFormula_(ref1Name, ref1PhoneN, ref1Rel, name); if (fr1) nb.getRange(row, refWaH['Avisar Ref 1 📲']).setFormula(fr1); }
       if (refWaH['Avisar Ref 2 📲']) { const fr2 = refWaFormula_(ref2Name, ref2PhoneN, ref2Rel, name); if (fr2) nb.getRange(row, refWaH['Avisar Ref 2 📲']).setFormula(fr2); }
+      if (refWaH['Avisar Ref 3 📲']) { const fr3 = refWaFormula_(ref3Name, ref3PhoneN, ref3Rel, name); if (fr3) nb.getRange(row, refWaH['Avisar Ref 3 📲']).setFormula(fr3); }
     } catch (e) { logError_('submitIntakeSmart:nbFields', e); }
     // PERF: campos extra del cliente (forma de pago + referencias) en UN solo setValues.
     try {
       const cliFields = {
         'Ref 1 Nombre': safeCell_(ref1Name), 'Ref 1 Vínculo': safeCell_(ref1Rel), 'Ref 1 Teléfono': ref1PhoneN,
         'Ref 2 Nombre': safeCell_(ref2Name), 'Ref 2 Vínculo': safeCell_(ref2Rel), 'Ref 2 Teléfono': ref2PhoneN,
+        'Ref 3 Nombre': safeCell_(ref3Name), 'Ref 3 Vínculo': safeCell_(ref3Rel), 'Ref 3 Teléfono': ref3PhoneN,
       };
       cliFields[CLIENTE_PAY_HEADER] = safeCell_(payMethodFull);
       setClienteFieldsByHeader_(clientId, cliFields);
@@ -770,7 +954,7 @@ function submitIntakeSmart(form) {
     // y ubicación que se captura en la firma. Un fallo acá NUNCA interrumpe la solicitud.
     try {
       const devMeta = meta || {};
-      devMeta.deviceFp = (typeof deviceFingerprint_ === 'function') ? deviceFingerprint_(devMeta.device || {}) : '';
+      devMeta.deviceFp = devFp; // ya calculada para el control V-39
       if (typeof logDeviceInfo_ === 'function')
         logDeviceInfo_({ loanId: '(solicitud)', clientId: clientId, dni: dnV.norm, name: name, email: emV.norm, direccion: address }, clientId, devMeta);
     } catch (e) { logError_('submitIntakeSmart:dispositivo', e); }
@@ -822,8 +1006,10 @@ function submitIntakeSmart(form) {
               row_('Avisar al titular (WhatsApp)', holderWaUrl ? '<a href="' + holderWaUrl + '">📲 Pedir conformidad al titular</a>' : '— (sin teléfono válido para WhatsApp)') +
               row_('⚠ Acción requerida', 'Antes de aprobar: pedile la conformidad al titular (botón de arriba o «Avisar al titular 📲» en la fila) y tildá «Titular acepta?».')
             : (needsAccount ? row_('Cuenta de destino', (payDetails ? '<b>' + esc_(payDetails) + '</b> — ' : '') + 'a nombre del solicitante') : '')) +
-          row_('Referencia 1 (familiar)', esc_(ref1Name + ' · ' + ref1Rel + ' · ' + ref1PhoneN) + (reuseRefs ? ' <i>(en archivo)</i>' : '')) +
-          row_('Referencia 2 (no familiar)', esc_(ref2Name + ' · ' + ref2Rel + ' · ' + ref2PhoneN) + (reuseRefs ? ' <i>(en archivo)</i>' : '')) +
+          row_('Referencia 1 (familiar)', esc_(ref1Name + ' · ' + ref1Rel + ' · ' + ref1PhoneN) + (reuseRefs ? ' <i>(en archivo)</i>' : '') + (refCli[0] ? ' — <b style="color:#a50e0e">cliente ' + esc_(refCli[0].id) + '</b>' : '')) +
+          row_('Referencia 2 (no familiar)', esc_(ref2Name + ' · ' + ref2Rel + ' · ' + ref2PhoneN) + (reuseRefs ? ' <i>(en archivo)</i>' : '') + (refCli[1] ? ' — <b style="color:#a50e0e">cliente ' + esc_(refCli[1].id) + '</b>' : '')) +
+          row_('Referencia 3 (adicional)', esc_(ref3Name + ' · ' + ref3Rel + ' · ' + ref3PhoneN) + (reuseRefs ? ' <i>(en archivo)</i>' : '') + (refCli[2] ? ' — <b style="color:#a50e0e">cliente ' + esc_(refCli[2].id) + '</b>' : '')) +
+          ((v39 && v39.alertas && v39.alertas.length) ? row_('⚠ Alerta ubicación/dispositivo', esc_(v39.alertas.join(' · '))) : '') +
           row_('Compromisos de pago', 'Aceptados ✓') +
           row_('Foto del frente del DNI', dniUrl ? '<a href="' + dniUrl + '">Ver documento</a>' : '— (cliente ya verificado)') +
           row_('Foto del dorso del DNI', cuilUrl ? '<a href="' + cuilUrl + '">Ver documento</a>' : '— (cliente ya verificado)') +
@@ -1245,6 +1431,10 @@ function buildClientLevels(opts) {
  * (para el botón "Anular límites" de Nuevos Prestatarios). El bloqueo de cliente
  * (V-33) es ABSOLUTO y se chequea SIEMPRE, aun con override. `ident` (opcional):
  * { email, cuil, phone } para ampliar la coincidencia del bloqueo más allá del DNI.
+ * NOTA: V-38 (referencias-cliente) y V-39 (límite por dispositivo/ubicación) corren en
+ * approveApplicantV2_ (Reactivar.gs), que tiene la fila de la solicitud (referencias,
+ * dirección) y las señales de "Dispositivos"; esta función también se invoca desde
+ * contextos solo-monto que no disponen de esos datos.
  */
 function validateApprovalV2_(clientId, amount, override, dni, ident) {
   // V-33 — cliente bloqueado: primero y fuera del override (no se anula).
@@ -1719,7 +1909,7 @@ function intakeSmartHtml_() {
           <!-- Referencias (obligatorias para nuevos o existentes sin referencias en archivo) -->
           <div id="references">
             <div class="secTitle">Referencias</div>
-            <div class="hint" style="margin-bottom:6px">Dos personas que puedan confirmar tus datos. La 1.ª debe ser un familiar directo que <b>no viva con vos</b>; la 2.ª, alguien no familiar (laboral o de confianza).</div>
+            <div class="hint" style="margin-bottom:6px">Tres personas que puedan confirmar tus datos. La 1.ª debe ser un familiar directo que <b>no viva con vos</b>; la 2.ª, alguien no familiar (laboral o de confianza); la 3.ª, otra persona de confianza (familiar o no). Como máximo <b>una</b> de las tres puede ser cliente de Impulso Crédito.</div>
             <div class="warnbox">⚠️ La información de las referencias debe ser <b>válida y verificable</b> (nombre y teléfono reales). Si no podemos confirmarlas, <b>no se aprobará el préstamo</b>.</div>
             <label>Referencia 1 — Nombre y apellido <span class="req">*</span><input name="ref1Name" id="ref1Name" minlength="10" autocomplete="off" placeholder="Nombre del familiar"></label>
             <small class="fieldErr" id="e_ref1Name"></small>
@@ -1747,6 +1937,25 @@ function intakeSmartHtml_() {
                 <small class="fieldErr" id="e_ref2Rel"></small></div>
               <div><label>Teléfono <span class="req">*</span><input name="ref2Phone" id="ref2Phone" inputmode="tel" autocomplete="off" placeholder="11 XXXX XXXX"></label>
                 <small class="fieldErr" id="e_ref2Phone"></small></div>
+            </div>
+            <label>Referencia 3 — Nombre y apellido <span class="req">*</span><input name="ref3Name" id="ref3Name" minlength="10" autocomplete="off" placeholder="Nombre de la referencia"></label>
+            <small class="fieldErr" id="e_ref3Name"></small>
+            <div class="row2">
+              <div><label>Vínculo <span class="req">*</span><select name="ref3Rel" id="ref3Rel">
+                <option value="">— elegir —</option>
+                <option value="Padre/Madre">Padre / Madre</option>
+                <option value="Hermano/a">Hermano/a</option>
+                <option value="Hijo/a">Hijo/a</option>
+                <option value="Otro familiar">Otro familiar (no conviviente)</option>
+                <option value="Pareja">Pareja</option>
+                <option value="Empleador/Jefe">Empleador / Jefe</option>
+                <option value="Compañero de trabajo">Compañero de trabajo</option>
+                <option value="Vecino/a">Vecino/a</option>
+                <option value="Amigo/a de larga data">Amigo/a de larga data</option>
+                <option value="Otro">Otro</option></select></label>
+                <small class="fieldErr" id="e_ref3Rel"></small></div>
+              <div><label>Teléfono <span class="req">*</span><input name="ref3Phone" id="ref3Phone" inputmode="tel" autocomplete="off" placeholder="11 XXXX XXXX"></label>
+                <small class="fieldErr" id="e_ref3Phone"></small></div>
             </div>
           </div>
           </div><!-- /paso 3 -->
@@ -2023,11 +2232,12 @@ function intakeSmartHtml_() {
       function vRefRelC(v){if(!String(v==null?'':v).trim())return 'Elegí el vínculo de la referencia.';return '';}
       function vRefPhoneC(v){if(!String(v==null?'':v).trim())return 'El teléfono de la referencia es obligatorio.';
         if(!normPhoneC(v))return 'Ingresá un teléfono argentino válido (10 dígitos: código de área + número, sin 0 ni 15).';return '';}
-      // V-28: además de ser válido, el teléfono de la referencia no puede ser el del solicitante ni el de la otra referencia.
-      function vRefPhoneDistinctC(v,other){var m=vRefPhoneC(v);if(m)return m;
-        var n=normPhoneC(v),ap=normPhoneC(el_('phone').value),ot=normPhoneC(other);
+      // V-28: además de ser válido, el teléfono de la referencia no puede ser el del solicitante
+      // ni repetirse entre las tres referencias.
+      function vRefPhoneDistinctC(v,otherA,otherB){var m=vRefPhoneC(v);if(m)return m;
+        var n=normPhoneC(v),ap=normPhoneC(el_('phone').value),oa=normPhoneC(otherA),ob=normPhoneC(otherB);
         if(n&&ap&&n===ap)return 'El teléfono de una referencia no puede ser el del solicitante.';
-        if(n&&ot&&n===ot)return 'Las dos referencias no pueden tener el mismo teléfono.';return '';}
+        if(n&&((oa&&n===oa)||(ob&&n===ob)))return 'Las referencias no pueden repetir el mismo teléfono.';return '';}
       // Titular de la cuenta de destino (cuenta de terceros): nombre completo, mín. 10 caracteres.
       function vHolderNameC(v){var s=String(v==null?'':v).trim();if(!s)return 'Ingresá el nombre completo del titular de la cuenta.';
         if(s.length<10)return 'El nombre del titular debe tener al menos 10 caracteres.';return '';}
@@ -2054,10 +2264,13 @@ function intakeSmartHtml_() {
           case 'cuilPhoto':return setErr('cuilPhoto',vPhotoC(el_('cuilPhoto'),true),el_('cuilPhoto'));
           case 'ref1Name':return setErr('ref1Name',vRefNameC(el_('ref1Name').value),el_('ref1Name'));
           case 'ref1Rel':return setErr('ref1Rel',vRefRelC(el_('ref1Rel').value),el_('ref1Rel'));
-          case 'ref1Phone':return setErr('ref1Phone',vRefPhoneDistinctC(el_('ref1Phone').value,el_('ref2Phone').value),el_('ref1Phone'));
+          case 'ref1Phone':return setErr('ref1Phone',vRefPhoneDistinctC(el_('ref1Phone').value,el_('ref2Phone').value,el_('ref3Phone').value),el_('ref1Phone'));
           case 'ref2Name':return setErr('ref2Name',vRefNameC(el_('ref2Name').value),el_('ref2Name'));
           case 'ref2Rel':return setErr('ref2Rel',vRefRelC(el_('ref2Rel').value),el_('ref2Rel'));
-          case 'ref2Phone':return setErr('ref2Phone',vRefPhoneDistinctC(el_('ref2Phone').value,el_('ref1Phone').value),el_('ref2Phone'));
+          case 'ref2Phone':return setErr('ref2Phone',vRefPhoneDistinctC(el_('ref2Phone').value,el_('ref1Phone').value,el_('ref3Phone').value),el_('ref2Phone'));
+          case 'ref3Name':return setErr('ref3Name',vRefNameC(el_('ref3Name').value),el_('ref3Name'));
+          case 'ref3Rel':return setErr('ref3Rel',vRefRelC(el_('ref3Rel').value),el_('ref3Rel'));
+          case 'ref3Phone':return setErr('ref3Phone',vRefPhoneDistinctC(el_('ref3Phone').value,el_('ref1Phone').value,el_('ref2Phone').value),el_('ref3Phone'));
           case 'agreeRepay':{var okR=el_('agreeRepay').checked;setErr('agreeRepay',okR?'':'Debe aceptar el compromiso de devolución.');el_('agreeRepayLabel').classList.toggle('invalid',!okR);return okR;}
           case 'agreeMora':{var okM=el_('agreeMora').checked;setErr('agreeMora',okM?'':'Debe aceptar el recargo por mora.');el_('agreeMoraLabel').classList.toggle('invalid',!okM);return okM;}
           case 'agreeConseq':{var okC=el_('agreeConseq').checked;setErr('agreeConseq',okC?'':'Debe aceptar las consecuencias del impago.');el_('agreeConseqLabel').classList.toggle('invalid',!okC);return okC;}
@@ -2094,7 +2307,7 @@ function intakeSmartHtml_() {
       bindLive('fullName',el_('fullName'));bindLive('phone',el_('phone'));bindLive('cuil',el_('cuil'));bindLive('address',el_('address'));
       bindLive('amount',amountEl);bindLive('term',termEl);bindLive('notes',el_('notes'));
       bindLive('dniPhoto',el_('dniPhoto'));bindLive('cuilPhoto',el_('cuilPhoto'));
-      ['ref1Name','ref1Rel','ref1Phone','ref2Name','ref2Rel','ref2Phone'].forEach(function(k){bindLive(k,el_(k));});
+      ['ref1Name','ref1Rel','ref1Phone','ref2Name','ref2Rel','ref2Phone','ref3Name','ref3Rel','ref3Phone'].forEach(function(k){bindLive(k,el_(k));});
       ['agreeRepay','agreeMora','agreeConseq','agreeContact','agree'].forEach(function(k){el_(k).addEventListener('change',function(){checkField(k);});});
       function clearErrors(keys){keys.forEach(function(k){setErr(k,'',el_(k));});}
 
@@ -2131,11 +2344,15 @@ function intakeSmartHtml_() {
           var c=r.client;
           el_('ref1Name').value=c.ref1Name||'';el_('ref1Rel').value=c.ref1Rel||'';el_('ref1Phone').value=c.ref1Phone||'';
           el_('ref2Name').value=c.ref2Name||'';el_('ref2Rel').value=c.ref2Rel||'';el_('ref2Phone').value=c.ref2Phone||'';
+          el_('ref3Name').value=c.ref3Name||'';el_('ref3Rel').value=c.ref3Rel||'';el_('ref3Phone').value=c.ref3Phone||'';
           note.style.display='block';
-          note.innerHTML='<b>Referencias en archivo</b> — podés actualizarlas si cambiaron.';
+          note.innerHTML=r.hasRef3
+            ?'<b>Referencias en archivo</b> — podés actualizarlas si cambiaron.'
+            :'<b>Referencias en archivo</b> — agregá una <b>tercera referencia</b> para continuar; las dos primeras podés actualizarlas si cambiaron.';
         }else{
           el_('ref1Name').value='';el_('ref1Rel').value='';el_('ref1Phone').value='';
           el_('ref2Name').value='';el_('ref2Rel').value='';el_('ref2Phone').value='';
+          el_('ref3Name').value='';el_('ref3Rel').value='';el_('ref3Phone').value='';
           note.style.display='none';
         }
       }
@@ -2363,7 +2580,7 @@ function intakeSmartHtml_() {
       function validateAll(){
         // Todos los campos son obligatorios, sea cliente nuevo o existente.
         var reusing=el_('reuseRefs')&&el_('reuseRefs').value==='1';
-        var refKeys=reusing?[]:['ref1Name','ref1Rel','ref1Phone','ref2Name','ref2Rel','ref2Phone'];
+        var refKeys=reusing?[]:['ref1Name','ref1Rel','ref1Phone','ref2Name','ref2Rel','ref2Phone','ref3Name','ref3Rel','ref3Phone'];
         var keys=['email2','dni','fullName','phone','cuil','address'].concat(refKeys)
           .concat(['amount','term','notes','agreeRepay','agreeMora','agreeConseq','agreeContact','agree','dniPhoto','cuilPhoto']);
         if(payNeedsAccount()){ keys=keys.concat(['payDetails','acctOwn']); if(isThirdParty()) keys=keys.concat(THIRD_KEYS); } // cuenta de destino / titular
@@ -2467,7 +2684,7 @@ function intakeSmartHtml_() {
       });
 
       /* ===== Asistente por pasos ===== */
-      var STEP_KEYS={1:['email','dni'],2:['email2','fullName','phone','cuil','address'],3:['ref1Name','ref1Rel','ref1Phone','ref2Name','ref2Rel','ref2Phone'],4:['amount','term','notes'],5:['dniPhoto','cuilPhoto'],6:['agreeRepay','agreeMora','agreeConseq','agreeContact','agree']};
+      var STEP_KEYS={1:['email','dni'],2:['email2','fullName','phone','cuil','address'],3:['ref1Name','ref1Rel','ref1Phone','ref2Name','ref2Rel','ref2Phone','ref3Name','ref3Rel','ref3Phone'],4:['amount','term','notes'],5:['dniPhoto','cuilPhoto'],6:['agreeRepay','agreeMora','agreeConseq','agreeContact','agree']};
       var STEP_LABELS={1:'Identificación',2:'Tus datos',3:'Referencias',4:'El préstamo',5:'Documentación',6:'Confirmación'};
       var MAXSTEP=6, curStep=1;
       function stepValid(n){

@@ -10,3 +10,5 @@ __pycache__/
 social_media/story_tmp.png
 # Exportaciones de la planilla (PII de clientes: nombres/DNI/teléfonos/correos). NO subir al repo público.
 *.xlsx
+# Simulaciones locales de validaciones (contienen PII real). NO subir al repo.
+simulacion/

@@ -104,9 +104,11 @@ const NB = ['Fecha de Envío', 'Nombre completo', 'Correo', 'DNI', 'Teléfono', 
   'Verificar BCRA?', 'Parámetro BCRA', 'CUIL', 'Nombre BCRA', 'Peor Situación', '% al día', 'Decisión', 'Puntaje BCRA', 'Calificación de Riesgo', 'Resumen BCRA', 'Dirección', 'Forma de Pago',
   'Anular límites',
   'Ref 1 Nombre', 'Ref 1 Vínculo', 'Ref 1 Teléfono', 'Avisar Ref 1 📲', 'Ref 1 Validada?',
-  'Ref 2 Nombre', 'Ref 2 Vínculo', 'Ref 2 Teléfono', 'Avisar Ref 2 📲', 'Ref 2 Validada?', 'Compromiso aceptado',
+  'Ref 2 Nombre', 'Ref 2 Vínculo', 'Ref 2 Teléfono', 'Avisar Ref 2 📲', 'Ref 2 Validada?',
+  'Ref 3 Nombre', 'Ref 3 Vínculo', 'Ref 3 Teléfono', 'Avisar Ref 3 📲', 'Ref 3 Validada?', 'Compromiso aceptado',
   '¿Cuenta propia?', 'Titular de la cuenta', 'DNI del titular', 'Correo del titular', 'Teléfono del titular',
-  'DNI titular (frente)', 'DNI titular (dorso)', 'Titular acepta?', 'Avisar al titular 📲'];
+  'DNI titular (frente)', 'DNI titular (dorso)', 'Titular acepta?', 'Avisar al titular 📲',
+  'Alerta ubicación/dispositivo'];
 
 /* ============================ MENÚ ============================ */
 function onOpen() {
@@ -607,6 +609,9 @@ function applyFeatureUpdates() {
       // Auto-aprobación inmediata de clientes recurrentes sin deuda vigente (apagada por defecto).
       'Auto-aprobar recurrentes (SÍ/NO)', 'Auto-aprobar: monto máximo',
       'Auto-aprobar: exigir estado al día (SÍ/NO)', 'Auto-aprobar: exigir BCRA OK (SÍ/NO)',
+      // V-39: límite de personas distintas que comparten IP/dispositivo/GPS/domicilio.
+      'Límite por dispositivo/ubicación (SÍ/NO)', 'Máximo de personas por dispositivo/ubicación',
+      'Radio GPS de coincidencia (metros)', 'Ventana de coincidencia de IP (días)',
     ]);
     done.push(nAdded ? (nAdded + ' ajuste(s) nuevo(s) en «Configuración»') : '«Configuración» ya estaba al día');
     // Prefill de los interruptores de auto-aprobación (NO) si quedaron en blanco, para que sean visibles/editables.
@@ -671,6 +676,16 @@ function applyFeatureUpdates() {
       // Plan flexible: pago inicial bajo (default 10%). Permite arrancar un plan en cuotas a un vencido.
       if (stsh && String(getSetting_('Pago inicial para plan flexible (%)') || '').trim() === '')
         setSettingValue_(stsh, 'Pago inicial para plan flexible (%)', '10');
+      // V-39: límite por dispositivo/ubicación. Encendido por defecto; máximo 2 personas por señal
+      // (IP / huella del dispositivo / GPS / domicilio declarado), radio GPS 50 m, ventana de IP 30 días.
+      if (stsh && String(getSetting_('Límite por dispositivo/ubicación (SÍ/NO)') || '').trim() === '')
+        setSettingValue_(stsh, 'Límite por dispositivo/ubicación (SÍ/NO)', 'SÍ');
+      if (stsh && String(getSetting_('Máximo de personas por dispositivo/ubicación') || '').trim() === '')
+        setSettingValue_(stsh, 'Máximo de personas por dispositivo/ubicación', '2');
+      if (stsh && String(getSetting_('Radio GPS de coincidencia (metros)') || '').trim() === '')
+        setSettingValue_(stsh, 'Radio GPS de coincidencia (metros)', '50');
+      if (stsh && String(getSetting_('Ventana de coincidencia de IP (días)') || '').trim() === '')
+        setSettingValue_(stsh, 'Ventana de coincidencia de IP (días)', '30');
       // Limpieza: quita la fila de la redirección de WhatsApp de prueba (quedó obsoleta; ahora todos
       // los avisos van SIEMPRE al teléfono real del prestatario resuelto de «Clientes»).
       if (stsh) {
@@ -840,16 +855,26 @@ function ensureIntakeRefColumns_(ss) {
   const nb = ss.getSheetByName(CFG.SHEETS.NEW);
   if (nb) {
     ['Ref 1 Nombre', 'Ref 1 Vínculo', 'Ref 1 Teléfono', 'Ref 1 Validada?',
-      'Ref 2 Nombre', 'Ref 2 Vínculo', 'Ref 2 Teléfono', 'Ref 2 Validada?', 'Compromiso aceptado']
+      'Ref 2 Nombre', 'Ref 2 Vínculo', 'Ref 2 Teléfono', 'Ref 2 Validada?',
+      'Ref 3 Nombre', 'Ref 3 Vínculo', 'Ref 3 Teléfono', 'Ref 3 Validada?', 'Compromiso aceptado']
       .forEach(h => clientesHeaderCol_(nb, h, true)); // crea al final sólo si falta
-    ['Ref 1 Validada?', 'Ref 2 Validada?'].forEach(h => {
+    ['Ref 1 Validada?', 'Ref 2 Validada?', 'Ref 3 Validada?'].forEach(h => {
       const c = clientesHeaderCol_(nb, h, true);
       if (c > 0) { nb.getRange(2, c, CFG.MAX_ROWS, 1).setDataValidation(cb); nb.setColumnWidth(c, 100); nb.getRange(1, c).setNote('Tildá cuando hayas contactado y verificado esta referencia.'); }
     });
-    // Columnas "Avisar Ref 1/2 📲": enlace de WhatsApp JUNTO al teléfono de cada referencia. Se
+    // Columna informativa V-39: coincidencias de IP/dispositivo/GPS/domicilio detectadas al enviar.
+    {
+      const cAl = clientesHeaderCol_(nb, 'Alerta ubicación/dispositivo', true);
+      if (cAl > 0) {
+        nb.setColumnWidth(cAl, 260);
+        nb.getRange(2, cAl, CFG.MAX_ROWS, 1).setWrap(true);
+        nb.getRange(1, cAl).setNote('⚠ V-39 — coincidencias de IP/dispositivo/GPS/domicilio con otros clientes detectadas al enviar la solicitud. Detalle informativo; si se supera el máximo configurado, la aprobación se bloquea (se anula con «Anular límites»).');
+      }
+    }
+    // Columnas "Avisar Ref 1/2/3 📲": enlace de WhatsApp JUNTO al teléfono de cada referencia. Se
     // INSERTAN (no se agregan al final) para que queden al lado del número; es no destructivo
     // (agrega una columna vacía y corre los datos existentes a la derecha, intactos).
-    [['Avisar Ref 1 📲', 'Ref 1 Teléfono'], ['Avisar Ref 2 📲', 'Ref 2 Teléfono']].forEach(function (p) {
+    [['Avisar Ref 1 📲', 'Ref 1 Teléfono'], ['Avisar Ref 2 📲', 'Ref 2 Teléfono'], ['Avisar Ref 3 📲', 'Ref 3 Teléfono']].forEach(function (p) {
       const H = headerMap_(nb);                 // se relee: la 1.ª inserción corre las columnas
       if (H[p[0]]) return;                       // ya existe
       const tel = H[p[1]]; if (!tel) return;     // columna del teléfono de esa referencia
@@ -863,11 +888,12 @@ function ensureIntakeRefColumns_(ss) {
     nb.getRange(1, 1, 1, nb.getLastColumn()).setFontWeight('bold').setBackground('#b45f06').setFontColor('#fff').setWrap(true);
     if (typeof invalidateHeaderIndexCache_ === 'function') invalidateHeaderIndexCache_();
     let nRefWa = 0; try { nRefWa = fillRefWaLinks_(ss); } catch (e) { logError_('ensureIntakeRefColumns_:refWa', e); }
-    done.push('referencias + compromiso + casillas de validación + «Avisar Ref 1/2 📲»' + (nRefWa ? (' (' + nRefWa + ' fila(s))') : '') + ' en «Nuevos Prestatarios»');
+    done.push('referencias + compromiso + casillas de validación + «Avisar Ref 1/2/3 📲» + alerta V-39' + (nRefWa ? (' (' + nRefWa + ' fila(s))') : '') + ' en «Nuevos Prestatarios»');
   }
   const cs = ss.getSheetByName(CFG.SHEETS.CLIENTS);
   if (cs) {
-    ['Ref 1 Nombre', 'Ref 1 Vínculo', 'Ref 1 Teléfono', 'Ref 2 Nombre', 'Ref 2 Vínculo', 'Ref 2 Teléfono']
+    ['Ref 1 Nombre', 'Ref 1 Vínculo', 'Ref 1 Teléfono', 'Ref 2 Nombre', 'Ref 2 Vínculo', 'Ref 2 Teléfono',
+      'Ref 3 Nombre', 'Ref 3 Vínculo', 'Ref 3 Teléfono']
       .forEach(h => clientesHeaderCol_(cs, h, true));
     done.push('referencias en «Clientes»');
   }
@@ -3388,7 +3414,7 @@ function refWaFormula_(refName, refPhone, refRel, applicantName) {
   return '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📲 Preguntar")';
 }
 
-/** (Re)completa «Avisar Ref 1/2 📲» de TODA la hoja Nuevos Prestatarios con el enlace de WhatsApp a
+/** (Re)completa «Avisar Ref 1/2/3 📲» de TODA la hoja Nuevos Prestatarios con el enlace de WhatsApp a
  *  cada referencia (mensaje que nombra al solicitante y pregunta si lo/la conoce). «sin teléfono» si
  *  la referencia tiene nombre pero sin número válido; vacío si no hay referencia. Resuelve columnas
  *  por nombre de encabezado (funciona sea cual sea su posición). Devuelve la cantidad de filas. */
@@ -3400,6 +3426,7 @@ function fillRefWaLinks_(ss) {
   const refs = [
     { wa: m['Avisar Ref 1 📲'], n: m['Ref 1 Nombre'], tel: m['Ref 1 Teléfono'], rel: m['Ref 1 Vínculo'] },
     { wa: m['Avisar Ref 2 📲'], n: m['Ref 2 Nombre'], tel: m['Ref 2 Teléfono'], rel: m['Ref 2 Vínculo'] },
+    { wa: m['Avisar Ref 3 📲'], n: m['Ref 3 Nombre'], tel: m['Ref 3 Teléfono'], rel: m['Ref 3 Vínculo'] },
   ];
   if (!refs.some(r => r.wa)) return 0;
   const last = sh.getLastRow(); if (last < 2) return 0;
@@ -3598,7 +3625,7 @@ function setupNew_(ss) {
   const overCol = NB.indexOf('Anular límites') + 1;
   if (overCol > 0) sh.getRange(2, overCol, CFG.MAX_ROWS, 1).setDataValidation(cb); // Anular límites (override)
   // Casillas para marcar cada referencia como verificada por el prestamista.
-  ['Ref 1 Validada?', 'Ref 2 Validada?'].forEach(function (h) {
+  ['Ref 1 Validada?', 'Ref 2 Validada?', 'Ref 3 Validada?'].forEach(function (h) {
     const c = NB.indexOf(h) + 1;
     if (c > 0) { sh.getRange(2, c, CFG.MAX_ROWS, 1).setDataValidation(cb); sh.setColumnWidth(c, 100); sh.getRange(1, c).setNote('Tildá cuando hayas contactado y verificado esta referencia.'); }
   });
@@ -3615,18 +3642,25 @@ function setupNew_(ss) {
     ['Correo del titular', 200], ['Teléfono del titular', 130], ['DNI titular (frente)', 160],
     ['DNI titular (dorso)', 160], ['Titular acepta?', 120], ['Avisar al titular 📲', 150]]
     .forEach(function (p) { const c = NB.indexOf(p[0]) + 1; if (c > 0) sh.setColumnWidth(c, p[1]); });
-  // Columnas "Avisar Ref 1/2 📲" (enlace de WhatsApp JUNTO al teléfono de cada referencia).
-  [['Avisar Ref 1 📲', 150], ['Avisar Ref 2 📲', 150]].forEach(function (p) {
+  // Columnas "Avisar Ref 1/2/3 📲" (enlace de WhatsApp JUNTO al teléfono de cada referencia).
+  [['Avisar Ref 1 📲', 150], ['Avisar Ref 2 📲', 150], ['Avisar Ref 3 📲', 150]].forEach(function (p) {
     const c = NB.indexOf(p[0]) + 1;
     if (c > 0) { sh.setColumnWidth(c, p[1]); sh.getRange(1, c).setNote('Abre WhatsApp con un mensaje para preguntarle a esta referencia si conoce al solicitante. Luego tildá «Ref X Validada?».'); }
   });
+  // Columna informativa V-39: coincidencias de IP/dispositivo/GPS/domicilio con otros solicitantes.
+  const alertaCol = NB.indexOf('Alerta ubicación/dispositivo') + 1;
+  if (alertaCol > 0) {
+    sh.setColumnWidth(alertaCol, 260);
+    sh.getRange(2, alertaCol, CFG.MAX_ROWS, 1).setWrap(true);
+    sh.getRange(1, alertaCol).setNote('⚠ V-39 — coincidencias de IP/dispositivo/GPS/domicilio con otros clientes detectadas al enviar la solicitud. Detalle informativo; si se supera el máximo configurado, la aprobación se bloquea (se anula con «Anular límites»).');
+  }
   // Casilla "Titular acepta?" (cuenta de terceros): el titular confirmó que acepta recibir el dinero.
   const taCol = NB.indexOf('Titular acepta?') + 1;
   if (taCol > 0) { sh.getRange(2, taCol, CFG.MAX_ROWS, 1).setDataValidation(cb); sh.getRange(1, taCol).setNote('Tildá SOLO cuando el titular de la cuenta (cuenta de terceros) confirmó —por WhatsApp o teléfono— que acepta recibir el dinero. Obligatorio para aprobar; NO se anula con «Anular límites». Usá «Avisar al titular 📲» para pedir su conformidad.'); }
   sh.getRange(2, 23, CFG.MAX_ROWS, 1).setWrap(true); // Resumen BCRA
   sh.getRange('K1').setNote('Tilde "Verificado?" para aprobar (pasa a Prestatarios) o "Rechazar?" para archivar en Rechazados.');
   sh.getRange('N1').setNote('Tilde "Verificar BCRA?" para consultar la Central de Deudores del BCRA. En "Parámetro BCRA" elegí DNI o CUIL: con CUIL se usa el valor de la columna CUIL (si está vacío, se deriva del DNI).');
-  if (overCol > 0) sh.getRange(1, overCol).setNote('Tilde "Anular límites" ANTES de tildar "Verificado?" para aprobar aunque el prestatario ya tenga ' + MAX_LOANS_PER_CLIENT + ' préstamos, se exceda el capital disponible, o el BCRA marque RECHAZAR. NO omite las dos referencias con teléfono válido: siguen siendo obligatorias.');
+  if (overCol > 0) sh.getRange(1, overCol).setNote('Tilde "Anular límites" ANTES de tildar "Verificado?" para aprobar aunque el prestatario ya tenga ' + MAX_LOANS_PER_CLIENT + ' préstamos, se exceda el capital disponible, el BCRA marque RECHAZAR o se supere el límite por dispositivo/ubicación (V-39). NO omite las referencias con teléfono válido (V-27/V-34) ni el tope de referencias que son clientes (V-38): siguen siendo obligatorios.');
 }
 
 function setupRejected_(ss) {

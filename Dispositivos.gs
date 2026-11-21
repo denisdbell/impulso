@@ -160,7 +160,98 @@ function recordDispositivo_(loan, clientId, meta) {
     if (col >= 0) row[col] = extra[i];
   });
   sh.appendRow(row);
+  invalidateDispositivosRows_(); // coherencia dentro de la misma ejecución (V-39)
   return sh;
+}
+
+/* ============== V-39 — señales por persona (misma IP/dispositivo/GPS) ==============
+ * Capa de LECTURA de la hoja "Dispositivos" para el límite configurable de personas
+ * distintas que comparten una señal (ver checkUbicacionV39_ en Validaciones.gs).
+ * Una sola lectura getDataRange por ejecución, memoizada (misma convención que
+ * _clientesRowsCache). Si recordDispositivo_ agrega una fila, invalida la caché. */
+
+/** 'lat,long' → {lat, lon} o null si no es un par numérico válido. */
+function parseGps_(s) {
+  const m = /^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/.exec(String(s || ''));
+  if (!m) return null;
+  const lat = Number(m[1]), lon = Number(m[2]);
+  return (isFinite(lat) && isFinite(lon)) ? { lat: lat, lon: lon } : null;
+}
+
+/** Distancia haversine en metros entre dos puntos {lat, lon}. */
+function haversineM_(a, b) {
+  const R = 6371000, rad = Math.PI / 180;
+  const dLat = (b.lat - a.lat) * rad, dLon = (b.lon - a.lon) * rad;
+  const s = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+
+let _dispSignalRowsCache = null;
+function invalidateDispositivosRows_() { _dispSignalRowsCache = null; }
+
+/** Filas de "Dispositivos" reducidas a las señales que usa V-39. Columnas base por
+ *  POSICIÓN (mismo orden que recordDispositivo_): 1 Fecha, 3 clientId, 4 DNI, 7 huella,
+ *  22 IP, 24 GPS, 25 precisión GPS. 'Token persistente' se resuelve por encabezado. */
+function dispositivosSignalRows_() {
+  if (_dispSignalRowsCache) return _dispSignalRowsCache;
+  const sh = getSS_().getSheetByName(CFG.SHEETS.DEVICES);
+  if (!sh || sh.getLastRow() < 2) { _dispSignalRowsCache = []; return _dispSignalRowsCache; }
+  const head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(h => String(h).trim());
+  const cTok = head.indexOf('Token persistente'); // -1 si la hoja aún no tiene la columna
+  const data = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
+  _dispSignalRowsCache = data.map(r => {
+    const ip = String(r[21] || '').trim();
+    return {
+      t: (r[0] instanceof Date) ? r[0] : null,
+      dniNorm: (typeof normDni_ === 'function') ? normDni_(r[3]) : String(r[3] || '').replace(/\D/g, ''),
+      clientId: String(r[2] || '').trim(),
+      ip: (ip && ip !== 'N/D') ? ip : '',
+      fp: String(r[6] || '').trim(),
+      token: cTok >= 0 ? String(r[cTok] || '').trim() : '',
+      gps: parseGps_(r[23]),
+      gpsAcc: Number(r[24]) || 0,
+    };
+  }).filter(o => o.dniNorm || o.clientId);
+  return _dispSignalRowsCache;
+}
+
+/**
+ * Cuenta, por señal, las personas DISTINTAS (por DNI normalizado) que comparten la señal
+ * del solicitante en la hoja "Dispositivos". Excluye las filas propias (mismo dniNorm; o
+ * mismo clientId cuando la fila no tiene DNI).
+ *   sig = { dniNorm, clientId, ip, deviceFp, token, gps:{lat,lon}|null }
+ *   cfg = { radioM, ipDias }  — IP: solo filas dentro de la ventana; GPS: distancia ≤
+ *         max(radioM, precisión informada); huella/token: igualdad exacta.
+ * Devuelve { ip:Set, fp:Set, token:Set, gps:Set } de dniNorm ajenos por señal.
+ */
+function contarCoincidenciasSenales_(sig, cfg) {
+  const out = { ip: new Set(), fp: new Set(), token: new Set(), gps: new Set() };
+  const rows = dispositivosSignalRows_();
+  const now = new Date();
+  const ipMs = Math.max(1, Number(cfg.ipDias) || 30) * 24 * 3600 * 1000;
+  const radioM = Math.max(1, Number(cfg.radioM) || 50);
+  // Identidad canónica SIEMPRE por DNI: una fila sin DNI pero con ID Cliente se resuelve
+  // vía "Clientes" para que la misma persona no cuente dos veces (una por DNI y otra por ID).
+  let idToDni = null;
+  try {
+    if (typeof clientesRows_ === 'function') {
+      idToDni = {};
+      clientesRows_().forEach(o => { if (o.id && o.dniNorm) idToDni[o.id] = o.dniNorm; });
+    }
+  } catch (e) { idToDni = null; }
+  for (const r of rows) {
+    const own = (sig.dniNorm && r.dniNorm === sig.dniNorm) ||
+      (sig.clientId && r.clientId && r.clientId === sig.clientId);
+    if (own) continue;
+    const quien = r.dniNorm || (idToDni && idToDni[r.clientId]) || r.clientId;
+    if (!quien) continue;
+    if (sig.ip && r.ip === sig.ip && r.t && (now.getTime() - r.t.getTime()) <= ipMs) out.ip.add(quien);
+    if (sig.deviceFp && r.fp === sig.deviceFp) out.fp.add(quien);
+    if (sig.token && r.token === sig.token) out.token.add(quien);
+    if (sig.gps && r.gps && haversineM_(sig.gps, r.gps) <= Math.max(radioM, r.gpsAcc || 0)) out.gps.add(quien);
+  }
+  return out;
 }
 
 /**

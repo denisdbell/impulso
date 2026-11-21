@@ -1042,15 +1042,29 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
     if (blk) return fail('V-33 — Cliente bloqueado (' + (blk.id || blk.dniNorm) + '). No se anula con «Anular límites».' + (blk.bloqueoMotivo ? ' Motivo: ' + blk.bloqueoMotivo : ''));
   }
 
-  // V-27: DOS referencias con teléfono válido son OBLIGATORIAS para aprobar.
-  // NO se anula con "Anular límites" (override sólo omite fondos/concentración/tope/BCRA).
+  // V-27: referencias con teléfono válido OBLIGATORIAS para aprobar. Las dos primeras son
+  // un requisito duro; la 3.ª se exige solo si la fila la trae (las solicitudes anteriores a
+  // la regla de tres referencias siguen siendo aprobables). NO se anula con "Anular límites"
+  // (override sólo omite fondos/concentración/tope/BCRA/V-39).
   const r1Name = String(g('Ref 1 Nombre') || '').trim(), r2Name = String(g('Ref 2 Nombre') || '').trim();
-  const r1Ph = vPhone_(g('Ref 1 Teléfono')), r2Ph = vPhone_(g('Ref 2 Teléfono'));
+  const r3Name = String(g('Ref 3 Nombre') || '').trim();
+  const r1Ph = vPhone_(g('Ref 1 Teléfono')), r2Ph = vPhone_(g('Ref 2 Teléfono')), r3Ph = vPhone_(g('Ref 3 Teléfono'));
   if (!r1Name || !r1Ph.ok || !r2Name || !r2Ph.ok) return fail('Faltan dos referencias con teléfono válido (obligatorias; no se anulan con «Anular límites»)');
-  // V-34: al menos UNA referencia debe estar VALIDADA (casilla "Ref 1/2 Validada?").
+  if (r3Name && !r3Ph.ok) return fail('La Referencia 3 no tiene un teléfono argentino válido');
+  // V-34: al menos UNA referencia debe estar VALIDADA (casilla "Ref 1/2/3 Validada?").
   // No se anula con "Anular límites" (igual que V-27/V-33).
-  if (!isRefValidated_(g('Ref 1 Validada?')) && !isRefValidated_(g('Ref 2 Validada?')))
-    return fail('V-34 — Ninguna referencia está validada. Marcá «Ref 1 Validada?» o «Ref 2 Validada?» antes de aprobar (no se anula con «Anular límites»).');
+  if (!isRefValidated_(g('Ref 1 Validada?')) && !isRefValidated_(g('Ref 2 Validada?')) && !isRefValidated_(g('Ref 3 Validada?')))
+    return fail('V-34 — Ninguna referencia está validada. Marcá «Ref 1/2/3 Validada?» antes de aprobar (no se anula con «Anular límites»).');
+  // V-38: a lo sumo UNA referencia puede ser cliente existente (coincidencia de teléfono
+  // normalizado, excluyendo al propio solicitante). Se re-chequea acá porque las referencias
+  // pueden editarse a mano en la hoja. No se anula con "Anular límites".
+  if (typeof refClienteMatch_ === 'function') {
+    const refCli = [r1Ph.ok ? refClienteMatch_(r1Ph.norm, dnV.norm) : null,
+      r2Ph.ok ? refClienteMatch_(r2Ph.norm, dnV.norm) : null,
+      r3Ph.ok ? refClienteMatch_(r3Ph.norm, dnV.norm) : null].filter(Boolean);
+    if (refCli.length > 1)
+      return fail('V-38 — Más de una referencia es cliente existente (' + refCli.map(c => c.id || c.dniNorm).join(', ') + '). Como máximo una; no se anula con «Anular límites».');
+  }
   // V-36 — cuenta de terceros: el TITULAR de la cuenta debe confirmar que acepta recibir el dinero
   // (casilla «Titular acepta?»). ABSOLUTO: no se anula con «Anular límites» (igual que V-27/V-33/V-34).
   if (isThirdParty && !isRefValidated_(g('Titular acepta?')))
@@ -1072,6 +1086,16 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
     const chk = validateApprovalV2_(existing ? existing.id : null, amount, override, dnV.norm,
       { email: email, phone: phone, cuil: String(g('CUIL') || '') });
     if (!chk.ok) return fail(chk.msg);
+  }
+
+  // V-39 — límite por dispositivo/IP/GPS/domicilio. A diferencia de V-27/V-33/V-34/V-36/V-38,
+  // SÍ se anula con «Anular límites» (p. ej. convivientes legítimos). Un error interno del
+  // control nunca bloquea la aprobación (fail-open; el detalle queda en "Errores").
+  if (!override && typeof v39ForApproval_ === 'function') {
+    try {
+      const chk39 = v39ForApproval_(dnV.norm, existing ? existing.id : '', String(g('Dirección') || '').trim());
+      if (chk39 && !chk39.ok) return fail(chk39.msg);
+    } catch (e) { logError_('approveApplicantV2_:v39', e); }
   }
 
   // Cliente (reutiliza o crea). Se guardan también CUIL y Dirección de la solicitud
