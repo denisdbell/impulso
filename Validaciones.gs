@@ -107,7 +107,8 @@ const VALIDATION_RULES = [
   ['V-36', 'Formulario y Aprobación', 'Cuenta de terceros', 'Si el dinero se recibe en una cuenta que NO es del solicitante (métodos distintos de Efectivo), es OBLIGATORIO declarar al titular: nombre (mín. 10 caracteres), DNI válido, correo válido, teléfono válido y fotos del DNI (frente y dorso). El DNI, el correo y el teléfono del titular deben ser DISTINTOS de los del solicitante (el nombre puede coincidir). El titular será notificado y recibirá una copia del contrato. Antes de aprobar, el titular debe CONFIRMAR su conformidad (casilla «Titular acepta?» en Nuevos Prestatarios, pedible con «Avisar al titular 📲»): ABSOLUTO, no se anula con «Anular límites». Sin estos datos la solicitud NO se procesa.', 'Para enviar el dinero a la cuenta de un tercero, completá los datos del titular (nombre, DNI, correo, teléfono y fotos del DNI) y obtené su conformidad. Sin esta información el préstamo no puede procesarse.', 'BLOQUEA', 'ALTA'],
   ['V-37', 'Formulario', 'Cuenta destino', 'La cuenta destino (alias, CBU o CVU donde se recibe el dinero) es obligatoria para todo método que no sea Efectivo.', 'Ingresá la cuenta (alias, CBU o CVU) donde vas a recibir el dinero.', 'BLOQUEA', 'MEDIA'],
   ['V-38', 'Formulario y Aprobación', 'Referencias', 'A lo sumo UNA de las tres referencias puede ser cliente existente de Impulso Crédito (coincidencia del teléfono normalizado contra «Clientes», en cualquier casillero). Dos o más referencias-cliente → se bloquea el envío y la aprobación. No se anula con «Anular límites».', 'Como máximo una de tus referencias puede ser cliente nuestro. Reemplazá alguna referencia por una persona que no sea cliente.', 'BLOQUEA', 'ALTA'],
-  ['V-39', 'Formulario y Aprobación', 'Anti-fraude', 'Máximo configurable («Máximo de personas por dispositivo/ubicación», por defecto 2) de personas DISTINTAS (por DNI) que comparten la misma IP (ventana en días), huella/token del dispositivo, ubicación GPS (radio en metros) o domicilio declarado normalizado. Bloquea el envío del formulario y la aprobación detallando cada señal excedida, su valor y la cantidad de personas; al solicitante no se le muestran los DNI de terceros. Se anula con «Anular límites» SOLO en la aprobación. Interruptor: «Límite por dispositivo/ubicación (SÍ/NO)».', 'Se superó el máximo de personas que pueden solicitar desde el mismo dispositivo o ubicación.', 'BLOQUEA', 'ALTA'],
+  ['V-39', 'Formulario y Aprobación', 'Anti-fraude', 'Máximo configurable («Máximo de personas por dispositivo/ubicación», por defecto 2) de personas DISTINTAS (por DNI) que comparten la misma IP (ventana en días), huella/token del dispositivo, ubicación GPS (radio en metros) o domicilio declarado normalizado. Bloquea el envío del formulario y la aprobación detallando cada señal excedida, su valor y la cantidad de personas; al solicitante no se le muestran los DNI de terceros. El detalle al PRESTAMISTA incluye además los préstamos vigentes y su estado de cada persona conectada. También se evalúa (solo como ADVERTENCIA, nunca bloquea) al registrarse un prospecto, y el aviso «Nuevo prospecto» incluye el detalle. Se anula con «Anular límites» SOLO en la aprobación. Interruptor: «Límite por dispositivo/ubicación (SÍ/NO)».', 'Se superó el máximo de personas que pueden solicitar desde el mismo dispositivo o ubicación.', 'BLOQUEA', 'ALTA'],
+  ['V-40', 'Formulario', 'Anti-fraude', 'Mapa informativo de CONEXIONES POR TELÉFONO del solicitante o prospecto: referencias que son clientes, clientes que comparten su teléfono o lo listan como referencia, referencias compartidas con otros prestatarios y coincidencias con la hoja «Prospectos» — con el estado de los préstamos (vigentes y saldo) de cada cliente conectado. Solo para el prestamista: correo de aviso, columna «Conexiones por teléfono» en Nuevos Prestatarios y columna «Alertas (V-39/V-40)» en Prospectos. No bloquea.', '—', 'ADVIERTE', 'MEDIA'],
 ];
 
 /* ==================== VALIDADORES DE CAMPO ==================== */
@@ -240,7 +241,10 @@ function clientesRows_() {
     ref3Name: cell(r, cR3N), ref3Rel: cell(r, cR3R), ref3Phone: cell(r, cR3P),
     dniNorm: normDni_(r[cDniN - 1] || r[cDni - 1]),
     emailNorm: normEmail_(r[cEmailN - 1] || r[cEmail - 1]),
-    phoneNorm: String(r[cPhoneN - 1] || '').trim() || normPhoneE164_(r[cPhone - 1]),
+    // Re-normaliza SIEMPRE: la columna "Teléfono (norm)" puede traer errores de fórmula
+    // ('#VALUE!') o dígitos con marcas bidi, que usados tal cual dejaban al cliente
+    // invisible para V-07/V-12/V-38/V-40. normPhoneE164_ los limpia o cae al crudo.
+    phoneNorm: normPhoneE164_(r[cPhoneN - 1]) || normPhoneE164_(r[cPhone - 1]),
     bloqueado: (function () { const v = cell(r, cBloq).toUpperCase(); return v === 'SÍ' || v === 'SI'; })(),
     bloqueoMotivo: cell(r, cBloqM),
     sinRecordatorios: (function () { const v = cNoRec ? r[cNoRec - 1] : ''; return v === true || /^(sí|si|true|verdadero)$/i.test(String(v == null ? '' : v).trim()); })(),
@@ -279,6 +283,71 @@ function refClienteMatch_(phoneN, selfDniNorm) {
   return clientesRows_().filter(o => o.phoneNorm && o.phoneNorm === phoneN && o.dniNorm !== selfDniNorm)[0] || null;
 }
 
+/**
+ * V-40 — CONEXIONES POR TELÉFONO (solo informativo; superficies del PRESTAMISTA).
+ * Mapea a todas las personas conectadas con el solicitante por número de teléfono y,
+ * cuando la conexión es un cliente, agrega el estado de sus préstamos (resumenPrestamos_):
+ *   1. su teléfono es el de otro cliente;
+ *   2. su teléfono figura como referencia de otros clientes;
+ *   3. una referencia suya es cliente (con sus préstamos);
+ *   4. una referencia suya comparte teléfono con la referencia de otro prestatario;
+ *   5. coincidencias con la hoja «Prospectos» (por teléfono o DNI).
+ * `refs` = [{slot:'Ref 1', name, phoneN}, …] (los prospectos pasan []). Nunca bloquea.
+ */
+function conexionesPorTelefono_(appPhoneN, refs, selfDniNorm) {
+  appPhoneN = String(appPhoneN || '').trim();
+  refs = (refs || []).filter(r => r && r.phoneN);
+  const items = [], seen = {};
+  const add = (key, txt) => { if (!seen[key]) { seen[key] = 1; items.push(txt); } };
+  // Teléfonos de referencia normalizados UNA vez por cliente (los del formulario ya
+  // vienen en E.164; los cargados a mano pueden no estarlo).
+  const rows = clientesRows_().map(o => ({
+    o: o,
+    refsN: [normPhoneE164_(o.ref1Phone), normPhoneE164_(o.ref2Phone), normPhoneE164_(o.ref3Phone)].filter(String),
+  }));
+
+  // 1) El teléfono del solicitante es el de otro cliente.
+  if (appPhoneN) rows.forEach(({ o }) => {
+    if (o.phoneNorm === appPhoneN && o.dniNorm && o.dniNorm !== selfDniNorm)
+      add('tel-cli:' + o.id, 'Su teléfono es el del cliente ' + o.id + ' (' + o.name + ') — ' + resumenPrestamos_(o.id));
+  });
+  // 2) El teléfono del solicitante figura como referencia de otros clientes.
+  if (appPhoneN) rows.forEach(({ o, refsN }) => {
+    if (o.dniNorm === selfDniNorm) return;
+    if (refsN.indexOf(appPhoneN) >= 0)
+      add('es-ref-de:' + o.id, 'Figura como referencia de ' + o.id + ' (' + o.name + ') — ' + resumenPrestamos_(o.id));
+  });
+  refs.forEach(ref => {
+    // 3) La referencia es cliente.
+    const cli = refClienteMatch_(ref.phoneN, selfDniNorm);
+    if (cli) add('ref-cli:' + ref.slot + ':' + cli.id,
+      ref.slot + ' (' + ref.name + ') es el cliente ' + cli.id + ' (' + cli.name + ') — ' + resumenPrestamos_(cli.id));
+    // 4) La referencia comparte teléfono con la referencia de otro prestatario.
+    rows.forEach(({ o, refsN }) => {
+      if (o.dniNorm === selfDniNorm) return;
+      if (refsN.indexOf(ref.phoneN) >= 0)
+        add('ref-comp:' + ref.slot + ':' + o.id,
+          ref.slot + ' comparte teléfono con una referencia de ' + o.id + ' (' + o.name + ') — ' + resumenPrestamos_(o.id));
+    });
+  });
+  // 5) Coincidencias con la hoja «Prospectos» (por teléfono o DNI; excluye al propio solicitante).
+  try {
+    prospectosRows_().forEach(p => {
+      if (selfDniNorm && p.dni && p.dni === selfDniNorm) {
+        add('pro-self:' + p.row, 'El solicitante figura como prospecto «' + p.name + '» (' + p.estado + (p.fecha ? ', ' + p.fecha : '') + ')');
+        return;
+      }
+      if (appPhoneN && p.phoneN === appPhoneN)
+        add('pro-tel:' + p.row, 'Su teléfono coincide con el prospecto «' + p.name + '» (' + p.estado + (p.fecha ? ', ' + p.fecha : '') + ')');
+      refs.forEach(ref => {
+        if (p.phoneN && p.phoneN === ref.phoneN)
+          add('pro-ref:' + ref.slot + ':' + p.row, ref.slot + ' es el prospecto «' + p.name + '» (' + p.estado + (p.fecha ? ', ' + p.fecha : '') + ')');
+      });
+    });
+  } catch (e) { logError_('conexionesPorTelefono_:prospectos', e); }
+  return { items: items };
+}
+
 /* ============ LÍMITE POR DISPOSITIVO/UBICACIÓN (V-39) ============
  * Máximo configurable de personas DISTINTAS (por DNI) que comparten la misma IP,
  * huella/token del dispositivo, ubicación GPS o domicilio declarado. Señales técnicas:
@@ -303,6 +372,47 @@ function v39Quien_(k) {
     return 'DNI ' + k + (c && c.id ? ' (' + c.id + ')' : '');
   }
   return k;
+}
+
+/** Etiqueta ENRIQUECIDA para el PRESTAMISTA: persona + estado de sus préstamos.
+ *  "DNI 30111222 (C-0012 — L-0034 VENCIDO $ 12.000)". Si el DNI no es cliente,
+ *  cae a la etiqueta simple (p. ej. un prospecto sin préstamos). */
+function v39QuienDetalle_(k) {
+  k = String(k || '').trim();
+  const c = /^\d{7,8}$/.test(k) ? clienteByDni_(k) : null;
+  if (c && c.id) return 'DNI ' + k + ' (' + c.id + ' — ' + resumenPrestamos_(c.id) + ')';
+  return v39Quien_(k);
+}
+
+/* ============ PROSPECTOS (lectura para V-39/V-40) ============ */
+
+// Caché por ejecución de la hoja "Prospectos" (identidad: Nombre + CUIL + Teléfono).
+let _prospectosRowsCache = null;
+function invalidateProspectosRows_() { _prospectosRowsCache = null; }
+function prospectosRows_() {
+  if (_prospectosRowsCache) return _prospectosRowsCache;
+  _prospectosRowsCache = [];
+  const sh = getSS_().getSheetByName(CFG.SHEETS.PROSPECTS);
+  if (!sh || sh.getLastRow() < 2) return _prospectosRowsCache;
+  const m = headerMap_(sh);
+  const cF = m['Fecha de Captura'] || 1, cN = m['Nombre'] || 2, cC = m['CUIL'] || 3,
+    cT = m['Teléfono'] || 4, cE = m['Estado'] || 5;
+  const data = sh.getRange(2, 1, sh.getLastRow() - 1, Math.max(cF, cN, cC, cT, cE)).getValues();
+  data.forEach((r, i) => {
+    const name = String(r[cN - 1] || '').trim();
+    const cuil = String(r[cC - 1] || '').replace(/\D/g, '');
+    if (!name && !cuil) return;
+    _prospectosRowsCache.push({
+      name: name,
+      cuil: cuil,
+      dni: cuil.length === 11 ? normDni_(cuil.slice(2, 10)) : '',  // el CUIL embebe el DNI
+      phoneN: normPhoneE164_(r[cT - 1]),
+      estado: String(r[cE - 1] || '').trim().toUpperCase() || 'NUEVO',
+      fecha: (r[cF - 1] instanceof Date) ? Utilities.formatDate(r[cF - 1], Session.getScriptTimeZone(), 'yyyy-MM-dd') : '',
+      row: i + 2,
+    });
+  });
+  return _prospectosRowsCache;
 }
 
 /**
@@ -348,7 +458,8 @@ function checkUbicacionV39_(sig) {
     if (1 + otrosArr.length > cfg.max) {
       exceeded.push({ senal: s.senal, etiqueta: s.etiqueta, valor: s.valor, otros: otrosArr, max: cfg.max });
     } else {
-      alertas.push('Comparte ' + s.etiqueta + ' con ' + otrosArr.length + ' persona(s): ' + otrosArr.map(v39Quien_).join(', '));
+      // Las alertas van SOLO a superficies del prestamista (columna + correo) → detalle con préstamos.
+      alertas.push('Comparte ' + s.etiqueta + ' con ' + otrosArr.length + ' persona(s): ' + otrosArr.map(v39QuienDetalle_).join(', '));
     }
   });
   return { ok: !exceeded.length, exceeded: exceeded.length ? exceeded : null, alertas: alertas };
@@ -365,12 +476,14 @@ function v39MensajeSolicitante_(exceeded) {
     lineas.join('\n') + '\nSi creés que es un error, comunicate con el prestamista.';
 }
 
-/** V-39 — mensaje para el PRESTAMISTA: igual de detallado pero CON las personas por señal. */
-function v39MensajePrestamista_(exceeded) {
+/** V-39 — mensaje para el PRESTAMISTA: cada señal excedida CON las personas conectadas y
+ *  el estado de sus préstamos. `sinCola` omite la cola «Anular límites» (p. ej. en el aviso
+ *  de prospectos, donde no hay nada que aprobar todavía). */
+function v39MensajePrestamista_(exceeded, sinCola) {
   const det = (exceeded || []).map(e =>
     'comparte ' + e.etiqueta + (e.valor ? ' «' + e.valor + '»' : '') + ' con ' + e.otros.length +
-    ' persona(s): ' + e.otros.map(v39Quien_).join(', ') + ' — máximo ' + e.max);
-  return 'V-39 — ' + det.join(' · ') + '. Usá «Anular límites» para aprobar igual.';
+    ' persona(s): ' + e.otros.map(v39QuienDetalle_).join(', ') + ' — máximo ' + e.max);
+  return 'V-39 — ' + det.join(' · ') + (sinCola ? '.' : '. Usá «Anular límites» para aprobar igual.');
 }
 
 /**
@@ -841,6 +954,16 @@ function submitIntakeSmart(form) {
     if (refCli.filter(Boolean).length > 1)
       throw new Error('Como máximo una de tus referencias puede ser cliente nuestro. Reemplazá alguna referencia por una persona que no sea cliente.');
 
+    // V-40 (ADVIERTE) — conexiones por teléfono: informativo para el prestamista (columna
+    // «Conexiones por teléfono» + correo de aviso). Nunca bloquea; un error acá tampoco.
+    let v40 = null;
+    try {
+      v40 = conexionesPorTelefono_(normPhoneE164_(phone) || String(phone || '').trim(),
+        [{ slot: 'Ref 1', name: ref1Name, phoneN: ref1PhoneN },
+         { slot: 'Ref 2', name: ref2Name, phoneN: ref2PhoneN },
+         { slot: 'Ref 3', name: ref3Name, phoneN: ref3PhoneN }], dnV.norm);
+    } catch (e) { logError_('submitIntakeSmart:v40', e); }
+
     // V-39 (BLOQUEA) — límite de personas distintas por IP/dispositivo/GPS/domicilio. Corre ANTES
     // de cualquier escritura (alta de cliente, fotos, fila en "Nuevos Prestatarios"). Un error
     // interno del control nunca bloquea la solicitud (fail-open; la aprobación re-chequea).
@@ -918,6 +1041,8 @@ function submitIntakeSmart(form) {
         '¿Cuenta propia?': isThirdParty ? 'No (tercero)' : 'Sí',
         // V-39: coincidencias que NO superan el máximo (informativas para el prestamista).
         'Alerta ubicación/dispositivo': (v39 && v39.alertas && v39.alertas.length) ? safeCell_('⚠ ' + v39.alertas.join(' · ')) : '',
+        // V-40: conexiones por teléfono (informativas para el prestamista).
+        'Conexiones por teléfono': (v40 && v40.items.length) ? safeCell_('🔗 ' + v40.items.join(' · ')) : '',
       };
       if (isThirdParty) {
         nbFields['Titular de la cuenta'] = safeCell_(holderName);
@@ -1010,6 +1135,7 @@ function submitIntakeSmart(form) {
           row_('Referencia 2 (no familiar)', esc_(ref2Name + ' · ' + ref2Rel + ' · ' + ref2PhoneN) + (reuseRefs ? ' <i>(en archivo)</i>' : '') + (refCli[1] ? ' — <b style="color:#a50e0e">cliente ' + esc_(refCli[1].id) + '</b>' : '')) +
           row_('Referencia 3 (adicional)', esc_(ref3Name + ' · ' + ref3Rel + ' · ' + ref3PhoneN) + (reuseRefs ? ' <i>(en archivo)</i>' : '') + (refCli[2] ? ' — <b style="color:#a50e0e">cliente ' + esc_(refCli[2].id) + '</b>' : '')) +
           ((v39 && v39.alertas && v39.alertas.length) ? row_('⚠ Alerta ubicación/dispositivo', esc_(v39.alertas.join(' · '))) : '') +
+          ((v40 && v40.items.length) ? row_('🔗 Conexiones por teléfono', esc_(v40.items.join(' · '))) : '') +
           row_('Compromisos de pago', 'Aceptados ✓') +
           row_('Foto del frente del DNI', dniUrl ? '<a href="' + dniUrl + '">Ver documento</a>' : '— (cliente ya verificado)') +
           row_('Foto del dorso del DNI', cuilUrl ? '<a href="' + cuilUrl + '">Ver documento</a>' : '— (cliente ya verificado)') +
@@ -1134,6 +1260,49 @@ function clientLoanCount_(clientId) {
     n++;
   });
   return n;
+}
+
+/* ========== RESUMEN DE PRÉSTAMOS POR CLIENTE (V-39/V-40 — detalle al prestamista) ========== */
+
+// Caché por ejecución: ID Cliente → [{loanId, estado, saldo}] (UNA lectura de "Prestatarios").
+let _prestamosResumenCache = null;
+function invalidatePrestamosResumen_() { _prestamosResumenCache = null; }
+function prestamosPorCliente_() {
+  if (_prestamosResumenCache) return _prestamosResumenCache;
+  _prestamosResumenCache = {};
+  const bs = getSS_().getSheetByName(CFG.SHEETS.BORROWERS);
+  if (!bs || bs.getLastRow() < 2) return _prestamosResumenCache;
+  const H = headerIndex_(bs);
+  const idC = colByAny_(H, ['ID Préstamo', 'ID Prestamo']) || PB.LOAN_ID;
+  const cliC = colByAny_(H, ['ID Cliente']) || PB.CLIENT_ID;
+  const salC = colByAny_(H, ['Saldo Pendiente']) || PB.BALANCE;
+  const stC = colByAny_(H, ['Estado']) || PB.STATE;
+  const data = bs.getRange(2, 1, bs.getLastRow() - 1, Math.max(idC, cliC, salC, stC)).getValues();
+  data.forEach(r => {
+    const cid = String(r[cliC - 1] || '').trim();
+    const lid = String(r[idC - 1] || '').trim();
+    if (!cid || !lid) return;
+    (_prestamosResumenCache[cid] = _prestamosResumenCache[cid] || []).push({
+      loanId: lid,
+      estado: String(r[stC - 1] || '').trim().toUpperCase(),
+      saldo: Number(r[salC - 1]) || 0,
+    });
+  });
+  return _prestamosResumenCache;
+}
+
+/**
+ * Resumen en texto plano de los préstamos del cliente, para las superficies del
+ * PRESTAMISTA (correo, Resultado, columnas de alerta). Vigentes con saldo; los
+ * cerrados solo se cuentan. Ej.: 'L-0034 VENCIDO $ 12.000 · L-0040 ACTIVO $ 50.000'
+ * | 'sin préstamos vigentes (3 saldados)' | 'sin préstamos'.
+ */
+function resumenPrestamos_(clientId) {
+  const loans = prestamosPorCliente_()[String(clientId || '').trim()] || [];
+  if (!loans.length) return 'sin préstamos';
+  const vigentes = loans.filter(l => l.estado !== ST.PAID && l.estado !== ST.CLEARED);
+  if (!vigentes.length) return 'sin préstamos vigentes (' + loans.length + ' saldado' + (loans.length === 1 ? '' : 's') + ')';
+  return vigentes.map(l => l.loanId + ' ' + l.estado + ' ' + fmtMoney_(l.saldo)).join(' · ');
 }
 
 /**
@@ -3273,20 +3442,55 @@ function submitProspecto(form) {
     const phV = vPhone_(form.phone);     // → +54 + 10 dígitos
     if (!phV.ok) throw new Error(phV.msg);
 
+    // El CUIL embebe el DNI (dígitos 3 a 10): es la identidad canónica para V-39/V-40.
+    const dniPros = normDni_(cuV.norm.slice(2, 10));
+
+    // V-40 (ADVIERTE) — conexiones por teléfono del prospecto (no tiene referencias → refs=[]).
+    // Se calcula ANTES de agregar su fila para que no se detecte a sí mismo. Nunca bloquea.
+    let v40 = null;
+    try { v40 = conexionesPorTelefono_(phV.norm, [], dniPros); }
+    catch (e) { logError_('submitProspecto:v40', e); }
+
     const ss = getSS_();
     const sh = ss.getSheetByName(CFG.SHEETS.PROSPECTS) || setupProspectos_(ss);
     // Orden EXACTO de PROSPECTOS_HEADERS: Fecha, Nombre(col B), CUIL, Teléfono, Estado, Contactado?, Nota.
     const row = nbAppend_(sh, [new Date(), safeCell_(name), safeCell_(cuV.norm), safeCell_(phV.norm), 'NUEVO', 'No', '']);
     try { sh.getRange(row, 1).setNumberFormat('yyyy-mm-dd hh:mm'); } catch (e) { }
 
-    // Dispositivo/antifraude: EXACTO como submitIntakeSmart, con loanId:'(prospecto)'. Nunca
+    // Dispositivo/antifraude: EXACTO como submitIntakeSmart, con loanId:'(prospecto)' y el DNI
+    // derivado del CUIL (así la fila participa de V-39 y se excluye como propia). Nunca
     // debe interrumpir la captura → best-effort en try/catch.
     try {
       const devMeta = meta || {};
       devMeta.deviceFp = (typeof deviceFingerprint_ === 'function') ? deviceFingerprint_(devMeta.device || {}) : '';
       if (typeof logDeviceInfo_ === 'function')
-        logDeviceInfo_({ loanId: '(prospecto)', clientId: '', dni: '', name: name, email: '', direccion: '' }, '', devMeta);
+        logDeviceInfo_({ loanId: '(prospecto)', clientId: '', dni: dniPros, name: name, email: '', direccion: '' }, '', devMeta);
     } catch (e) { logError_('submitProspecto:dispositivo', e); }
+
+    // V-39 — SOLO ADVERTENCIA para prospectos (nunca se bloquea el registro de un interesado):
+    // mismas señales que el formulario de solicitud (IP / huella / token / GPS; sin domicilio).
+    // La propia fila recién registrada en "Dispositivos" se excluye por el DNI del CUIL.
+    let w39 = '';
+    try {
+      const devFp39 = (typeof deviceFingerprint_ === 'function') ? deviceFingerprint_((meta && meta.device) || {}) : '';
+      const dloc = (meta && meta.device && meta.device.loc) || {};
+      const r39 = checkUbicacionV39_({
+        dniNorm: dniPros, clientId: '',
+        ip: String((meta && meta.ip) || ''), deviceFp: devFp39,
+        token: String((meta && meta.device && meta.device.token) || ''),
+        gps: String(dloc.gps || ''), address: '',
+      });
+      if (r39 && !r39.ok) w39 = v39MensajePrestamista_(r39.exceeded, true);
+      else if (r39 && r39.alertas && r39.alertas.length) w39 = r39.alertas.join(' · ');
+    } catch (e) { logError_('submitProspecto:v39', e); }
+
+    // Resumen de alertas en la hoja "Prospectos" (columna «Alertas (V-39/V-40)», si existe).
+    try {
+      const alertTxt = [(w39 ? '⚠ ' + w39 : ''), ((v40 && v40.items.length) ? '🔗 ' + v40.items.join(' · ') : '')]
+        .filter(String).join('  |  ');
+      const mAl = headerMap_(sh);
+      if (alertTxt && mAl['Alertas (V-39/V-40)']) sh.getRange(row, mAl['Alertas (V-39/V-40)']).setValue(safeCell_(alertTxt));
+    } catch (e) { logError_('submitProspecto:alertas', e); }
 
     // Aviso al prestamista con los datos del prospecto (similar al aviso de nuevas solicitudes).
     // El prospecto NO deja correo, así que el aviso va a «Correo del Prestamista» + adicionales.
@@ -3305,6 +3509,8 @@ function submitProspecto(form) {
           row_('Teléfono', esc_(phV.norm)) +
           row_('Estado', 'NUEVO') +
           (waContact ? row_('WhatsApp', '<a href="' + waContact + '">📲 Escribir al prospecto</a>') : '') +
+          (w39 ? row_('⚠ Alerta ubicación/dispositivo', esc_(w39)) : '') +
+          ((v40 && v40.items.length) ? row_('🔗 Conexiones por teléfono', esc_(v40.items.join(' · '))) : '') +
           '</table>' +
           '<p>Revisalo en la hoja <b>Prospectos</b>. Si califica, tildá <b>Aprobar y avisar 📲</b> para enviarle el enlace del formulario de solicitud, o <b>Rechazar?</b> para descartarlo.</p>');
       }

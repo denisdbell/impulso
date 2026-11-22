@@ -108,7 +108,7 @@ const NB = ['Fecha de Envío', 'Nombre completo', 'Correo', 'DNI', 'Teléfono', 
   'Ref 3 Nombre', 'Ref 3 Vínculo', 'Ref 3 Teléfono', 'Avisar Ref 3 📲', 'Ref 3 Validada?', 'Compromiso aceptado',
   '¿Cuenta propia?', 'Titular de la cuenta', 'DNI del titular', 'Correo del titular', 'Teléfono del titular',
   'DNI titular (frente)', 'DNI titular (dorso)', 'Titular acepta?', 'Avisar al titular 📲',
-  'Alerta ubicación/dispositivo'];
+  'Alerta ubicación/dispositivo', 'Conexiones por teléfono'];
 
 /* ============================ MENÚ ============================ */
 function onOpen() {
@@ -868,7 +868,14 @@ function ensureIntakeRefColumns_(ss) {
       if (cAl > 0) {
         nb.setColumnWidth(cAl, 260);
         nb.getRange(2, cAl, CFG.MAX_ROWS, 1).setWrap(true);
-        nb.getRange(1, cAl).setNote('⚠ V-39 — coincidencias de IP/dispositivo/GPS/domicilio con otros clientes detectadas al enviar la solicitud. Detalle informativo; si se supera el máximo configurado, la aprobación se bloquea (se anula con «Anular límites»).');
+        nb.getRange(1, cAl).setNote('⚠ V-39 — coincidencias de IP/dispositivo/GPS/domicilio con otros clientes detectadas al enviar la solicitud (incluye el estado de los préstamos de cada persona conectada). Detalle informativo; si se supera el máximo configurado, la aprobación se bloquea (se anula con «Anular límites»).');
+      }
+      // Columna informativa V-40: conexiones por teléfono.
+      const cCx = clientesHeaderCol_(nb, 'Conexiones por teléfono', true);
+      if (cCx > 0) {
+        nb.setColumnWidth(cCx, 260);
+        nb.getRange(2, cCx, CFG.MAX_ROWS, 1).setWrap(true);
+        nb.getRange(1, cCx).setNote('🔗 V-40 — conexiones por teléfono: referencias que son clientes, clientes que comparten el teléfono del solicitante o lo listan como referencia, referencias compartidas y coincidencias con «Prospectos», con el estado de los préstamos de cada cliente conectado. Informativo, no bloquea.');
       }
     }
     // Columnas "Avisar Ref 1/2/3 📲": enlace de WhatsApp JUNTO al teléfono de cada referencia. Se
@@ -1493,7 +1500,7 @@ const CLIENTE_BCRA_COMP_COL = 'BCRA (comprimido)';
 const ANALISIS_NAME_CELL = 'B3';   // selector del prospecto (desplegable)
 const ANALISIS_MODE_CELL = 'B4';   // «Solo no aprobados» / «Todos»
 const ANALISIS_OUT_ROW = 7;        // primera fila de la salida del análisis
-const PROSPECTOS_HEADERS = ['Fecha de Captura', 'Nombre', 'CUIL', 'Teléfono', 'Estado', 'Contactado?', 'Nota', 'Aprobar y avisar 📲', 'Rechazar?', 'WhatsApp 📲', PROSPECTO_JSON_COL, PROSPECTO_SCORE_COL, PROSPECTO_DECISION_COL];
+const PROSPECTOS_HEADERS = ['Fecha de Captura', 'Nombre', 'CUIL', 'Teléfono', 'Estado', 'Contactado?', 'Nota', 'Aprobar y avisar 📲', 'Rechazar?', 'WhatsApp 📲', PROSPECTO_JSON_COL, PROSPECTO_SCORE_COL, PROSPECTO_DECISION_COL, 'Alertas (V-39/V-40)'];
 function setupProspectos_(ss) {
   ss = ss || getSS_();
   const sh = getOrCreate_(ss, CFG.SHEETS.PROSPECTS);
@@ -1502,10 +1509,15 @@ function setupProspectos_(ss) {
   if (head.join('|') !== PROSPECTOS_HEADERS.join('|')) {
     sh.getRange(1, 1, 1, PROSPECTOS_HEADERS.length).setValues([PROSPECTOS_HEADERS])
       .setFontWeight('bold').setBackground('#1c4587').setFontColor('#fff').setWrap(true);
-    [150, 220, 140, 140, 110, 110, 260, 160, 110, 180, 320, 100, 120].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+    [150, 220, 140, 140, 110, 110, 260, 160, 110, 180, 320, 100, 120, 260].forEach((w, i) => sh.setColumnWidth(i + 1, w));
     sh.getRange(2, 1, CFG.MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd hh:mm');
     const jc = PROSPECTOS_HEADERS.indexOf(PROSPECTO_JSON_COL) + 1;
     if (jc > 0) sh.getRange(1, jc).setNote('Pegá acá el JSON de la Central de Deudores del BCRA de este prospecto (respuesta de /Deudas o /Deudas/Historicas). Después, en «Análisis de Deuda», elegí su nombre para correr el análisis.');
+    const ac = PROSPECTOS_HEADERS.indexOf('Alertas (V-39/V-40)') + 1;
+    if (ac > 0) {
+      sh.getRange(2, ac, CFG.MAX_ROWS, 1).setWrap(true);
+      sh.getRange(1, ac).setNote('⚠/🔗 Alertas al registrarse el prospecto: V-39 (mismo dispositivo/IP/GPS que otras personas, con el estado de sus préstamos) y V-40 (conexiones por teléfono con clientes/prospectos). Informativo, no bloquea.');
+    }
   }
   const cb = SpreadsheetApp.newDataValidation().requireCheckbox().build();
   // Botón de APROBAR (casilla de acción): al tildarla, el onEdit abre WhatsApp con un mensaje
@@ -3652,7 +3664,14 @@ function setupNew_(ss) {
   if (alertaCol > 0) {
     sh.setColumnWidth(alertaCol, 260);
     sh.getRange(2, alertaCol, CFG.MAX_ROWS, 1).setWrap(true);
-    sh.getRange(1, alertaCol).setNote('⚠ V-39 — coincidencias de IP/dispositivo/GPS/domicilio con otros clientes detectadas al enviar la solicitud. Detalle informativo; si se supera el máximo configurado, la aprobación se bloquea (se anula con «Anular límites»).');
+    sh.getRange(1, alertaCol).setNote('⚠ V-39 — coincidencias de IP/dispositivo/GPS/domicilio con otros clientes detectadas al enviar la solicitud (incluye el estado de los préstamos de cada persona conectada). Detalle informativo; si se supera el máximo configurado, la aprobación se bloquea (se anula con «Anular límites»).');
+  }
+  // Columna informativa V-40: conexiones por teléfono (clientes/prospectos) con estado de préstamos.
+  const conexCol = NB.indexOf('Conexiones por teléfono') + 1;
+  if (conexCol > 0) {
+    sh.setColumnWidth(conexCol, 260);
+    sh.getRange(2, conexCol, CFG.MAX_ROWS, 1).setWrap(true);
+    sh.getRange(1, conexCol).setNote('🔗 V-40 — conexiones por teléfono: referencias que son clientes, clientes que comparten el teléfono del solicitante o lo listan como referencia, referencias compartidas y coincidencias con «Prospectos», con el estado de los préstamos de cada cliente conectado. Informativo, no bloquea.');
   }
   // Casilla "Titular acepta?" (cuenta de terceros): el titular confirmó que acepta recibir el dinero.
   const taCol = NB.indexOf('Titular acepta?') + 1;
