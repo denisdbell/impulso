@@ -151,12 +151,16 @@ faltantes se bajan en segundo plano (se puede desactivar en *Options*); exportá
 cualquier ranking o una ficha a Markdown desde el menú. Abrí otra planilla con
 *File ▸ Open workbook…*.
 
-The app adds three **anti-fraud** sections to the sidebar: **🚩 Fraude**
-(cross-record signals, computed on load), **🪪 DNI** (OCR verification, triggered
-by a button), and **🖥 Devices** (device & network insights from the «Dispositivos»
-sheet — shared devices/IPs/GPS, automation, IP-vs-address and more). Fraude and DNI
-also appear as cards in the **Persona** view; all export to Markdown and are
-available from the command line.
+The app adds three **anti-fraud** sections to the sidebar: **🚩 Fraud signals**
+(cross-record signals computed on load, plus the V-38/39/40 rules mirror from
+`analyze_rules.py` as extra tabs — see below), **🪪 DNI** (OCR verification,
+triggered by a button), and **🖥 Devices** (device & network insights from the
+«Dispositivos» sheet — shared devices/IPs/GPS, automation, IP-vs-address and
+more). Fraud and DNI also appear as cards in the **Persona** view; all export to
+Markdown and are available from the command line. A **📈 Likelihood** page (see
+`analyze_likelihood.py` below) adds a data-calibrated P(repay-on-time) per person
+and per pending applicant, a 4th gauge + "why" card in the Persona view, and a
+sortable **P(repay)** column in the Combined ranking.
 
 ### Device insights (`analyze_devices.py`)
 
@@ -210,6 +214,65 @@ risk of **High** (≥40 or any HIGH signal) · **Review** (1–39) · **OK** (0)
 
 These are **indicative leads for manual review, not verdicts** (several have
 legitimate explanations: cohabitants, same neighborhood, low GPS precision).
+
+### Anti-fraud rules mirror (`analyze_rules.py`)
+
+A read-only mirror of the sheet's newest Apps Script validations, so the dashboard
+shows what production would decide — per person, **with the loan status of every
+connected person** (`L-0034 OVERDUE $ 12.000 · …`). Output is **English**: the
+production messages are Spanish, so sheet statuses are translated for display only
+(ACTIVO→ACTIVE, VENCIDO→OVERDUE, CONGELADO→FROZEN, PAGADO→PAID, SALDADO→SETTLED);
+matching always runs on the raw values.
+
+- **V-38** — max ONE of the three references may be an existing client (phone match).
+- **V-39** — configurable limit of distinct persons sharing IP / device fingerprint /
+  persistent token / GPS / declared address ("if they applied again today", same
+  question the approval hook asks). Config (switch, max, GPS radius, IP window) is
+  read from the workbook's «Configuración» sheet.
+- **V-40** — informative phone-connection map (references who are clients, shared
+  phones, reverse references, «Prospectos» matches), plus the prospect warnings.
+
+GUI: four searchable tabs inside **🚩 Fraud signals** (V-38 · References, V-39 ·
+Device / location, V-40 · Phone connections, Prospects) + rule checks inside the
+Fraud card of the **Persona** view (one bullet per finding); the fraud-page
+Markdown export bundles signals and rules in one file. CLI:
+`python3 bcra/analyze_rules.py --all` → `out/_rules.md`.
+Indicative — the blocking itself happens in Apps Script.
+
+### Repayment likelihood (`analyze_likelihood.py`)
+
+A **predictive, data-calibrated** complement to the descriptive scores: the
+probability that a borrower's **next/requested loan is repaid on time (≤ 3 days
+late)**, learned from the book's own resolved loans. Pure stdlib (no sklearn):
+
+- **Leakage-free training set** — one row per resolved loan, features strictly
+  as of origination (term, log amount, prior on-time loans, prior trouble, BCRA
+  state in the 12 months *before* the loan, BCRA-file-missing indicator).
+- **L2-regularized logistic regression** (IRLS/Newton, λ=2 fixed a priori),
+  validated with **leave-one-client-out CV** against a base-rate and a
+  term-only baseline, with a tercile calibration table and a client-level
+  bootstrap for the odds-ratio intervals. A **shipping gate** (AUC ≥ 0.65 +
+  Brier skill + monotone calibration) re-decides on every load whether
+  probabilities are displayed at all — otherwise only the factor profile shows.
+- Scores **existing clients** (reference loan = last capital at 30 days),
+  **BCRA-only prospects**, and **pending applicants** from «Nuevos
+  Prestatarios» (their actual requested amount/term; internal history reused
+  when the DNI/CUIL matches a client).
+- Output: `out/_likelihood.md` — profile table (which factors move on-time
+  repayment in THIS book), coefficients with bootstrap CIs, honest validation,
+  people + applicants ranking, and an explicit **limits** section.
+
+```sh
+python3 bcra/analyze_likelihood.py --all          # profile + ranking → out/_likelihood.md
+python3 bcra/analyze_likelihood.py 20123456789    # one person, with per-feature drivers
+python3 bcra/analyze_likelihood.py --selftest     # deterministic numeric self-checks
+```
+
+> **Read the limits.** At ~75 labeled loans / ~19 bad events this is a
+> calibrated summary of a term/amount/history table, **not** a learned risk
+> engine; coefficients are directional. BCRA situación shows no signal in the
+> *approved* book (approval already filters it — range restriction), so this
+> score complements, never replaces, the upstream BCRA reject gate.
 
 ### DNI verification by OCR (`fetch_dni.py` + `verify_dni.py`)
 

@@ -40,6 +40,8 @@ import analyze_impulso
 import analyze_combined
 import analyze_fraud  # cross-record fraud signals (pure workbook read — no extra deps)
 import analyze_devices  # «Dispositivos» device/fraud insights (pure workbook read)
+import analyze_likelihood  # data-calibrated repayment-likelihood model (pure workbook+json read)
+import analyze_rules  # mirror of the Apps Script anti-fraud rules V-38/39/40 (pure workbook read)
 import verify_dni     # DNI photo OCR vs Clientes (Tesseract; lazy-imported inside)
 import fetch_dni      # download the DNI photos from Drive (service account; lazy-imported)
 import fetch_impulso  # re-download the workbook from the live Google Sheet on reload
@@ -111,6 +113,8 @@ class DataService:
         self.dni = []       # DNI OCR verification records (filled on demand by a scan)
         self.fraud = []     # cross-record fraud signals (filled on every load)
         self.devices = {}   # «Dispositivos» device/fraud insights (filled on every load)
+        self.likelihood = {}  # repayment-likelihood model + scores (filled on every load)
+        self.rules = {}     # V-38/39/40 anti-fraud rules mirror (filled on every load)
         self.loaded_at = None
 
     # ---- whole portfolio ----
@@ -142,6 +146,10 @@ class DataService:
         self.icohort = analyze_impulso.build_cohort(str(self.xlsx), today)
         if fetch:
             cuils = [c["cuil"] for c in self.icohort if c.get("cuil")]
+            try:
+                cuils += analyze_likelihood.pending_cuils(str(self.xlsx))  # applicants' BCRA too
+            except Exception:  # noqa: BLE001
+                pass
             progress("Downloading missing BCRA files…")
             report._ensure_bcra(cuils, str(self.out_dir), insecure)
         progress("Scoring BCRA…")
@@ -158,6 +166,17 @@ class DataService:
             self.devices = analyze_devices.build_devices(str(self.xlsx), clients=self.clients, today=today)
         except Exception:  # noqa: BLE001 — a device-scan hiccup must not break the dashboard
             self.devices = {}
+        progress("Likelihood model…")
+        try:
+            self.likelihood = analyze_likelihood.build_likelihood(
+                str(self.xlsx), str(self.out_dir), today, clients=self.clients)
+        except Exception:  # noqa: BLE001 — a model hiccup must not break the dashboard
+            self.likelihood = {}
+        progress("Anti-fraud rules…")
+        try:
+            self.rules = analyze_rules.build_rules(str(self.xlsx), today)
+        except Exception:  # noqa: BLE001 — a rules hiccup must not break the dashboard
+            self.rules = {}
         self.loaded_at = datetime.datetime.now()
 
     def verify_dni_scan(self, fetch=True, progress=lambda m: None):
@@ -187,14 +206,18 @@ class DataService:
     # ---- table-ready rows ----
     def combined_rows(self):
         rows = sorted(self.combined, key=lambda r: (-(r["combined"] if r["combined"] is not None else -1), r["name"]))
+        lk_shipped = (self.likelihood or {}).get("shipped")
+        lk_by_cuil = {r["cuil"]: r for r in (self.likelihood or {}).get("rows", []) if r.get("cuil")}
         out = []
         for i, r in enumerate(rows, 1):
+            lkr = lk_by_cuil.get(r["cuil"] or "")
             out.append({
                 "rank": i, "cuil": r["cuil"] or "—", "name": r["name"] or "—",
                 "combined": r["combined"] if r["combined"] is not None else "",
                 "rating": rating_letter(r["rating"]),
                 "bcra": r["bcra_score"] if r["bcra_score"] is not None else "—",
                 "impulso": r["imp_score"] if r["imp_score"] is not None else "—",
+                "p_repay": (lkr["probability"] if (lk_shipped and lkr) else "—"),
                 "decision": r["decision"], "source": r["source"],
                 "token": r["cuil"] or r["name"],
             })
@@ -291,6 +314,68 @@ class DataService:
                 "decision": self._DEV_DEC.get(e["riesgo"], "OK"), "token": e["token"],
             })
         return out
+
+    # ---- repayment likelihood ----
+    def likelihood_rows(self):
+        lk = self.likelihood or {}
+        shipped = lk.get("shipped")
+        out = []
+        for i, r in enumerate(lk.get("rows", []), 1):
+            out.append({
+                "rank": i, "cuil": r["cuil"] or "—", "name": r["name"] or "—",
+                "prob": r["probability"] if shipped else "—",
+                "tier": r["tier"] if shipped else "—",
+                "basis": r["basis"], "drivers": r["drivers"],
+                "decision": r["decision"] if shipped else "NO RECORD",
+                "token": r["token"],
+            })
+        return out
+
+    def applicant_rows(self):
+        lk = self.likelihood or {}
+        shipped = lk.get("shipped")
+        out = []
+        for a in lk.get("applicants", []):
+            out.append({
+                "submitted": a["submitted"].isoformat() if a.get("submitted") else "—",
+                "name": a["name"] or "—", "dni": a["dni"] or "—", "cuil": a["cuil"] or "—",
+                "amount": money(a.get("amount") or 0),
+                "term": "%dd" % int(a.get("term_days") or 0),
+                "prob": a["probability"] if shipped else "—",
+                "tier": a["tier"] if shipped else "—", "basis": a["basis"],
+                "drivers": a["drivers"],
+                "decision": a["decision"] if shipped else "NO RECORD",
+                "token": a["token"],
+            })
+        return out
+
+    def likelihood_profile_rows(self):
+        return [{
+            "factor": b["factor"], "bucket": b["bucket"], "n": b["n"], "good": b["good"],
+            "rate": "%d%%" % round(100 * b["rate"]), "lift": "%+d pp" % round(100 * b["lift"]),
+        } for b in (self.likelihood or {}).get("profile", [])]
+
+    # ---- anti-fraud rules mirror (V-38/39/40) ----
+    def rules_v38_rows(self):
+        return [dict(r, cuil=r["dni"]) for r in (self.rules or {}).get("v38", []) if r["n"] > 0]
+
+    def rules_v39_rows(self):
+        return [dict(r, cuil=r["dni"]) for r in (self.rules or {}).get("v39", []) if r["status"] != "OK"]
+
+    def rules_v40_rows(self):
+        return [dict(r, cuil=r["dni"]) for r in (self.rules or {}).get("v40", [])]
+
+    def rules_prospect_rows(self):
+        return list((self.rules or {}).get("prospects", []))
+
+    def find_likelihood(self, cuil="", dni="", client_id=""):
+        """Likelihood row for a person, matched like _find_fraud (cuil → dni → id)."""
+        for r in (self.likelihood or {}).get("rows", []):
+            if (client_id and r.get("client_id") == client_id) or \
+               (cuil and r.get("cuil") == cuil) or \
+               (dni and r.get("dni") == dni):
+                return r
+        return None
 
     def dni_rows(self):
         dmap = {"OK": "OK", "Review": "REVIEW", "No match": "REJECT", "No photo": "NO RECORD"}
@@ -391,9 +476,13 @@ class DataService:
         rec = analyze_combined.combine(bcra_light, imp_light, self.iw, self.bw) if (bcra_light or imp_light) else None
 
         name = (a_imp["name"] if a_imp and a_imp.get("name") else "") or (a_bcra["name"] if a_bcra else "") or token
+        lk = self.find_likelihood(cuil, a_imp["dni"] if a_imp else "",
+                                  a_imp["client_id"] if a_imp else "")
+        rules = analyze_rules.find_person(self.rules, cuil, a_imp["dni"] if a_imp else "",
+                                          a_imp["client_id"] if a_imp else "")
         return {"token": token, "name": name, "cuil": cuil,
                 "a_bcra": a_bcra, "bcra_rank": bcra_rank,
-                "a_imp": a_imp, "imp_rank": imp_rank, "rec": rec}
+                "a_imp": a_imp, "imp_rank": imp_rank, "rec": rec, "lk": lk, "rules": rules}
 
 
 # --------------------------------------------------------------------------- #
@@ -683,8 +772,10 @@ class App(tk.Tk):
         for key, label in [("overview", "📊  Overview"), ("combined", "🔀  Combined"),
                            ("bcra", "🏦  BCRA bureau"), ("impulso", "💳  Impulso"),
                            ("loans_due", "📅  Loans by month"),
-                           ("fraud", "🚩  Fraude"), ("dni", "🪪  DNI"),
-                           ("devices", "🖥  Devices"), ("person", "🔍  Person")]:
+                           ("fraud", "🚩  Fraud signals"), ("dni", "🪪  DNI"),
+                           ("devices", "🖥  Devices"),
+                           ("likelihood", "📈  Likelihood"),
+                           ("person", "🔍  Person")]:
             b = tk.Label(self.side, text="   " + label, bg=SIDEBAR, fg="#e5e7eb",
                          font=self.fonts["nav"], anchor="w", padx=8, pady=10, cursor="hand2")
             b.pack(fill="x", padx=8, pady=1)
@@ -712,6 +803,7 @@ class App(tk.Tk):
         self._build_fraud()
         self._build_dni()
         self._build_devices()
+        self._build_likelihood()
         self._build_person()
         self._build_loans_due()
         self.show_page("overview")
@@ -770,6 +862,13 @@ class App(tk.Tk):
         self._card(self.cards, "OK", str(d.get("OK", 0)), DECISION_COLOR["OK"])
         self._card(self.cards, "Review", str(d.get("REVIEW", 0)), DECISION_COLOR["REVIEW"])
         self._card(self.cards, "Reject", str(d.get("REJECT", 0)), DECISION_COLOR["REJECT"])
+        lk = self.data.likelihood or {}
+        if lk.get("shipped") and lk.get("rows"):
+            vals = [r["probability"] for r in lk["rows"]]
+            self._card(self.cards, "Avg P(repay) — %d scored" % len(vals),
+                       "%d%%" % round(sum(vals) / len(vals)), ACCENT)
+        else:
+            self._card(self.cards, "Avg P(repay)", "—", ACCENT)
         when = s["loaded_at"].strftime("%Y-%m-%d %H:%M") if s["loaded_at"] else "—"
         self.ov_sub.configure(text="%d borrowers · %d bureau records · %d joined on both · %d single-source · loaded %s"
                               % (s["borrowers"], s["bureau"], s["both"], s["single"], when))
@@ -940,7 +1039,8 @@ class App(tk.Tk):
             [("rank", "#", 44, "center", True), ("cuil", "CUIL", 120, "center", False),
              ("name", "Name", 230, "w", False), ("combined", "Combined", 90, "center", True),
              ("rating", "Rt", 44, "center", False), ("bcra", "BCRA", 70, "center", True),
-             ("impulso", "Impulso", 80, "center", True), ("decision", "Decision", 90, "center", False),
+             ("impulso", "Impulso", 80, "center", True), ("p_repay", "P(repay)", 80, "center", True),
+             ("decision", "Decision", 90, "center", False),
              ("source", "Source", 90, "center", False)],
             lambda: self.data.combined_rows(), "combined")
         self.pages["bcra"] = self._ranking_page(
@@ -972,13 +1072,54 @@ class App(tk.Tk):
         return page
 
     def _build_fraud(self):
-        self.pages["fraud"] = self._ranking_page(
-            "Fraud signals",
-            "Per-client leads (indicative — review manually). Identity/device = high risk.",
-            [("riesgo", "Risk", 80, "center", False), ("name", "Client", 210, "w", False),
-             ("dni", "DNI", 100, "center", False), ("cuil", "CUIL", 115, "center", False),
-             ("n", "#", 44, "center", True), ("signals", "Signals", 440, "w", False)],
-            lambda: self.data.fraud_rows(), "fraud")
+        """Fraud page: cross-record signals + the V-38/39/40 rules mirror as tabs."""
+        page = ttk.Frame(self.content, style="TFrame")
+        self.pages["fraud"] = page
+        head = ttk.Frame(page, style="TFrame")
+        head.pack(fill="x")
+        ttk.Label(head, text="Fraud signals", style="H1.TLabel").pack(side="left")
+        ttk.Button(head, text="Export .md", command=lambda: self._export_named("fraud")).pack(side="right")
+        ttk.Label(page, text="Cross-record fraud leads plus the mirror of the sheet's anti-fraud "
+                             "validations — V-38 (max one reference may be a client), V-39 "
+                             "(device/location limit, as if each person applied again today) and "
+                             "V-40 (phone-connection map) — every connected person shown with the "
+                             "status of their loans. Indicative, review manually: the blocking "
+                             "itself happens in Apps Script. Double-click a row to open the person.",
+                  style="Muted.TLabel", wraplength=900, justify="left").pack(anchor="w", pady=(2, 4))
+        self.rules_quality = ttk.Label(page, text="Rules mirror unavailable.", style="Muted.TLabel")
+        self.rules_quality.pack(anchor="w", pady=(0, 8))
+        nb = ttk.Notebook(page)
+        nb.pack(fill="both", expand=True, pady=(4, 0))
+        self.fraud_panels = {}
+        specs = [
+            ("signals", "Signals", [
+                ("riesgo", "Risk", 80, "center", False), ("name", "Client", 210, "w", False),
+                ("dni", "DNI", 100, "center", False), ("cuil", "CUIL", 115, "center", False),
+                ("n", "#", 44, "center", True), ("signals", "Signals", 440, "w", False)]),
+            ("v38", "V-38 · References", [
+                ("name", "Client", 190, "w", False), ("dni", "DNI", 95, "center", False),
+                ("n", "Client refs", 85, "center", True), ("verdict", "Verdict", 80, "center", False),
+                ("detail", "References who are clients — with their loan status", 520, "w", False)]),
+            ("v39", "V-39 · Device / location", [
+                ("name", "Person", 190, "w", False), ("dni", "DNI", 95, "center", False),
+                ("status", "Status", 70, "center", False), ("signals", "Own signals", 180, "w", False),
+                ("detail", "Shared with — with their loan status", 460, "w", False)]),
+            ("v40", "V-40 · Phone connections", [
+                ("name", "Person", 190, "w", False), ("dni", "DNI", 95, "center", False),
+                ("n", "#", 44, "center", True),
+                ("detail", "Connections — with their loan status", 580, "w", False)]),
+            ("prospects", "Prospects", [
+                ("name", "Prospect", 180, "w", False), ("cuil", "CUIL", 120, "center", False),
+                ("estado", "Status", 95, "center", False), ("fecha", "Captured", 95, "center", False),
+                ("detail", "Warnings (⚠ V-39 · 🔗 V-40)", 480, "w", False)]),
+        ]
+        for key, label, cols in specs:
+            panel = RankingPanel(nb, cols, self.open_person, self.fonts)
+            nb.add(panel, text=label)
+            self.fraud_panels[key] = panel
+        sig = self.fraud_panels["signals"]
+        sig._rows_fn = lambda: self.data.fraud_rows()
+        page._panel = sig   # keeps the shared ranking-refresh paths working
 
     def _build_devices(self):
         page = ttk.Frame(self.content, style="TFrame")
@@ -1031,6 +1172,74 @@ class App(tk.Tk):
         self.dev_panels["clusters"].set_rows(self.data.device_cluster_rows())
         self.dev_panels["flags"].set_rows(self.data.device_flag_rows())
         self.dev_panels["log"].set_rows(self.data.device_log_rows())
+
+    def _refresh_rules(self):
+        self.rules_quality.configure(text=analyze_rules.quality_line(self.data.rules))
+        self.fraud_panels["v38"].set_rows(self.data.rules_v38_rows())
+        self.fraud_panels["v39"].set_rows(self.data.rules_v39_rows())
+        self.fraud_panels["v40"].set_rows(self.data.rules_v40_rows())
+        self.fraud_panels["prospects"].set_rows(self.data.rules_prospect_rows())
+
+    def _build_likelihood(self):
+        page = ttk.Frame(self.content, style="TFrame")
+        self.pages["likelihood"] = page
+        head = ttk.Frame(page, style="TFrame")
+        head.pack(fill="x")
+        ttk.Label(head, text="Repayment likelihood", style="H1.TLabel").pack(side="left")
+        ttk.Button(head, text="Export .md", command=lambda: self._export_named("likelihood")).pack(side="right")
+        ttk.Label(page, text="Probability that the next/requested loan is repaid on time (≤3 days late), "
+                             "calibrated on this book's resolved loans and validated leave-one-client-out. "
+                             "Indicative, not a verdict — double-click a row to open the person.",
+                  style="Muted.TLabel").pack(anchor="w", pady=(2, 4))
+        self.lk_quality = ttk.Label(page, text="Model unavailable.", style="Muted.TLabel")
+        self.lk_quality.pack(anchor="w", pady=(0, 8))
+        nb = ttk.Notebook(page)
+        nb.pack(fill="both", expand=True, pady=(4, 0))
+        self.lk_panels = {}
+        specs = [
+            ("people", "People", [
+                ("rank", "#", 44, "center", True), ("cuil", "CUIL", 120, "center", False),
+                ("name", "Name", 220, "w", False), ("prob", "P(repay)", 80, "center", True),
+                ("tier", "Tier", 50, "center", False), ("basis", "Basis", 90, "center", False),
+                ("drivers", "Key drivers", 380, "w", False)]),
+            ("applicants", "Pending applicants", [
+                ("submitted", "Submitted", 100, "center", False), ("name", "Name", 200, "w", False),
+                ("dni", "DNI", 95, "center", False), ("amount", "Amount", 110, "e", False),
+                ("term", "Term", 56, "center", False), ("prob", "P(repay)", 80, "center", True),
+                ("tier", "Tier", 50, "center", False), ("basis", "Basis", 80, "center", False),
+                ("drivers", "Key drivers", 300, "w", False)]),
+        ]
+        for key, label, cols in specs:
+            panel = RankingPanel(nb, cols, self.open_person, self.fonts)
+            nb.add(panel, text=label)
+            self.lk_panels[key] = panel
+        # model profile tab — the factor table behind the score (no person to open)
+        prof = ttk.Frame(nb, style="Card.TFrame")
+        nb.add(prof, text="Model profile")
+        cols = [("factor", "Factor", 210, "w"), ("bucket", "Bucket", 210, "w"),
+                ("n", "Loans", 70, "center"), ("good", "On time", 80, "center"),
+                ("rate", "Rate", 70, "center"), ("lift", "Lift vs base", 100, "center")]
+        tv = ttk.Treeview(prof, columns=[c[0] for c in cols], show="headings")
+        for k, h, w_, anc in cols:
+            tv.heading(k, text=h)
+            tv.column(k, width=w_, anchor=anc)
+        vs = ttk.Scrollbar(prof, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=vs.set)
+        vs.pack(side="right", fill="y", padx=(0, 12), pady=12)
+        tv.pack(fill="both", expand=True, padx=(12, 0), pady=12)
+        self.lk_profile_tv = tv
+
+    def _refresh_likelihood(self):
+        self.lk_quality.configure(text=analyze_likelihood.quality_line(self.data.likelihood))
+        self.lk_panels["people"].set_rows(self.data.likelihood_rows())
+        self.lk_panels["applicants"].set_rows(self.data.applicant_rows())
+        tv = self.lk_profile_tv
+        tv.delete(*tv.get_children())
+        last = None
+        for r in self.data.likelihood_profile_rows():
+            fac = r["factor"] if r["factor"] != last else ""
+            last = r["factor"]
+            tv.insert("", "end", values=(fac, r["bucket"], r["n"], r["good"], r["rate"], r["lift"]))
 
     def _build_dni(self):
         page = ttk.Frame(self.content, style="TFrame")
@@ -1177,6 +1386,8 @@ class App(tk.Tk):
         self._refresh_overview()
         self._refresh_loans_due()
         self._refresh_devices()
+        self._refresh_rules()
+        self._refresh_likelihood()
         # person search choices
         choices = self.data.people_choices()
         self._cb_map = {label: token for label, token in choices}
@@ -1252,10 +1463,11 @@ class App(tk.Tk):
         # gauges row
         gcard = tk.Frame(body, bg=SURFACE)
         gcard.pack(fill="x", pady=(0, 12))
+        lk = payload.get("lk")
         gc = tk.Canvas(gcard, bg=SURFACE, highlightthickness=0, height=168)
         gc.pack(fill="x", padx=16, pady=14)
-        gc.bind("<Configure>", lambda e: self._draw_person_gauges(gc, rec, a_bcra, a_imp))
-        self.after(30, lambda: self._draw_person_gauges(gc, rec, a_bcra, a_imp))
+        gc.bind("<Configure>", lambda e: self._draw_person_gauges(gc, rec, a_bcra, a_imp, lk))
+        self.after(30, lambda: self._draw_person_gauges(gc, rec, a_bcra, a_imp, lk))
 
         if rec:
             cap = tk.Frame(body, bg=SURFACE)
@@ -1267,6 +1479,8 @@ class App(tk.Tk):
             tk.Label(cap, text="  (Impulso %.0f%% · BCRA %.0f%%)" % (self.data.iw * 100, self.data.bw * 100),
                      bg=SURFACE, fg=MUTED, font=f["small"]).pack(side="left")
 
+        # Repayment likelihood (predictive — next loan)
+        self._section_likelihood(body, payload)
         # Impulso section
         self._section_impulso(body, a_imp, payload["imp_rank"])
         # BCRA section
@@ -1306,25 +1520,58 @@ class App(tk.Tk):
         return None
 
     def _section_fraud(self, body, payload):
+        """One card: cross-record fraud signals + the V-38/39/40 rule checks."""
         f = self.fonts
-        c = self._card_frame(body, "🚩  Fraud signals")
+        c = self._card_frame(body, "🚩  Fraud signals & rule checks")
         rec = self._find_fraud(payload)
-        if not rec or rec["riesgo"] == "OK" or not rec["signals"]:
-            tk.Label(c, text="No fraud signals detected.", bg=SURFACE, fg=MUTED,
-                     font=f["base"]).pack(anchor="w", padx=16, pady=(0, 14))
+        pr = payload.get("rules")
+        has_signals = rec and rec["riesgo"] != "OK" and rec["signals"]
+        if not has_signals and not pr:
+            tk.Label(c, text="No fraud signals and no rule findings for this person.",
+                     bg=SURFACE, fg=MUTED, font=f["base"]).pack(anchor="w", padx=16, pady=(0, 14))
             return
-        rmap = {"High": "REJECT", "Review": "REVIEW"}
-        cap = tk.Frame(c, bg=SURFACE)
-        cap.pack(fill="x")
-        tk.Label(cap, text="Risk", bg=SURFACE, fg=MUTED, font=f["small"]).pack(side="left", padx=(16, 8), pady=4)
-        badge = tk.Canvas(cap, bg=SURFACE, highlightthickness=0, height=26, width=110)
-        badge.pack(side="left", pady=4)
-        draw_badge(badge, 0, 2, rec["riesgo"], DECISION_COLOR.get(rmap.get(rec["riesgo"], ""), MUTED), f)
-        for s in rec["signals"]:
-            txt = "•  %s%s" % (s["label"], ("  —  " + s["detail"]) if s["detail"] else "")
-            tk.Label(c, text=txt, bg=SURFACE, fg=INK, font=f["base"], anchor="w").pack(anchor="w", padx=16)
-        tk.Label(c, text="Indicative — review manually.", bg=SURFACE, fg=MUTED,
-                 font=f["hint"]).pack(anchor="w", padx=16, pady=(4, 14))
+        if has_signals:
+            rmap = {"High": "REJECT", "Review": "REVIEW"}
+            cap = tk.Frame(c, bg=SURFACE)
+            cap.pack(fill="x")
+            tk.Label(cap, text="Risk", bg=SURFACE, fg=MUTED, font=f["small"]).pack(side="left", padx=(16, 8), pady=4)
+            badge = tk.Canvas(cap, bg=SURFACE, highlightthickness=0, height=26, width=110)
+            badge.pack(side="left", pady=4)
+            draw_badge(badge, 0, 2, rec["riesgo"], DECISION_COLOR.get(rmap.get(rec["riesgo"], ""), MUTED), f)
+            for s in rec["signals"]:
+                txt = "•  %s%s" % (s["label"], ("  —  " + s["detail"]) if s["detail"] else "")
+                tk.Label(c, text=txt, bg=SURFACE, fg=INK, font=f["base"], anchor="w").pack(anchor="w", padx=16)
+        else:
+            tk.Label(c, text="No cross-record fraud signals.", bg=SURFACE, fg=MUTED,
+                     font=f["base"]).pack(anchor="w", padx=16)
+        if pr:
+            tk.Label(c, text="Rule checks — V-38 · V-39 · V-40 (mirror of the sheet, loan statuses included)",
+                     bg=SURFACE, fg=MUTED, font=f["small"]).pack(anchor="w", padx=16, pady=(10, 2))
+            rows = []
+            if pr.get("v38"):
+                r = pr["v38"]
+                rows.append(("V-38", "%d client reference(s) — %s" % (r["n"], r["verdict"]),
+                             r.get("items") or [], DECISION_COLOR.get(r["decision"], INK)))
+            if pr.get("v39"):
+                r = pr["v39"]
+                rows.append(("V-39", "%s · %s" % (r["status"], r["signals"]),
+                             r.get("items") or [], DECISION_COLOR.get(r["decision"], INK)))
+            if pr.get("v40"):
+                r = pr["v40"]
+                rows.append(("V-40", "%d phone connection(s)" % r["n"],
+                             r.get("items") or [], DECISION_COLOR["REVIEW"]))
+            for tag, headline, items, col in rows:
+                line = tk.Frame(c, bg=SURFACE)
+                line.pack(fill="x", padx=16, anchor="w")
+                tk.Label(line, text=tag, bg=SURFACE, fg=col, font=f["bold"], width=6,
+                         anchor="w").pack(side="left")
+                tk.Label(line, text=headline, bg=SURFACE, fg=INK, font=f["base"],
+                         anchor="w").pack(side="left")
+                for it in items:
+                    tk.Label(c, text="•  " + it, bg=SURFACE, fg=MUTED, font=f["small"], anchor="w",
+                             wraplength=700, justify="left").pack(anchor="w", padx=(52, 16))
+        tk.Label(c, text="Indicative — review manually; the blocking itself happens in Apps Script.",
+                 bg=SURFACE, fg=MUTED, font=f["hint"]).pack(anchor="w", padx=16, pady=(6, 14))
 
     def _section_dni(self, body, payload):
         f = self.fonts
@@ -1359,25 +1606,68 @@ class App(tk.Tk):
         tk.Label(c, text="OCR reading is indicative and may contain errors.", bg=SURFACE, fg=MUTED,
                  font=f["hint"]).pack(anchor="w", padx=16, pady=(2, 14))
 
-    def _draw_person_gauges(self, cv, rec, a_bcra, a_imp):
+    def _draw_person_gauges(self, cv, rec, a_bcra, a_imp, lk=None):
         cv.delete("all")
         w = cv.winfo_width() or 760
-        third = w / 3
+        q = w / 4
         combined = rec["combined"] if rec else "—"
         ccolor = RATING_COLOR.get(rating_letter(rec["rating"]) if rec else "—", MUTED)
-        draw_gauge(cv, third * 0.5, 96, 64, combined, "COMBINED", ccolor, self.fonts)
+        draw_gauge(cv, q * 0.5, 96, 64, combined, "COMBINED", ccolor, self.fonts)
         bval = a_bcra["score"] if a_bcra else "—"
         bcolor = RATING_COLOR.get(rating_letter(a_bcra["rating"]) if a_bcra else "—", MUTED)
-        draw_gauge(cv, third * 1.5, 96, 64, bval, "BCRA BUREAU", bcolor, self.fonts)
+        draw_gauge(cv, q * 1.5, 96, 64, bval, "BCRA BUREAU", bcolor, self.fonts)
         ival = a_imp["score"] if (a_imp and a_imp["has_record"]) else "—"
         icolor = RATING_COLOR.get(rating_letter(a_imp["rating"]) if (a_imp and a_imp["has_record"]) else "—", MUTED)
-        draw_gauge(cv, third * 2.5, 96, 64, ival, "IMPULSO", icolor, self.fonts)
+        draw_gauge(cv, q * 2.5, 96, 64, ival, "IMPULSO", icolor, self.fonts)
+        shipped = lk and lk.get("shipped", True)
+        lval = lk["probability"] if (lk and shipped) else "—"
+        lcolor = RATING_COLOR.get(lk["tier"] if (lk and shipped) else "—", MUTED)
+        draw_gauge(cv, q * 3.5, 96, 64, lval, "P(REPAY) %", lcolor, self.fonts)
 
     def _card_frame(self, parent, title):
         c = tk.Frame(parent, bg=SURFACE)
         c.pack(fill="x", pady=(0, 12))
         tk.Label(c, text=title, bg=SURFACE, fg=INK, font=self.fonts["h2"], anchor="w").pack(anchor="w", padx=16, pady=(12, 4))
         return c
+
+    def _section_likelihood(self, body, payload):
+        f = self.fonts
+        lk = payload.get("lk")
+        c = self._card_frame(body, "📈  Repayment likelihood — next loan")
+        if not lk:
+            tk.Label(c, text="Not scored — no row for this person in the likelihood model "
+                             "(model unavailable or person outside both sources).",
+                     bg=SURFACE, fg=MUTED, font=f["base"]).pack(anchor="w", padx=16, pady=(0, 14))
+            return
+        shipped = lk.get("shipped", True)
+        if not shipped:
+            tk.Label(c, text="Shipping gate failed — factor readout only, not a probability.",
+                     bg=SURFACE, fg=DECISION_COLOR["REVIEW"], font=f["base"]).pack(anchor="w", padx=16)
+        cap = tk.Frame(c, bg=SURFACE)
+        cap.pack(fill="x")
+        tk.Label(cap, text=("%d%%" % lk["probability"]) if shipped else "—", bg=SURFACE,
+                 fg=RATING_COLOR.get(lk["tier"] if shipped else "—", INK),
+                 font=f["card_num"]).pack(side="left", padx=(16, 10))
+        badge = tk.Canvas(cap, bg=SURFACE, highlightthickness=0, height=26, width=110)
+        badge.pack(side="left", pady=8)
+        draw_badge(badge, 0, 2, ("Tier " + lk["tier"]) if shipped else "NO SCORE",
+                   RATING_COLOR.get(lk["tier"] if shipped else "—", MUTED), f)
+        tk.Label(cap, text="  basis: %s" % lk["basis"], bg=SURFACE, fg=MUTED,
+                 font=f["small"]).pack(side="left")
+        if lk.get("ref_capital") is not None:
+            tk.Label(c, text="Reference loan: %s at %d days (assumption — the score moves with "
+                             "the actual request)." % (money(lk["ref_capital"]),
+                                                       lk.get("ref_term", 30)),
+                     bg=SURFACE, fg=MUTED, font=f["small"], anchor="w").pack(anchor="w", padx=16)
+        tk.Label(c, text="Key drivers: %s" % lk["drivers"], bg=SURFACE, fg=INK, font=f["base"],
+                 anchor="w", wraplength=760, justify="left").pack(anchor="w", padx=16, pady=(4, 0))
+        if lk.get("n_similar"):
+            tk.Label(c, text="Similar resolved loans (same term/history cell): %d · observed "
+                             "on-time %d%%" % (lk["n_similar"], lk["similar_rate"]),
+                     bg=SURFACE, fg=MUTED, font=f["small"]).pack(anchor="w", padx=16, pady=(2, 0))
+        tk.Label(c, text=analyze_likelihood.quality_line(self.data.likelihood), bg=SURFACE,
+                 fg=MUTED, font=f["hint"], anchor="w", wraplength=760,
+                 justify="left").pack(anchor="w", padx=16, pady=(4, 14))
 
     def _section_impulso(self, body, a_imp, rank):
         c = self._card_frame(body, "💳  Impulso — repayment with us")
@@ -1662,7 +1952,7 @@ class App(tk.Tk):
             self.reload()
 
     def _export_ranking(self):
-        self._export_named(self._active if self._active in ("combined", "bcra", "impulso", "fraud", "dni", "devices") else "combined")
+        self._export_named(self._active if self._active in ("combined", "bcra", "impulso", "fraud", "dni", "devices", "likelihood") else "combined")
 
     def _export_named(self, key):
         if not self.data.loaded_at:
@@ -1674,14 +1964,19 @@ class App(tk.Tk):
             text = analyze_bcra.render_leaderboard_md(self.data.bcohort)
             default = "_ranking.md"
         elif key == "fraud":
-            text = analyze_fraud.render_md(self.data.fraud)
-            default = "_fraude.md"
+            # The fraud page hosts the rules mirror too — export both together.
+            text = (analyze_fraud.render_md(self.data.fraud) + "\n\n---\n\n" +
+                    analyze_rules.render_md(self.data.rules))
+            default = "_fraud.md"
         elif key == "devices":
             text = analyze_devices.render_md(self.data.devices)
             default = "_dispositivos.md"
         elif key == "dni":
             text = verify_dni.render_md(self.data.dni)
             default = "_dni.md"
+        elif key == "likelihood":
+            text = analyze_likelihood.render_md(self.data.likelihood)
+            default = "_likelihood.md"
         else:
             text = analyze_impulso.render_leaderboard_md(self.data.icohort)
             default = "_impulso_ranking.md"
@@ -1701,6 +1996,11 @@ class App(tk.Tk):
             parts += ["", "---", "", analyze_bcra.render_md(p["a_bcra"], p["bcra_rank"])]
         if p["a_imp"]:
             parts += ["", "---", "", analyze_impulso.render_client_md(p["a_imp"], p["imp_rank"])]
+        if p.get("rules"):
+            parts += ["", "---", "", analyze_rules.render_person_md(p["rules"])]
+        if p.get("lk"):
+            parts += ["", "---", "", analyze_likelihood.render_person_md(p["lk"]), "",
+                      "_%s_" % analyze_likelihood.quality_line(self.data.likelihood)]
         stem = p["cuil"] or (p["a_imp"]["dni"] if p["a_imp"] else "") or "person"
         path = filedialog.asksaveasfilename(title="Export dossier", defaultextension=".md",
                                             initialfile="%s.full.report.md" % stem)
