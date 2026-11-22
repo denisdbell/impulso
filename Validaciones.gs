@@ -107,7 +107,7 @@ const VALIDATION_RULES = [
   ['V-36', 'Formulario y Aprobación', 'Cuenta de terceros', 'Si el dinero se recibe en una cuenta que NO es del solicitante (métodos distintos de Efectivo), es OBLIGATORIO declarar al titular: nombre (mín. 10 caracteres), DNI válido, correo válido, teléfono válido y fotos del DNI (frente y dorso). El DNI, el correo y el teléfono del titular deben ser DISTINTOS de los del solicitante (el nombre puede coincidir). El titular será notificado y recibirá una copia del contrato. Antes de aprobar, el titular debe CONFIRMAR su conformidad (casilla «Titular acepta?» en Nuevos Prestatarios, pedible con «Avisar al titular 📲»): ABSOLUTO, no se anula con «Anular límites». Sin estos datos la solicitud NO se procesa.', 'Para enviar el dinero a la cuenta de un tercero, completá los datos del titular (nombre, DNI, correo, teléfono y fotos del DNI) y obtené su conformidad. Sin esta información el préstamo no puede procesarse.', 'BLOQUEA', 'ALTA'],
   ['V-37', 'Formulario', 'Cuenta destino', 'La cuenta destino (alias, CBU o CVU donde se recibe el dinero) es obligatoria para todo método que no sea Efectivo.', 'Ingresá la cuenta (alias, CBU o CVU) donde vas a recibir el dinero.', 'BLOQUEA', 'MEDIA'],
   ['V-38', 'Formulario y Aprobación', 'Referencias', 'A lo sumo UNA de las tres referencias puede ser cliente existente de Impulso Crédito (coincidencia del teléfono normalizado contra «Clientes», en cualquier casillero). Dos o más referencias-cliente → se bloquea el envío y la aprobación. No se anula con «Anular límites».', 'Como máximo una de tus referencias puede ser cliente nuestro. Reemplazá alguna referencia por una persona que no sea cliente.', 'BLOQUEA', 'ALTA'],
-  ['V-39', 'Formulario y Aprobación', 'Anti-fraude', 'Máximo configurable («Máximo de personas por dispositivo/ubicación», por defecto 2) de personas DISTINTAS (por DNI) que comparten la misma IP (ventana en días), huella/token del dispositivo, ubicación GPS (radio en metros) o domicilio declarado normalizado. Bloquea el envío del formulario y la aprobación detallando cada señal excedida, su valor y la cantidad de personas; al solicitante no se le muestran los DNI de terceros. El detalle al PRESTAMISTA incluye además los préstamos vigentes y su estado de cada persona conectada. También se evalúa (solo como ADVERTENCIA, nunca bloquea) al registrarse un prospecto, y el aviso «Nuevo prospecto» incluye el detalle. Se anula con «Anular límites» SOLO en la aprobación. Interruptor: «Límite por dispositivo/ubicación (SÍ/NO)».', 'Se superó el máximo de personas que pueden solicitar desde el mismo dispositivo o ubicación.', 'BLOQUEA', 'ALTA'],
+  ['V-39', 'Formulario y Aprobación', 'Anti-fraude', 'Máximo configurable («Máximo de personas por dispositivo/ubicación», por defecto 2) de personas DISTINTAS (por DNI) que comparten la misma IP (ventana en días), huella/token del dispositivo, ubicación GPS (radio en metros) o domicilio declarado normalizado. Bloquea el envío del formulario y la aprobación detallando cada señal excedida, su valor y la cantidad de personas; al solicitante no se le muestran los DNI de terceros. El detalle al PRESTAMISTA incluye además los préstamos vigentes y su estado de cada persona conectada. También se evalúa (solo como ADVERTENCIA, nunca bloquea) al registrarse un prospecto, y el aviso «Nuevo prospecto» incluye el detalle. Se anula con «Anular límites» SOLO en la aprobación. Interruptor: «Límite por dispositivo/ubicación (SÍ/NO)». Además, SOLO como información al prestamista (nunca bloquea): se compara el domicilio declarado contra el del DNI (hoja «Datos DNI (OCR)») y se informa COINCIDE / POSIBLE / NO COINCIDE en la columna de alerta, el correo de aviso y la aprobación. Sin fila de OCR no se informa nada, y este cotejo NO suma al conteo de personas.', 'Se superó el máximo de personas que pueden solicitar desde el mismo dispositivo o ubicación.', 'BLOQUEA', 'ALTA'],
   ['V-40', 'Formulario', 'Anti-fraude', 'Mapa informativo de CONEXIONES POR TELÉFONO del solicitante o prospecto: referencias que son clientes, clientes que comparten su teléfono o lo listan como referencia, referencias compartidas con otros prestatarios y coincidencias con la hoja «Prospectos» — con el estado de los préstamos (vigentes y saldo) de cada cliente conectado. Solo para el prestamista: correo de aviso, columna «Conexiones por teléfono» en Nuevos Prestatarios y columna «Alertas (V-39/V-40)» en Prospectos. No bloquea.', '—', 'ADVIERTE', 'MEDIA'],
 ];
 
@@ -203,6 +203,26 @@ function normAddress_(v) {
   const n = String(v == null ? '' : v).normalize('NFD').replace(/[̀-ͯ]/g, '')
     .toLowerCase().replace(/[^a-z0-9ñ]+/g, ' ').replace(/\s+/g, ' ').trim();
   return n.length >= 8 ? n : '';
+}
+
+/** Distancia de Levenshtein con tope: devuelve max+1 apenas lo supera (corte
+ *  temprano). Genérica — reutilizable por otros cotejos difusos (p. ej. nombres). */
+function levenshtein_(a, b, max) {
+  a = String(a == null ? '' : a); b = String(b == null ? '' : b); max = max || 2;
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let prev = [];
+  for (let j = 0; j <= b.length; j++) prev.push(j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    let best = i;
+    for (let j = 1; j <= b.length; j++) {
+      cur.push(Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)));
+      if (cur[j] < best) best = cur[j];
+    }
+    if (best > max) return max + 1;
+    prev = cur;
+  }
+  return prev[b.length];
 }
 
 /**
@@ -509,6 +529,98 @@ function v39ForApproval_(dniNorm, clientId, address) {
     address: address,
   });
   return { ok: res.ok, msg: res.ok ? '' : v39MensajePrestamista_(res.exceeded) };
+}
+
+/* ===== V-39 (informativo) — DOMICILIO DEL DNI (hoja «Datos DNI (OCR)») =====
+ * La hoja la escribe bcra/extract_dni_to_sheet.py (OCR local de las fotos del
+ * DNI). Cotejo del domicilio DECLARADO contra el del documento: SOLO informa
+ * al prestamista — nunca bloquea, es ajeno a «Anular límites» y NO suma al
+ * conteo de personas de V-39. Sin hoja/fila/domicilio → silencio total. */
+const DNI_OCR_SHEET = 'Datos DNI (OCR)';
+
+// Caché por ejecución (la hoja solo la escribe la herramienta externa).
+let _dniOcrRowsCache = null;
+function invalidateDniOcrRows_() { _dniOcrRowsCache = null; }
+function dniOcrRows_() {
+  if (_dniOcrRowsCache) return _dniOcrRowsCache;
+  _dniOcrRowsCache = [];
+  const sh = getSS_().getSheetByName(DNI_OCR_SHEET);
+  if (!sh || sh.getLastRow() < 2) return _dniOcrRowsCache;
+  const H = headerIndex_(sh);
+  const cDni = colByAny_(H, ['DNI (OCR)']);
+  const cId = colByAny_(H, ['ID Cliente']);
+  const cDom = colByAny_(H, ['Domicilio (OCR)']);
+  if (!cDom || (!cDni && !cId)) return _dniOcrRowsCache;
+  const val = v => { const s = String(v == null ? '' : v).trim(); return s === '—' ? '' : s; };
+  sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues().forEach(r => {
+    const dni = cDni ? normDni_(val(r[cDni - 1])) : '';
+    const id = cId ? val(r[cId - 1]) : '';   // =HYPERLINK → getValues devuelve la etiqueta (C-xxxx)
+    if (dni || id) _dniOcrRowsCache.push({ dniNorm: dni, clientId: id, domicilio: val(r[cDom - 1]) });
+  });
+  return _dniOcrRowsCache;
+}
+
+// Tokens "de relleno" que no identifican un domicilio (se ignoran en el cotejo).
+const ADDR_STOP_TOKENS = {
+  av: 1, avda: 1, avenida: 1, calle: 1, pje: 1, pasaje: 1, diagonal: 1, ruta: 1,
+  nro: 1, numero: 1, piso: 1, dpto: 1, depto: 1, casa: 1, lote: 1, mza: 1, manzana: 1,
+  barrio: 1, bo: 1,
+};
+
+/** Clasifica dos domicilios YA normalizados con normAddress_.
+ *  'COINCIDE' | 'POSIBLE' | 'NO COINCIDE' | 'SIN DATOS'. Determinístico:
+ *  igualdad EXACTA token a token (no substring: "587" no coincide con "5875"). */
+function compararDomicilios_(decN, ocrN) {
+  if (!decN || !ocrN) return 'SIN DATOS';
+  if (decN === ocrN) return 'COINCIDE';
+  const toks = s => {
+    // Separa dígito↔letra pegados («2821san» → «2821 san»: error de tipeo frecuente).
+    s = s.replace(/(\d)(?=[a-zñ])/g, '$1 ').replace(/([a-zñ])(?=\d)/g, '$1 ');
+    const t = s.split(' ').filter(x => x && !ADDR_STOP_TOKENS[x]);
+    return t.length >= 2 ? t : s.split(' ').filter(String);   // respaldo si queda corto
+  };
+  const uniq = a => a.filter((t, i) => a.indexOf(t) === i);
+  const A = uniq(toks(decN)), B = uniq(toks(ocrN));
+  const setB = {};
+  B.forEach(t => { setB[t] = 1; });
+  const shared = A.filter(t => setB[t]);
+  // COINCIDE: un lado contiene TODOS los tokens del otro (≥2 tokens) — el DNI
+  // agrega localidad/partido/provincia que el declarado suele omitir.
+  if ((A.length >= 2 && shared.length === A.length) ||
+      (B.length >= 2 && shared.length === B.length)) return 'COINCIDE';
+  // POSIBLE (a): mismo número de calle + un token alfabético (≥4 letras) a
+  // distancia ≤2 (errores típicos de OCR: O↔0, letra caída).
+  const isNum = t => /^\d+$/.test(t);
+  const numComun = A.some(t => isNum(t) && setB[t]);
+  const wA = A.filter(t => !isNum(t) && t.length >= 4);
+  const wB = B.filter(t => !isNum(t) && t.length >= 4);
+  if (numComun && wA.some(a => wB.some(b => levenshtein_(a, b, 2) <= 2))) return 'POSIBLE';
+  // POSIBLE (b): comparten ≥2 tokens y al menos la MITAD del lado más corto.
+  if (shared.length >= 2 && shared.length * 2 >= Math.min(A.length, B.length)) return 'POSIBLE';
+  return 'NO COINCIDE';
+}
+
+/** V-39 (informativo) — domicilio DECLARADO vs. domicilio del DNI (OCR).
+ *  Devuelve { verdict, ocr, msg }; msg = texto para el PRESTAMISTA ('' si no
+ *  hay datos). Busca por DNI y, como respaldo, por ID Cliente; prefiere una
+ *  fila con domicilio legible. */
+function domicilioDniVerdict_(dniNorm, clientId, declaredAddress) {
+  const sinDatos = { verdict: 'SIN DATOS', ocr: '', msg: '' };
+  const decN = normAddress_(declaredAddress);
+  if (!decN) return sinDatos;
+  const rows = dniOcrRows_();
+  const first = list => list.filter(r => normAddress_(r.domicilio))[0] || null;
+  const own = first(rows.filter(r => dniNorm && r.dniNorm === dniNorm)) ||
+    first(rows.filter(r => clientId && r.clientId === clientId));
+  if (!own) return sinDatos;
+  const verdict = compararDomicilios_(decN, normAddress_(own.domicilio));
+  if (verdict === 'SIN DATOS') return sinDatos;
+  const dec = String(declaredAddress).trim();
+  const msg = (verdict === 'COINCIDE')
+    ? 'Domicilio del DNI: COINCIDE con el declarado («' + own.domicilio + '»)'
+    : 'Domicilio del DNI: ' + (verdict === 'POSIBLE' ? 'coincidencia POSIBLE' : 'NO COINCIDE') +
+      ' — DNI: «' + own.domicilio + '» · declarado: «' + dec + '»';
+  return { verdict: verdict, ocr: own.domicilio, msg: msg };
 }
 
 /* ==================== BLOQUEO DE CLIENTES (V-33) ==================== */
@@ -988,6 +1100,12 @@ function submitIntakeSmart(form) {
       throw new Error(v39MensajeSolicitante_(v39.exceeded));
     }
 
+    // V-39 (informativo) — domicilio del DNI (OCR) vs declarado: SOLO informa al
+    // prestamista, NUNCA bloquea. Fail-open como el resto de los controles no esenciales.
+    let dvDom = null;
+    try { dvDom = domicilioDniVerdict_(dnV.norm, existing ? existing.id : '', address); }
+    catch (e) { logError_('submitIntakeSmart:domicilioDni', e); }
+
     const rate = termRateDays_(term), interest = round2_(amount * rate), total = round2_(amount * (1 + rate));
 
     // Alta / reutilización del cliente (esquema normalizado).
@@ -1040,7 +1158,13 @@ function submitIntakeSmart(form) {
         'Compromiso aceptado': new Date(),
         '¿Cuenta propia?': isThirdParty ? 'No (tercero)' : 'Sí',
         // V-39: coincidencias que NO superan el máximo (informativas para el prestamista).
-        'Alerta ubicación/dispositivo': (v39 && v39.alertas && v39.alertas.length) ? safeCell_('⚠ ' + v39.alertas.join(' · ')) : '',
+        // V-39: coincidencias que no superan el máximo + cotejo del domicilio del DNI
+        // (solo los veredictos de alerta; COINCIDE sería ruido en una columna de alertas).
+        'Alerta ubicación/dispositivo': (function () {
+          const alertas39 = ((v39 && v39.alertas) || []).concat(
+            (dvDom && dvDom.msg && dvDom.verdict !== 'COINCIDE') ? [dvDom.msg] : []);
+          return alertas39.length ? safeCell_('⚠ ' + alertas39.join(' · ')) : '';
+        })(),
         // V-40: conexiones por teléfono (informativas para el prestamista).
         'Conexiones por teléfono': (v40 && v40.items.length) ? safeCell_('🔗 ' + v40.items.join(' · ')) : '',
       };
@@ -1135,6 +1259,7 @@ function submitIntakeSmart(form) {
           row_('Referencia 2 (no familiar)', esc_(ref2Name + ' · ' + ref2Rel + ' · ' + ref2PhoneN) + (reuseRefs ? ' <i>(en archivo)</i>' : '') + (refCli[1] ? ' — <b style="color:#a50e0e">cliente ' + esc_(refCli[1].id) + '</b>' : '')) +
           row_('Referencia 3 (adicional)', esc_(ref3Name + ' · ' + ref3Rel + ' · ' + ref3PhoneN) + (reuseRefs ? ' <i>(en archivo)</i>' : '') + (refCli[2] ? ' — <b style="color:#a50e0e">cliente ' + esc_(refCli[2].id) + '</b>' : '')) +
           ((v39 && v39.alertas && v39.alertas.length) ? row_('⚠ Alerta ubicación/dispositivo', esc_(v39.alertas.join(' · '))) : '') +
+          ((dvDom && dvDom.msg) ? row_((dvDom.verdict === 'COINCIDE' ? '✓' : '⚠') + ' Domicilio del DNI', esc_(dvDom.msg)) : '') +
           ((v40 && v40.items.length) ? row_('🔗 Conexiones por teléfono', esc_(v40.items.join(' · '))) : '') +
           row_('Compromisos de pago', 'Aceptados ✓') +
           row_('Foto del frente del DNI', dniUrl ? '<a href="' + dniUrl + '">Ver documento</a>' : '— (cliente ya verificado)') +

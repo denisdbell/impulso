@@ -1005,11 +1005,28 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
   const rowVals = nb.getRange(row, 1, 1, nb.getLastColumn()).getValues()[0];
   const g = t => m[t] ? rowVals[m[t] - 1] : '';
   const resCol = m['Resultado'], verCol = m['Verificado?'];
-  const fail = msg => { if (resCol) nb.getRange(row, resCol).setValue('⚠ ' + msg); if (verCol) nb.getRange(row, verCol).setValue(false); return { ok: false, msg: msg }; };
+  let dvDom = null;   // V-39 informativo: domicilio del DNI (OCR) vs declarado — nunca bloquea
+  const fail = msg => {
+    const extra = (dvDom && dvDom.msg && dvDom.verdict !== 'COINCIDE') ? ' · ' + dvDom.msg : '';
+    if (resCol) nb.getRange(row, resCol).setValue('⚠ ' + msg + extra);
+    if (verCol) nb.getRange(row, verCol).setValue(false);
+    return { ok: false, msg: msg };
+  };
 
   const name = String(g('Nombre completo')).trim();
   const email = String(g('Correo')).trim();
   const dni = String(g('DNI')).trim();
+
+  // Cotejo informativo del domicilio del DNI (hoja «Datos DNI (OCR)»): solo lee —
+  // NO escribe la fila de solicitud (el claim anti-duplicados hashea rowVals).
+  // Fail-open y ajeno a «Anular límites», como señal V-39 que nunca bloquea.
+  try {
+    if (typeof domicilioDniVerdict_ === 'function') {
+      const dniN0 = normDni_(dni);
+      const ex0 = (typeof clienteByDni_ === 'function') ? clienteByDni_(dniN0) : null;
+      dvDom = domicilioDniVerdict_(dniN0, ex0 ? ex0.id : '', String(g('Dirección') || '').trim());
+    }
+  } catch (e) { logError_('approveApplicantV2_:domicilioDni', e); }
   const phone = String(g('Teléfono')).trim();
   const amount = Number(g('Monto Solicitado')) || 0;
   const term = Number(g('Plazo (días)') || g('Plazo (meses)') || g('Plazo')) || 0;
@@ -1144,7 +1161,11 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
     cache.put(claimKey, '1', 120); // ventana de reclamo: 2 min
     loanId = nextLoanId_(); tRow = insertBorrowerRow_(bs, idCol);
     bs.getRange(tRow, idCol).setValue(loanId);
-    if (override) bs.getRange(tRow, idCol).setNote('Aprobado con anulación de límites (override) el ' + fmtDate_(new Date()) + '.');
+    // Notas persistentes del alta: override + veredicto del domicilio del DNI (informativo).
+    const notasId = [];
+    if (override) notasId.push('Aprobado con anulación de límites (override) el ' + fmtDate_(new Date()) + '.');
+    if (dvDom && dvDom.msg) notasId.push((dvDom.verdict === 'COINCIDE' ? '✓ ' : '⚠ ') + dvDom.msg);
+    if (notasId.length) bs.getRange(tRow, idCol).setNote(notasId.join('\n'));
     bs.getRange(tRow, cliCol).setValue(clienteId);
     bs.getRange(tRow, capCol).setValue(amount);
     bs.getRange(tRow, plzCol).setValue(term);
@@ -1274,7 +1295,10 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
     }
   }
 
-  return { ok: true, loanId: loanId, name: name, overridden: !!override };
+  return {
+    ok: true, loanId: loanId, name: name, overridden: !!override,
+    domicilio: (dvDom && dvDom.msg) ? ('Domicilio DNI: ' + dvDom.verdict) : '',
+  };
 }
 
 /**
@@ -1290,7 +1314,7 @@ function verifyApplicantV2_(nb, row, override) {
     const res = approveApplicantV2_(ss, bs, nb, row, headerMap_(nb), override);
     if (res.ok) {
       try { reactivateBorrowers_(ss); } catch (e) { logError_('verifyApplicantV2_:reactivar', e); }
-      try { ss.toast('Aprobado ' + res.name + ' → ' + res.loanId + (res.overridden ? ' · límites anulados' : '') + ' · movido a Prestatarios (pendiente de firma).', '✔ Aprobado', 6); } catch (e) { }
+      try { ss.toast('Aprobado ' + res.name + ' → ' + res.loanId + (res.overridden ? ' · límites anulados' : '') + ' · movido a Prestatarios (pendiente de firma).' + (res.domicilio ? ' · ' + res.domicilio : ''), '✔ Aprobado', 6); } catch (e) { }
     } else {
       try { ss.toast(res.msg, '⚠ No aprobado', 8); } catch (e) { }
     }

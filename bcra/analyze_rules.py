@@ -96,6 +96,58 @@ def norm_address(v):
     return s if len(s) >= 8 else ""
 
 
+# ---- declared-vs-DNI-card address check (mirror of compararDomicilios_) ---- #
+ADDR_MATCH, ADDR_POSSIBLE, ADDR_NO = "MATCHES", "POSSIBLE match", "DOES NOT match"
+ADDR_STOP = frozenset(("av avda avenida calle pje pasaje diagonal ruta nro numero "
+                       "piso dpto depto casa lote mza manzana barrio bo").split())
+
+
+def levenshtein(a, b, cap=2):
+    """Capped edit distance — returns cap+1 as soon as it exceeds the cap."""
+    a, b = str(a or ""), str(b or "")
+    if abs(len(a) - len(b)) > cap:
+        return cap + 1
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        if min(cur) > cap:
+            return cap + 1
+        prev = cur
+    return prev[-1]
+
+
+def compare_addresses(dec_n, ocr_n):
+    """Mirror of compararDomicilios_ (Validaciones.gs) — same tiers/thresholds.
+    Inputs already norm_address-normalized; None when either side is missing."""
+    if not dec_n or not ocr_n:
+        return None
+    if dec_n == ocr_n:
+        return ADDR_MATCH
+    def toks(s):
+        # split glued digit↔letter runs («2821san» → «2821 san»: common typing slip)
+        s = re.sub(r"(\d)(?=[a-zñ])", r"\1 ", s)
+        s = re.sub(r"([a-zñ])(?=\d)", r"\1 ", s)
+        t = [x for x in s.split() if x not in ADDR_STOP]
+        return t if len(t) >= 2 else s.split()
+    A, B = set(toks(dec_n)), set(toks(ocr_n))
+    shared = A & B
+    # one side contains ALL tokens of the other (≥2) — the card appends locality/province
+    if (len(A) >= 2 and A <= B) or (len(B) >= 2 and B <= A):
+        return ADDR_MATCH
+    # same street number + an alphabetic token within edit distance 2 (OCR confusions)
+    num_common = any(t.isdigit() for t in shared)
+    wa = [t for t in A if not t.isdigit() and len(t) >= 4]
+    wb = [t for t in B if not t.isdigit() and len(t) >= 4]
+    if num_common and any(levenshtein(x, y) <= 2 for x in wa for y in wb):
+        return ADDR_POSSIBLE
+    # ≥2 shared tokens covering at least half of the shorter side
+    if len(shared) >= 2 and 2 * len(shared) >= min(len(A), len(B)):
+        return ADDR_POSSIBLE
+    return ADDR_NO
+
+
 def parse_gps(s):
     m = re.fullmatch(r"\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*", _cell(s))
     return (float(m.group(1)), float(m.group(2))) if m else None
@@ -205,6 +257,18 @@ class RulesData:
                 "fecha": fv.strftime("%Y-%m-%d") if isinstance(fv, datetime.datetime) else "",
             })
 
+        # ---- Datos DNI (OCR) — optional tab written by extract_dni_to_sheet.py ----
+        orows = wb.get("Datos DNI (OCR)", [])
+        oidx = _lastwins_idx(orows)
+        self.dni_ocr = []
+        dash = lambda v: "" if _cell(v) == "—" else _cell(v)
+        for r in orows[1:]:
+            g = lambda k: dash(r[oidx[k]]) if k in oidx and oidx[k] < len(r) else ""
+            dni, cid = norm_dni(g("DNI (OCR)")), g("ID Cliente")   # HYPERLINK reads as its label
+            if dni or cid:
+                self.dni_ocr.append({"dniNorm": dni, "clientId": cid,
+                                     "domicilio": g("Domicilio (OCR)")})
+
         # ---- Dispositivos (positional base cols + Token by header) ----
         drows = wb.get("Dispositivos", [])
         didx = _lastwins_idx(drows)
@@ -313,6 +377,28 @@ class RulesData:
                 return r
         return None
 
+    def domicilio_verdict(self, dni, cid, address):
+        """Mirror of domicilioDniVerdict_: declared address vs the DNI-card address
+        from «Datos DNI (OCR)». Informative only — never feeds the sharing count.
+        None when silent (no tab/row/usable address)."""
+        dec_n = norm_address(address)
+        if not dec_n:
+            return None
+        first = lambda rows: next((r for r in rows if norm_address(r["domicilio"])), None)
+        own = first([r for r in self.dni_ocr if dni and r["dniNorm"] == dni]) or \
+            first([r for r in self.dni_ocr if cid and r["clientId"] == cid])
+        if not own:
+            return None
+        verdict = compare_addresses(dec_n, norm_address(own["domicilio"]))
+        if not verdict:
+            return None
+        if verdict == ADDR_MATCH:
+            msg = "DNI-card address: MATCHES the declared address («%s»)" % own["domicilio"]
+        else:
+            msg = "DNI-card address: %s — card: «%s» · declared: «%s»" % (
+                verdict, own["domicilio"], str(address).strip())
+        return {"verdict": verdict, "ocr": own["domicilio"], "msg": msg}
+
     def v39_for_person(self, dni, cid, address):
         """Same question as approveApplicantV2_: last device row + declared address."""
         own = self.ultima_fila(dni, cid)
@@ -416,6 +502,12 @@ def build_rules(xlsx_path, today=None):
             items39, status, dec = chk["alertas"], "alert", "REVIEW"
         else:
             items39, status, dec = [], "OK", "OK"
+        # Informative DNI-card address check (mirrors the sheet's ⚠ alert column).
+        dv = d.domicilio_verdict(c["dniNorm"], c["id"], c["address"])
+        if dv:
+            items39 = items39 + [dv["msg"]]
+            if dv["verdict"] != ADDR_MATCH and status == "OK":
+                status, dec = "alert", "REVIEW"
         v39.append({
             "name": c["name"] or "—", "client_id": c["id"], "dni": c["dniNorm"] or "—", "cuil": "",
             "status": status, "nsig": len(chk["exceeded"] or []),
@@ -528,7 +620,10 @@ def render_md(rules):
           "| Prospect | CUIL | Status | Captured | Warnings |", "|---|---|---|---|---|"]
     for r in rules["prospects"]:
         L.append("| %s | %s | %s | %s | %s |" % (r["name"], r["cuil"], r["estado"], r["fecha"], cell(r)))
-    L += ["", "> Loan-status notation: `L-0034 OVERDUE $ 12.000 · …` = that person's open loans; "
+    L += ["", "> The V-39 detail may include the DNI-card address check (MATCHES / POSSIBLE / "
+          "DOES NOT match vs the declared address, from «Datos DNI (OCR)») — informative only: "
+          "it never blocks and never counts toward the sharing limit.",
+          "", "> Loan-status notation: `L-0034 OVERDUE $ 12.000 · …` = that person's open loans; "
           "`no open loans (N settled)` = everything repaid. Sheet statuses are translated for "
           "display (ACTIVO→ACTIVE, VENCIDO→OVERDUE, PAGADO→PAID, SALDADO→SETTLED). Counts for the "
           "IP signal depend on the run date (rolling %d-day window, same as production)." % rules["cfg"]["ipDias"], ""]
