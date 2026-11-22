@@ -282,11 +282,20 @@ them, and compares each document against the Clientes sheet, flagging anomalies
 Clientes`, `Document expired`, etc.). It is the Python port of `VerificacionDNI.gs`
 (same folder, same fields), to keep the results consistent.
 
-Install (one-time — local OCR engine, the images **never** leave the machine):
+The OCR engine is picked by the `OCR_ENGINE` env var (`auto` default): **Apple
+Vision** (`ocr_vision.py` — macOS; far better on phone photos, reads HEIC,
+applies EXIF rotation, and its box geometry matches each value to the label it
+sits under, even on sideways photos) with **Tesseract** as the fallback. Both
+run locally — the images **never** leave the machine. ANSES «Constancia de
+CUIL» photos are recognized and parsed too (name/DNI/CUIL), and the card back
+yields the **domicilio** and the labeled CUIL.
+
+Install (one-time):
 
 ```sh
-brew install tesseract tesseract-lang        # binary + Spanish data (spa)
-pip install pytesseract pillow google-auth requests
+pip install pyobjc-framework-Vision pyobjc-framework-Quartz   # Vision (macOS)
+brew install tesseract tesseract-lang        # Tesseract + Spanish data (spa)
+pip install pytesseract pillow pillow-heif google-auth requests
 ```
 
 The download uses the **same service account** as `fetch_impulso.py`. Share the DNI
@@ -303,6 +312,43 @@ python3 bcra/verify_dni.py --fetch --export out/_dni.md     # download and scan 
 
 OCR reading is **indicative**: it may contain errors and does not replace manual
 verification of the document.
+
+### DNI data → spreadsheet (`extract_dni_to_sheet.py`)
+
+Extracts each client's data from the DNI photos (fetch + OCR, reusing the two
+tools above) and writes it to a **new tab of the live spreadsheet**,
+**«Datos DNI (OCR)»** — one row per document set: ID Cliente as a clickable link
+that jumps to the client's row in «Clientes», the OCR fields (DNI, apellido,
+nombres, sexo, nacimiento, nacionalidad, CUIL, vencimiento), the **domicilio
+read off the card back next to the client's declared Dirección** (eyeball
+comparison), the verification status/anomalies, and links to the person's Drive
+folder and both photos. Idempotent: re-running clears and rewrites the tab.
+
+One-time setup beyond the Viewer share above: enable the **Google Sheets API**
+in the service account's Cloud project, and share the spreadsheet as **Editor**
+with the `client_email` (the write fails with a self-explanatory 403 until both
+are done).
+
+```sh
+python3 bcra/extract_dni_to_sheet.py --fetch         # download new photos, OCR, write tab
+python3 bcra/extract_dni_to_sheet.py --incremental   # only OCR new/changed folders (cache)
+python3 bcra/extract_dni_to_sheet.py --dry-run       # preview only, writes nothing
+python3 bcra/extract_dni_to_sheet.py --csv           # also save out/_dni_datos.csv
+```
+
+With `--incremental`, OCR results are cached per photo set (`out/_dni_ocr_cache.json`,
+keyed by file name + mtime): already-scanned clients are skipped and only new or
+changed folders go through OCR; client matching is always recomputed and the tab is
+always rewritten in full. Two front-ends use this mode:
+
+- **Dashboard**: `report_gui.py` ▸ **Tools ▸ 🪪 Extract DNI data → sheet (only new)** —
+  runs fetch + incremental OCR + sheet write in the background and pops a report of
+  the newly scanned people (status, anomalies, client match) when done.
+- **Hourly cron** (`cron_extract_dni.sh`): `0 * * * * …/bcra/cron_extract_dni.sh` —
+  shows a macOS notification when it starts and when it ends (new count + rows), and
+  logs to `out/cron_dni.log`. One-time macOS step: grant **Full Disk Access** to
+  `/usr/sbin/cron` (System Settings ▸ Privacy & Security), or cron can't read
+  `~/Documents`.
 
 - **Puntaje Impulso** (0–100, misma escala A–E que el BCRA): comportamiento de pago real
   con nosotros por préstamo — *a tiempo / tarde / vencido / en plan / congelado* —

@@ -14,9 +14,13 @@ Flow:
     python3 bcra/fetch_dni.py      # download the photos to out/dni/<person>/…
     python3 bcra/verify_dni.py     # OCR + comparison → Markdown report
 
-The OCR engine is **local Tesseract** (the images never leave the machine):
+The OCR engine is chosen by the OCR_ENGINE env var (``auto`` default):
+**Apple Vision** (ocr_vision.py — macOS, much better on phone photos, reads
+HEIC, applies EXIF rotation) when available, falling back to **local
+Tesseract**. Both are fully local — the images never leave the machine.
 
-    brew install tesseract tesseract-lang      # binary + Spanish data
+    pip install pyobjc-framework-Vision pyobjc-framework-Quartz   # Vision (macOS)
+    brew install tesseract tesseract-lang      # Tesseract + Spanish data
     pip install pytesseract pillow
 
 Usage:
@@ -81,18 +85,45 @@ def _load_ocr():
             "OCR not available. Install the local engine:\n"
             "    brew install tesseract tesseract-lang\n"
             "    pip install pytesseract pillow")
+    try:  # iPhone photos arrive as .heic — opt-in decoder (pip install pillow-heif)
+        from pillow_heif import register_heif_opener
+        register_heif_opener()
+    except ImportError:
+        pass
     return Image, pytesseract
 
 
+OCR_ENGINE = os.environ.get("OCR_ENGINE", "auto").lower()  # auto | vision | tesseract
+
+
 def ocr_image_text(path):
-    """OCR an image file to text with Tesseract. Tries the Spanish model, falling
-    back to the default language if `spa` data isn't installed."""
-    Image, pytesseract = _load_ocr()
-    with Image.open(path) as im:
+    """OCR an image file to text. Engine per OCR_ENGINE: Apple Vision when
+    available (auto/vision), Tesseract otherwise — with Tesseract as the auto
+    fallback when Vision reads nothing. An undecodable image yields '' (the
+    record gets flagged, the batch keeps going)."""
+    if OCR_ENGINE in ("auto", "vision"):
         try:
-            return pytesseract.image_to_string(im, lang=OCR_LANG)
-        except pytesseract.TesseractError:
-            return pytesseract.image_to_string(im)  # no/invalid lang data → default
+            import ocr_vision
+            if ocr_vision.available():
+                text = ocr_vision.ocr_image_text(path)
+                if text.strip() or OCR_ENGINE == "vision":
+                    return text
+        except Exception as exc:  # noqa: BLE001 — Vision hiccup → Tesseract still runs
+            print("Vision OCR failed on %s: %s" % (path, exc), file=sys.stderr)
+            if OCR_ENGINE == "vision":
+                return ""
+    Image, pytesseract = _load_ocr()
+    try:
+        with Image.open(path) as im:
+            if (im.format or "").upper() not in ("JPEG", "PNG", "TIFF", "BMP", "GIF", "WEBP"):
+                im = im.convert("RGB")  # e.g. HEIF — pytesseract only feeds tesseract its known formats
+            try:
+                return pytesseract.image_to_string(im, lang=OCR_LANG)
+            except pytesseract.TesseractError:
+                return pytesseract.image_to_string(im)  # no/invalid lang data → default
+    except Exception as exc:  # noqa: BLE001 — corrupt/unsupported file ≠ dead batch
+        print("OCR skipped %s: %s" % (path, exc), file=sys.stderr)
+        return ""
 
 
 # --------------------------------------------------------------------------- #
@@ -127,7 +158,51 @@ def extract_dni(s, loose=False):
 
 def _empty_fields():
     return {"apellido": "", "nombre": "", "dni": "", "sexo": "", "nacimiento": "",
-            "nacionalidad": "", "cuil": "", "vencimiento": ""}
+            "nacionalidad": "", "cuil": "", "vencimiento": "", "domicilio": ""}
+
+
+_CUIL_PREFIXES = ("20", "23", "24", "25", "26", "27", "30", "33", "34")
+
+
+def _valid_cuil(cuil, dni=""):
+    """Plausibility: known prefix + (when the DNI is known) it must embed it —
+    kills false positives like the 11-digit Trámite N° on the card front."""
+    c = re.sub(r"\D", "", str(cuil or ""))
+    if len(c) != 11 or c[:2] not in _CUIL_PREFIXES:
+        return ""
+    d = re.sub(r"\D", "", str(dni or ""))
+    if d and c[2:10].lstrip("0") != d.lstrip("0"):
+        return ""
+    return c
+
+
+_EN_LABEL_RE = re.compile(
+    r"^[\s/|:._-]*(SURNAME|NAME|SEX|NATIONALITY|DATE\s+OF\s+(BIRTH|ISSUE|EXPIRY)|"
+    r"EXPIRY(\s+DATE)?|DOCUMENT|IDENTIFICATION)?[\s/|:._-]*$")
+
+
+def parse_constancia(text):
+    """ANSES «Constancia de CUIL» — some clients photograph this instead of the
+    card. It still yields the full name (Titular, surname first), DNI (DU) and
+    CUIL."""
+    out = _empty_fields()
+    U = str(text).replace("\r", "").upper()
+    lines = [s.strip() for s in U.split("\n") if s.strip()]
+    for i, line in enumerate(lines):
+        if re.fullmatch(r"TITULAR[:.]?", line) and i + 1 < len(lines):
+            toks = [t for t in re.sub(r"[^A-ZÁÉÍÓÚÑÜ ]", " ", lines[i + 1]).split() if t]
+            if toks:
+                out["apellido"], out["nombre"] = toks[0], " ".join(toks[1:])
+            break
+    m = re.search(r"\bDU\s*[:.]?\s*(\d{7,8})\b", U)
+    if m:
+        out["dni"] = m.group(1)
+    m = re.search(r"\b(\d{2})-?(\d{8})-?(\d)\b", U)
+    if m:
+        out["cuil"] = _valid_cuil("".join(m.groups()), out["dni"])
+    if not out["dni"] and out["cuil"]:
+        out["dni"] = out["cuil"][2:10].lstrip("0")
+    return out
 
 
 def parse_front(text):
@@ -136,6 +211,8 @@ def parse_front(text):
     if not text:
         return out
     U = str(text).replace("\r", "").upper()
+    if "CONSTANCIA DE CUIL" in U:
+        return parse_constancia(text)
     lines = [s.strip() for s in U.split("\n") if s.strip()]
 
     def after_label(re_label):
@@ -143,7 +220,9 @@ def parse_front(text):
             m = re.search(re_label, line)
             if m:
                 rest = line[m.end():].lstrip(": ").strip()
-                if rest:
+                # New-format DNI labels are bilingual («APELLIDO / Surname») with the
+                # value on the NEXT line — don't mistake the English half for the value.
+                if rest and not _EN_LABEL_RE.match(rest):
                     return rest
                 if i + 1 < len(lines):
                     return lines[i + 1]
@@ -159,8 +238,141 @@ def parse_front(text):
     out["dni"] = extract_dni(after_label(r"DOCUMENTO|D\.?N\.?I\.?|N[º°O]\.?\s*DOC"), loose=True) or extract_dni(U)
     m_cuil = re.search(r"\b(\d{2}-?\d{8}-?\d)\b", U)
     if m_cuil:
-        out["cuil"] = re.sub(r"\D", "", m_cuil.group(1))
+        out["cuil"] = _valid_cuil(m_cuil.group(1), out["dni"])
     return out
+
+
+# Any printed label on either card side — a VALUE never matches this.
+_ANY_LABEL_RE = re.compile(
+    r"APELLIDO|SURNAME|NOMBRE|NAME|SEXO|\bSEX\b|NACIONALIDAD|NATIONALITY|FECHA|DATE|"
+    r"EMISI|ISSUE|VENCIMIENTO|EXPIR|TR[AÁ]MITE|DOCUMENTO|DOCUMENT|EJEMPLAR|"
+    r"REP[UÚ]BLICA|MERCOSUR|REGISTRO|MINISTERIO|INTERIOR|FIRMA|SIGNATURE|IDENTIFICADO|"
+    r"OF\.?\s*IDENT")
+
+
+def _value_below(obs, label_re):
+    """The text observation sitting right UNDER the matching label, in the same
+    column — ID cards are laid out in columns, so plain line order interleaves
+    unrelated fields (Vision geometry fixes what next-line parsing can't)."""
+    best = None
+    for L in obs:
+        if not re.search(label_re, L["text"].upper()):
+            continue
+        for v in obs:
+            t = v["text"].strip()
+            if not t or v is L or _ANY_LABEL_RE.search(t.upper()):
+                continue
+            gap = v["y0"] - L["y1"]
+            if gap < -0.005 or gap > 0.06:                      # just below the label
+                continue
+            overlap = min(v["x1"], L["x1"]) - max(v["x0"], L["x0"])
+            if overlap <= 0:                                    # same column
+                continue
+            score = (gap, -overlap)
+            if best is None or score < best[0]:
+                best = (score, t)
+        if best:
+            break
+    return best[1] if best else ""
+
+
+def _rot_cw(o):
+    """Remap a box as if the card were rotated 90° (card-down == image -x)."""
+    return {"text": o["text"], "x0": o["y0"], "x1": o["y1"],
+            "y0": 1 - o["x1"], "y1": 1 - o["x0"]}
+
+
+def _rot_ccw(o):
+    return {"text": o["text"], "x0": 1 - o["y1"], "x1": 1 - o["y0"],
+            "y0": o["x0"], "y1": o["x1"]}
+
+
+def _key_label_score(obs):
+    return sum(1 for pat in (r"APELLIDO", r"NOMBRE", r"DOCUMENTO", r"NACIMIENTO")
+               if _value_below(obs, pat))
+
+
+def _best_orientation(obs):
+    """Photos of the card are often taken sideways; Vision still reads the text
+    but the boxes stay in image space. Keep whichever remapping resolves the
+    most label→value pairs (ties prefer the untransformed boxes)."""
+    variants = [obs, [_rot_cw(o) for o in obs], [_rot_ccw(o) for o in obs]]
+    return max(variants, key=_key_label_score)
+
+
+def parse_front_obs(obs):
+    """Geometry-aware front parse (Vision observations): each value is matched
+    to the label box it sits under. Regex-based fields (DNI/CUIL) and anything
+    geometry can't resolve keep the plain-text parse as the baseline."""
+    joined = "\n".join(o["text"] for o in obs)
+    if "CONSTANCIA DE CUIL" in joined.upper():   # ANSES certificate, not a card
+        return parse_front(joined)
+    out = parse_front(joined)
+    obs = _best_orientation(obs)
+    v = _value_below(obs, r"APELLIDO")
+    if v:
+        out["apellido"] = clean_field(v) or out["apellido"]
+    v = _value_below(obs, r"NOMBRE")
+    if v:
+        out["nombre"] = clean_field(v) or out["nombre"]
+    v = _value_below(obs, r"SEXO")
+    if v:
+        out["sexo"] = ("F" if re.search(r"\bF\b|FEMENINO", v.upper())
+                       else ("M" if re.search(r"\bM\b|MASCULINO", v.upper()) else out["sexo"]))
+    v = _value_below(obs, r"NACIONALIDAD")
+    if v:
+        out["nacionalidad"] = clean_field(v) or out["nacionalidad"]
+    v = _value_below(obs, r"NACIMIENTO")
+    if v:
+        out["nacimiento"] = re.sub(r"\s+", " ", v).strip()
+    v = _value_below(obs, r"VENCIMIENTO|EXPIR")
+    if v:
+        out["vencimiento"] = re.sub(r"\s+", " ", v).strip()
+    d = extract_dni(_value_below(obs, r"DOCUMENTO"), loose=True)
+    if d:
+        out["dni"] = d
+    return out
+
+
+def parse_front_image(path):
+    """Engine-aware front parse: geometric with Vision, label text otherwise."""
+    if OCR_ENGINE in ("auto", "vision"):
+        try:
+            import ocr_vision
+            if ocr_vision.available():
+                obs = ocr_vision.ocr_observations(path)
+                if obs:
+                    return parse_front_obs(obs)
+        except Exception as exc:  # noqa: BLE001 — fall through to the text engines
+            print("Vision front parse failed on %s: %s" % (path, exc), file=sys.stderr)
+            if OCR_ENGINE == "vision":
+                return _empty_fields()
+    return parse_front(ocr_image_text(path))
+
+
+# Lines that END an address value on the card back (next printed label/zone;
+# «•» joins locality•country in the birth-place zone — addresses use dashes).
+_ADDR_STOP_RE = re.compile(r"LUGAR|NACIM|CUIL|PULGAR|EJEMPLAR|MOTIVO|MINIST|REGISTRO|IDARG|<|•")
+
+
+def parse_domicilio(text):
+    """«DOMICILIO: …» from the back — label-based, keeps digits (addresses have
+    numbers, so clean_field does NOT apply), follows up to 2 wrapped lines."""
+    if not text:
+        return ""
+    lines = [s.strip() for s in str(text).replace("\r", "").upper().split("\n") if s.strip()]
+    for i, line in enumerate(lines):
+        m = re.search(r"DOMICILIO", line)
+        if not m:
+            continue
+        parts = [line[m.end():].lstrip(":. ").strip()]
+        for j in range(i + 1, min(i + 3, len(lines))):   # wrapped continuation lines
+            if _ADDR_STOP_RE.search(lines[j]):
+                break
+            parts.append(lines[j])
+        val = re.sub(r"\s+", " ", " ".join(p for p in parts if p)).strip(" -·")
+        return val
+    return ""
 
 
 def extract_mrz_lines(text):
@@ -186,14 +398,23 @@ def mrz_date(yymmdd):
 
 
 def parse_back(text):
-    """Parse the back: TD1 MRZ (3 lines); fall back to front labels (port)."""
+    """Parse the back: TD1 MRZ (3 lines); fall back to front labels (port).
+    Domicilio and the labeled CUIL are read from the printed zone either way."""
     out = _empty_fields()
     if not text:
         return out
+    domicilio = parse_domicilio(text)
+    m_cuil = re.search(r"CUIL[:.\s]*(\d{2})[-\s.]?(\d{7,8})[-\s.]?(\d)\b", str(text).upper())
+    cuil_back = (m_cuil.group(1) + m_cuil.group(2).zfill(8) + m_cuil.group(3)) if m_cuil else ""
     mrz = extract_mrz_lines(text)
     if len(mrz) >= 3:
-        L = mrz[-3:]
-        l1, l2, l3 = L[0], L[1], L[2]
+        # OCR may return the three TD1 lines in ANY order (rotated photos) —
+        # pick them by content: doc line, dates/sex line, name line.
+        l1 = next((s for s in mrz if "IDARG" in s or re.match(r"^ID[A-Z]{3}", s)), mrz[-3])
+        l2 = next((s for s in mrz if re.search(r"\d{6}\d?[MFX<]\d{6}", s)), mrz[-2])
+        l3 = next((s for s in mrz if s not in (l1, l2) and "<<" in s
+                   and not re.search(r"\d{4}", s)), mrz[-1])
+        L = [l1, l2, l3]
         parts = l3.split("<<")
         out["apellido"] = re.sub(r"\s+", " ", parts[0].replace("<", " ")).strip() if parts else ""
         out["nombre"] = re.sub(r"\s+", " ", " ".join(parts[1:]).replace("<", " ")).strip()
@@ -205,9 +426,17 @@ def parse_back(text):
         m_nac = re.search(r"[MFX<]\d{6}\d?([A-Z]{3})", l2)
         if m_nac:
             out["nacionalidad"] = m_nac.group(1)
-        out["dni"] = extract_dni(l1.replace("<", " ")) or extract_dni(" ".join(L).replace("<", " "))
+        # The doc line glues letters to digits («IDARG31678708<4») — \b-based
+        # extract_dni can't split that, so take the first 7-8 digit run.
+        m_doc = re.search(r"(\d{7,8})", l1)
+        out["dni"] = (m_doc.group(1) if m_doc else "") or extract_dni(" ".join(L).replace("<", " "))
+        out["domicilio"] = domicilio
+        out["cuil"] = _valid_cuil(cuil_back, out["dni"])
         return out
-    return parse_front(text)
+    out = parse_front(text)
+    out["domicilio"] = domicilio
+    out["cuil"] = _valid_cuil(cuil_back, out["dni"]) or out["cuil"]
+    return out
 
 
 def merge_fields(front, back):
@@ -227,8 +456,9 @@ def merge_fields(front, back):
         "sexo": pick(front.get("sexo"), back.get("sexo")),
         "nacimiento": pick(front.get("nacimiento"), back.get("nacimiento")),
         "nacionalidad": pick(front.get("nacionalidad"), back.get("nacionalidad")),
-        "cuil": pick(front.get("cuil"), back.get("cuil")),
+        "cuil": pick(back.get("cuil"), front.get("cuil")),      # back has it labeled
         "vencimiento": pick(front.get("vencimiento"), back.get("vencimiento")),
+        "domicilio": pick(back.get("domicilio"), front.get("domicilio")),  # lives on the back
         "front_back_mismatch": False,
     }
     df, db = analyze_impulso.norm_dni(front.get("dni")), analyze_impulso.norm_dni(back.get("dni"))
@@ -408,18 +638,44 @@ def load_clients(xlsx_path, today=None):
     return analyze_impulso.build_clients(tables, today)
 
 
-def build_verifications(photo_dir, clients, today=None, progress=lambda m: None):
-    """OCR every scanned subfolder and compare to Clientes → list of records."""
+def group_signature(g):
+    """Fingerprint of a group's chosen photos (name + mtime): when unchanged, a
+    cached OCR result can be reused instead of re-scanning."""
+    parts = []
+    for side in ("frente", "dorso"):
+        f = g.get(side)
+        if f:
+            try:
+                parts.append("%s:%d" % (f.name, int(f.stat().st_mtime)))
+            except OSError:
+                parts.append(f.name)
+    return "|".join(parts)
+
+
+def build_verifications(photo_dir, clients, today=None, progress=lambda m: None,
+                        fields_cache=None):
+    """OCR every scanned subfolder and compare to Clientes → list of records.
+    `fields_cache` (optional, MUTATED): {subfolder: {"sig", "fields"}} — groups
+    whose photo signature is unchanged reuse the cached OCR fields (matching and
+    anomalies are always recomputed against the current Clientes)."""
     today = today or datetime.date.today()
     groups = group_photos(photo_dir)
     progress("Reading %d DNI folder(s)…" % len(groups))
 
     # Pass 1 — OCR + parse all groups (so DNI-shared-across-people can be computed).
     for i, g in enumerate(groups, 1):
+        sig = group_signature(g)
+        cached = (fields_cache or {}).get(g["subfolder"])
+        if cached and cached.get("sig") == sig and isinstance(cached.get("fields"), dict):
+            g["_fields"] = dict(_empty_fields(), **cached["fields"])
+            g["_cached"] = True
+            continue
         progress("(%d/%d) %s" % (i, len(groups), g["persona"]))
-        front = parse_front(ocr_image_text(g["frente"])) if g["frente"] else _empty_fields()
+        front = parse_front_image(g["frente"]) if g["frente"] else _empty_fields()
         back = parse_back(ocr_image_text(g["dorso"])) if g["dorso"] else _empty_fields()
         g["_fields"] = merge_fields(front, back)
+        if fields_cache is not None:
+            fields_cache[g["subfolder"]] = {"sig": sig, "fields": g["_fields"]}
 
     # how many distinct people each effective DNI appears under
     dni_persona = {}
@@ -443,7 +699,7 @@ def build_verifications(photo_dir, clients, today=None, progress=lambda m: None)
             "apellido": fields.get("apellido", ""), "nombre": fields.get("nombre", ""),
             "sexo": fields.get("sexo", ""), "nacimiento": fields.get("nacimiento", ""),
             "nacionalidad": fields.get("nacionalidad", ""), "cuil": fields.get("cuil", ""),
-            "vencimiento": fields.get("vencimiento", ""),
+            "vencimiento": fields.get("vencimiento", ""), "domicilio": fields.get("domicilio", ""),
             "front_back_mismatch": fields.get("front_back_mismatch", False),
             "cliente_id": cli["client_id"] if cli else "",
             "cliente_name": cli["name"] if cli else "",
@@ -452,6 +708,7 @@ def build_verifications(photo_dir, clients, today=None, progress=lambda m: None)
             "via": match["via"], "estado": estado, "anomalias": an["labels"],
             "frente": str(g["frente"]) if g["frente"] else "",
             "dorso": str(g["dorso"]) if g["dorso"] else "",
+            "ocr_cached": bool(g.get("_cached")),
         })
     records.sort(key=lambda r: ({REVIEW: 0, NO_MATCH: 1, OK: 2}.get(r["estado"], 3), r["persona"].lower()))
     return records

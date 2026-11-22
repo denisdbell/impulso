@@ -30,6 +30,7 @@ import queue
 import re
 import threading
 import traceback
+import webbrowser
 from pathlib import Path
 
 import tkinter as tk
@@ -42,7 +43,8 @@ import analyze_fraud  # cross-record fraud signals (pure workbook read — no ex
 import analyze_devices  # «Dispositivos» device/fraud insights (pure workbook read)
 import analyze_likelihood  # data-calibrated repayment-likelihood model (pure workbook+json read)
 import analyze_rules  # mirror of the Apps Script anti-fraud rules V-38/39/40 (pure workbook read)
-import verify_dni     # DNI photo OCR vs Clientes (Tesseract; lazy-imported inside)
+import verify_dni     # DNI photo OCR vs Clientes (Vision/Tesseract; lazy-imported inside)
+import extract_dni_to_sheet  # DNI OCR → «Datos DNI (OCR)» tab in the live sheet
 import fetch_dni      # download the DNI photos from Drive (service account; lazy-imported)
 import fetch_impulso  # re-download the workbook from the live Google Sheet on reload
 import report  # reuse the polite auto-fetch (_ensure_bcra) + weights
@@ -749,6 +751,10 @@ class App(tk.Tk):
         opt.add_checkbutton(label="Download missing BCRA files", variable=self.fetch_var)
         opt.add_checkbutton(label="Insecure TLS (BCRA cert fallback)", variable=self.insecure_var)
         m.add_cascade(label="Options", menu=opt)
+        tools = tk.Menu(m, tearoff=0)
+        tools.add_command(label="🪪 Extract DNI data → sheet (only new)",
+                          command=self.extract_dni_sheet)
+        m.add_cascade(label="Tools", menu=tools)
         helpm = tk.Menu(m, tearoff=0)
         helpm.add_command(label="About", command=self._about)
         m.add_cascade(label="Help", menu=helpm)
@@ -1325,6 +1331,66 @@ class App(tk.Tk):
                 self.q.put(("error", ("person", exc, traceback.format_exc())))
         threading.Thread(target=work, daemon=True).start()
 
+    def extract_dni_sheet(self):
+        """Tools menu: OCR only the NOT-yet-scanned DNI folders (incremental cache),
+        rewrite the «Datos DNI (OCR)» tab, then show a report of the scan."""
+        if getattr(self, "_dni_sheet_busy", False):
+            self.set_status("DNI extraction already running…")
+            return
+        self._dni_sheet_busy = True
+        self.set_status("Extracting DNI data (only new folders)…")
+
+        def work():
+            try:
+                summary = extract_dni_to_sheet.run(
+                    fetch=True, incremental=True,
+                    progress=lambda msg: self.q.put(("progress", "DNI → sheet: " + str(msg))))
+                self.q.put(("dni_sheet_done", summary))
+            except (SystemExit, Exception) as exc:  # noqa: BLE001 — surfaces in the UI
+                self.q.put(("error", ("dni_sheet", exc, traceback.format_exc())))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_dni_sheet_done(self, s):
+        self._dni_sheet_busy = False
+        self.set_status("DNI → sheet: %d row(s), %d newly scanned, %d from cache."
+                        % (s["rows"], len(s["new"]), s["cached"]))
+        win = tk.Toplevel(self)
+        win.title("DNI extraction report")
+        win.configure(bg=BG)
+        win.geometry("760x520")
+        f = self.fonts
+        tk.Label(win, text="DNI data → «%s»" % s["sheet"], bg=BG, fg=INK,
+                 font=f["h2"]).pack(anchor="w", padx=16, pady=(14, 2))
+        est = s["estados"]
+        tk.Label(win, text="%d row(s) written (%d matched to a client) · %d newly scanned, "
+                           "%d reused from cache · OK %d · Review %d · No match %d"
+                           % (s["rows"], s["matched"], len(s["new"]), s["cached"],
+                              est.get("OK", 0), est.get("Review", 0), est.get("No match", 0)),
+                 bg=BG, fg=MUTED, font=f["small"], wraplength=720,
+                 justify="left").pack(anchor="w", padx=16, pady=(0, 8))
+        btns = tk.Frame(win, bg=BG)
+        btns.pack(side="bottom", fill="x", padx=16, pady=(0, 12))
+        if s.get("url"):
+            ttk.Button(btns, text="Open sheet", command=lambda: webbrowser.open(s["url"])).pack(side="left")
+        ttk.Button(btns, text="Close", command=win.destroy).pack(side="right")
+        box = tk.Text(win, bg=SURFACE, fg=INK, font=f["base"], relief="flat",
+                      wrap="word", padx=12, pady=10)
+        vsb = ttk.Scrollbar(win, orient="vertical", command=box.yview)
+        box.configure(yscrollcommand=vsb.set)
+        if s["new"]:
+            box.insert("end", "Newly scanned (%d):\n\n" % len(s["new"]))
+            for r in s["new"]:
+                who = r["cliente_id"] and ("%s (%s)" % (r["cliente_id"], r["cliente_name"])) or "no client match"
+                box.insert("end", "•  %s — DNI %s — %s — %s\n" % (
+                    r["persona"], r["dni"] or "—", who,
+                    r["estado"] + ((": " + ", ".join(r["anomalias"])) if r["anomalias"] else "")))
+        else:
+            box.insert("end", "No new DNI folders to scan — every photo set was already "
+                              "extracted (cache hit on all %d)." % s["cached"])
+        box.configure(state="disabled")
+        box.pack(side="left", fill="both", expand=True, padx=(16, 0), pady=(0, 12))
+        vsb.pack(side="left", fill="y", padx=(0, 4), pady=(0, 12))
+
     def scan_dni(self):
         self.dni_scan_btn.configure(state="disabled")
         self.dni_prog.configure(value=0)
@@ -1372,6 +1438,8 @@ class App(tk.Tk):
                     self._dni_progress(payload)
                 elif kind == "dni_done":
                     self._on_dni_done()
+                elif kind == "dni_sheet_done":
+                    self._on_dni_sheet_done(payload)
                 elif kind == "error":
                     where, exc, tb = payload
                     self._on_error(where, exc, tb)
@@ -1429,6 +1497,11 @@ class App(tk.Tk):
             self.dni_prog_frame.pack_forget()
             self.set_status("DNI verification: %s" % str(exc).splitlines()[0])
             messagebox.showwarning("DNI verification", str(exc))
+            return
+        if where == "dni_sheet":
+            self._dni_sheet_busy = False
+            self.set_status("DNI → sheet failed: %s" % str(exc).splitlines()[0])
+            messagebox.showwarning("DNI extraction", str(exc))
             return
         if where == "load" and isinstance(exc, FileNotFoundError):
             self.set_status("Workbook not found — File ▸ Open workbook…")
