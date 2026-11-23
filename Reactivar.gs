@@ -1240,11 +1240,6 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
       const rate = termRateDays_(term), interest = round2_(amount * rate), total = round2_(amount * (1 + rate));
       const payMethod = String(g('Forma de Pago') || '').trim();
       const link = (typeof signingLink_ === 'function') ? signingLink_(loanId) : '';
-      const btn = link
-        ? '<p style="margin:18px 0"><a href="' + link + '" style="background:#1c4587;color:#fff;text-decoration:none;padding:12px 22px;border-radius:6px;font-weight:bold">Revisar y firmar mi contrato</a></p>' +
-          '<p style="font-size:12px;color:#888">O copie este enlace: ' + esc_(link) + '</p>' +
-          '<p style="font-size:12px;color:#888">Para firmar necesitará su DNI (' + esc_(dni) + ').</p>'
-        : '<p><b>Su contrato está listo para firmar.</b> Solicite el enlace de firma al prestamista.</p>';
       // Contrato SIN firmar (PDF): se adjunta al correo y queda archivado en la carpeta del prestatario.
       let contractFile = null;
       try {
@@ -1261,13 +1256,17 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
       sendBrandedEmail_(email, 'Revise y firme su contrato — ' + loanId,
         'Estimado/a ' + name + ', su préstamo ' + loanId + ' fue aprobado por ' + fmtMoney_(amount) + '. ' +
         'Adjuntamos el contrato sin firmar: léalo en detalle antes de firmar. ' + (link ? ('Firme aquí: ' + link) : 'Queda pendiente de firma.'),
-        '<p>Estimado/a ' + esc_(name) + ',</p>' +
-        '<p>Su solicitud fue <b>aprobada</b> (' + esc_(loanId) + '). <b>Adjuntamos el contrato sin firmar</b> para su revisión.</p>' +
-        '<p><b>Le pedimos leer el contrato completo y en detalle antes de firmarlo</b>, en particular el costo total del crédito (Cláusula 3) y el régimen de mora e interés punitorio (Cláusula 8). Recién después de leerlo y firmarlo se libera el préstamo.</p>' +
-        '<table style="border-collapse:collapse">' +
-        row_('Capital', fmtMoney_(amount)) + row_('Plazo', term + ' días (' + round2_(rate * 100) + '%)') +
-        row_('Interés', fmtMoney_(interest)) + row_('Total a devolver', '<b>' + fmtMoney_(total) + '</b>') +
-        '</table>' + btn,
+        contratoParaFirmarHtml_({
+          nombre: name, dni: dni, loanId: loanId,
+          capitalTxt: fmtMoney_(amount),
+          plazoTxt: term + ' días',
+          interesPct: round2_(rate * 100) + ' %',
+          interesTxt: fmtMoney_(interest),
+          totalTxt: fmtMoney_(total),
+          cuotasTxt: term === 90 ? '3 cuotas mensuales de aprox. ' + fmtMoney_(round2_(total / 3)) : '',
+          moraDiaTxt: fmtMoney_(round2_(total * lateFeeRate_())),
+          urlFirma: link,
+        }),
         contractFile ? { attachments: [contractFile.getAs('application/pdf')] } : {});
       // Cuenta de terceros (V-36): se notifica al TITULAR de la cuenta y se le envía una copia
       // del contrato para su conocimiento. En su propio try/catch: un fallo acá NO debe abortar

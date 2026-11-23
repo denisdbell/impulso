@@ -1226,9 +1226,18 @@ function submitIntakeSmart(form) {
     // contrato para firmar, que hace de acuse).
     if (!autoAprobado) try {
       sendBrandedEmail_(emV.norm, 'Solicitud recibida',
-        'Estimado/a ' + name + ', recibimos su solicitud de préstamo por ' + fmtMoney_(amount) + '. La revisaremos y nos pondremos en contacto.',
-        '<p>Estimado/a ' + esc_(name) + ',</p><p>Recibimos su solicitud de préstamo por <b>' + fmtMoney_(amount) +
-        '</b> a ' + termLabelDays_(term) + '. La revisaremos y nos pondremos en contacto a la brevedad.</p>');
+        'Estimado/a ' + name + ', recibimos su solicitud de préstamo por ' + fmtMoney_(amount) + ' a ' +
+        termLabelDays_(term) + ' (total a devolver ' + fmtMoney_(total) + '). La revisaremos y nos pondremos en contacto.',
+        acuseSolicitudHtml_({
+          nombre: name,
+          montoTxt: fmtMoney_(amount),
+          plazoTxt: termLabelDays_(term),
+          interesPct: Math.round(rate * 100) + ' %',
+          interesTxt: fmtMoney_(interest),
+          totalTxt: fmtMoney_(total),
+          cuotasTxt: term === 90 ? '3 cuotas mensuales de aprox. ' + fmtMoney_(round2_(total / 3)) : 'pago único al vencimiento',
+          moraDiaTxt: fmtMoney_(round2_(total * lateFeeRate_())),
+        }));
     } catch (e) { logError_('submitIntakeSmart:email', e); }
 
     // Aviso al prestamista con los datos de la solicitud.

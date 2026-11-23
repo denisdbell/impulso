@@ -6706,8 +6706,8 @@ function submitIntake(form) {
     try {
       sendBrandedEmail_(email, 'Solicitud recibida',
         'Estimado/a ' + name + ', recibimos su solicitud de préstamo por ' + fmtMoney_(amount) + '. La revisaremos y nos pondremos en contacto.',
-        '<p>Estimado/a ' + esc_(name) + ',</p><p>Recibimos su solicitud de préstamo por <b>' + fmtMoney_(amount) +
-        '</b> a ' + termLabel_(term) + '. La revisaremos y nos pondremos en contacto a la brevedad.</p>');
+        // Formulario clásico (legado, plazos en meses): solo monto + plazo, sin recomputar tasas.
+        acuseSolicitudHtml_({ nombre: name, montoTxt: fmtMoney_(amount), plazoTxt: termLabel_(term) }));
     } catch (e) { logError_('submitIntake:email', e); }
     // Aviso al prestamista (Correo del Prestamista) con los datos de la nueva solicitud.
     try {
@@ -7943,16 +7943,19 @@ function signingLink_(loanId, token) {
 function emailSigningRequest_(loan, file) {
   if (!loan.email) return;
   const link = signingLink_(loan.loanId);
-  const btn = link
-    ? '<p style="margin:18px 0"><a href="' + link + '" style="background:#1c4587;color:#fff;text-decoration:none;padding:12px 22px;border-radius:6px;font-weight:bold">Revisar y firmar mi contrato</a></p>' +
-      '<p style="font-size:12px;color:#888">O copie este enlace: ' + esc_(link) + '</p>'
-    : '<p><b>Su contrato está listo para firmar.</b> Solicite el enlace de firma al prestamista.</p>';
+  const interes = round2_((Number(loan.totalDue) || 0) - (Number(loan.principal) || 0));
   sendBrandedEmail_(loan.email, 'Revise y firme su contrato — ' + loan.loanId,
     'Estimado/a ' + loan.name + ', su contrato ' + loan.loanId + ' está listo para firmar. ' + (link ? ('Ingrese a: ' + link) : ''),
-    '<p>Estimado/a ' + esc_(loan.name) + ',</p><p>Su solicitud fue aprobada. <b>Adjuntamos una copia sin firmar del contrato</b> <b>' + esc_(loan.loanId) + '</b> para su revisión.</p>' +
-    '<p><b>Le pedimos leer el contrato completo con atención antes de firmar</b>, en particular el costo total del crédito (Cláusula 3) y el régimen de mora (Cláusula 8). Antes de recibir el préstamo debe firmar el contrato.</p>' +
-    '<ul><li>Capital: <b>' + fmtMoney_(loan.principal) + '</b></li><li>Total a pagar: <b>' + fmtMoney_(loan.totalDue) + '</b></li><li>Vencimiento: <b>' + fmtDate_(loan.dueDate) + '</b></li></ul>' +
-    btn + '<p style="font-size:12px;color:#888">Para firmar necesitará su DNI (' + esc_(loan.dni) + '). Revise la copia adjunta antes de firmar.</p>',
+    contratoParaFirmarHtml_({
+      nombre: loan.name, dni: loan.dni, loanId: loan.loanId,
+      capitalTxt: fmtMoney_(loan.principal),
+      plazoTxt: loan.term ? (loan.term + ' días') : '',
+      interesTxt: interes > 0 ? fmtMoney_(interes) : '',
+      totalTxt: fmtMoney_(loan.totalDue),
+      vencTxt: (loan.dueDate instanceof Date) ? fmtDate_(loan.dueDate) : '',
+      moraDiaTxt: fmtMoney_(round2_((Number(loan.totalDue) || 0) * lateFeeRate_())),
+      urlFirma: link,
+    }),
     file ? { attachments: [file.getAs('application/pdf')] } : {});
 }
 
@@ -7965,27 +7968,29 @@ function emailSignedContract_(loan, file) {
   const planTxt = sched
     ? sched.map((c, i) => 'Cuota ' + (i + 1) + '/' + sched.length + ': ' + fmtMoney_(c.amount) + ' vence ' + fmtDate_(c.due)).join(' · ')
     : 'Vencimiento: ' + fmtDate_(loan.dueDate);
-  const planHtml = sched
-    ? '<li>Plan de pago — <b>' + sched.length + ' cuotas mensuales</b>:<ul style="margin:4px 0">' +
-      sched.map((c, i) => '<li>Cuota <b>' + (i + 1) + ' de ' + sched.length + '</b>: <b>' + fmtMoney_(c.amount) + '</b> — vence <b>' + fmtDate_(c.due) + '</b></li>').join('') +
-      '</ul></li>'
-    : '<li>Vencimiento: <b>' + fmtDate_(loan.dueDate) + '</b></li>';
+  // Datos formateados compartidos por los dos correos (plantillas puras de arriba).
+  const interes = round2_((Number(loan.totalDue) || 0) - (Number(loan.principal) || 0));
+  const d = {
+    nombre: loan.name, dni: loan.dni, loanId: loan.loanId,
+    capitalTxt: fmtMoney_(loan.principal),
+    interesTxt: interes > 0 ? fmtMoney_(interes) : '',
+    totalTxt: fmtMoney_(loan.totalDue),
+    vencTxt: fmtDate_(loan.dueDate),
+    cuotas: sched ? sched.map((c, i) => ({ num: i + 1, n: sched.length, montoTxt: fmtMoney_(c.amount), venceTxt: fmtDate_(c.due) })) : [],
+    firmaTxt: fmtDateTime_(new Date()),
+    moraNota: true,
+  };
   if (loan.email) {
     sendBrandedEmail_(loan.email, 'Contrato firmado — ' + loan.loanId,
       'Estimado/a ' + loan.name + ', adjuntamos su contrato de préstamo ' + loan.loanId + ' ya firmado. ' + planTxt + '.',
-      '<p>Estimado/a ' + esc_(loan.name) + ',</p><p>Gracias. Adjuntamos su <b>contrato firmado</b> <b>' + esc_(loan.loanId) + '</b>.</p>' +
-      '<ul><li>Capital: <b>' + fmtMoney_(loan.principal) + '</b></li><li>Total a pagar: <b>' + fmtMoney_(loan.totalDue) + '</b></li>' +
-      planHtml + '</ul>' +
-      (sched ? '<p style="font-size:12px;color:#666">Cada cuota vence el día correspondiente; el recargo por mora se aplica por separado a cada cuota vencida.</p>' : ''),
-      { attachments: [pdf] });
+      contratoFirmadoClienteHtml_(d), { attachments: [pdf] });
   }
   const rec = noticeRecipients_();
   if (rec.length) {
     sendBrandedEmail_(rec.join(','), 'Contrato firmado — ' + loan.loanId + ' — ' + loan.name,
-      loan.name + ' firmó el contrato ' + loan.loanId + '. Ya puede desembolsar.',
-      '<p>El prestatario <b>' + esc_(loan.name) + '</b> (DNI ' + esc_(loan.dni) + ') <b>firmó</b> el contrato <b>' + esc_(loan.loanId) + '</b>.</p>' +
-      '<p>Fecha de firma: <b>' + fmtDateTime_(new Date()) + '</b>. <b>Ya puede desembolsar.</b></p>' +
-      '<p>Se adjunta el contrato firmado para su archivo.</p>', { attachments: [pdf] });
+      loan.name + ' firmó el contrato ' + loan.loanId + ' el ' + d.firmaTxt + '. Capital ' + fmtMoney_(loan.principal) +
+      ', total a devolver ' + fmtMoney_(loan.totalDue) + '. Ya puede desembolsar.',
+      contratoFirmadoPrestamistaHtml_(d), { attachments: [pdf] });
   }
 }
 
@@ -9582,6 +9587,168 @@ function avisoMpBlock_(acct, montoTxt) {
     '<p style="font-size:13px;color:#555;margin:10px 0 0">Transferí este monto por Mercado Pago al alias de arriba. Guardá el comprobante.</p>' +
     '</td></tr></table>';
 }
+/**
+ * Acuse de SOLICITUD RECIBIDA (al solicitante) — mismo lenguaje visual que los
+ * avisos (héroe + caja de cifras + notas de color). PURA: recibe textos ya
+ * formateados en `d` y solo arma HTML (así la simulan los scripts de
+ * simulacion/ sin Apps Script). Campos de `d` (los vacíos no se muestran):
+ *   nombre, montoTxt, plazoTxt, interesPct, interesTxt, totalTxt, cuotasTxt, moraDiaTxt
+ */
+function acuseSolicitudHtml_(d) {
+  const fila = (lbl, val, destacado) => !val ? '' :
+    '<tr><td style="padding:3px 0;color:#555">' + lbl + '</td>' +
+    '<td style="padding:3px 0;text-align:right;font-weight:bold;color:' +
+    (destacado ? '#1c4587;font-size:20px' : '#222') + '">' + esc_(val) + '</td></tr>';
+  const hero = '<table role="presentation" width="100%" style="border-collapse:collapse;background:#1c4587;border-radius:8px"><tr>' +
+    '<td style="padding:24px 18px;text-align:center;color:#fff">' +
+    '<div style="font-size:32px;line-height:1">&#128232;</div>' +
+    '<div style="font-size:26px;font-weight:bold;margin-top:8px">¡Recibimos tu solicitud!</div>' +
+    '<div style="font-size:13px;opacity:.92;margin-top:4px">La estamos revisando — te contactamos a la brevedad</div>' +
+    '</td></tr></table>';
+  const box = '<table role="presentation" width="100%" style="border-collapse:collapse;background:#eef3fb;border-left:4px solid #1c4587;border-radius:6px;margin-top:18px"><tr>' +
+    '<td style="padding:16px 18px"><table role="presentation" width="100%" style="border-collapse:collapse;font-size:15px">' +
+    fila('Monto solicitado', d.montoTxt, true) +
+    fila('Plazo', d.plazoTxt) +
+    fila('Interés del plazo' + (d.interesPct ? ' (' + d.interesPct + ')' : ''), d.interesTxt) +
+    fila('Total a devolver', d.totalTxt, true) +
+    fila('Modalidad de pago', d.cuotasTxt) +
+    '</table></td></tr></table>';
+  const pasos = '<table role="presentation" width="100%" style="border-collapse:collapse;background:#f6f8fa;border-radius:6px;margin-top:16px"><tr><td style="padding:14px 18px">' +
+    '<div style="font-size:14px;font-weight:bold;color:#1c4587;margin-bottom:6px">Qué sigue</div>' +
+    '<div style="font-size:14px;color:#444;line-height:1.7">' +
+    '<b>1.</b> Revisamos tu solicitud.<br>' +
+    '<b>2.</b> Si se aprueba, te llega el <b>contrato por correo</b> con un enlace para firmarlo desde el celular.<br>' +
+    '<b>3.</b> Con el contrato firmado, <b>recibís el dinero</b>.' +
+    '</div></td></tr></table>';
+  const mora = d.moraDiaTxt
+    ? '<p style="font-size:14px;color:#8a5a00;background:#fff8ec;border:1px solid #f0dcae;border-radius:6px;padding:11px 13px;margin:16px 0 0">' +
+      'Tené en cuenta: pagando hasta el vencimiento abonás el total de arriba y nada más. ' +
+      'Pasada la fecha se suma un recargo por mora de aprox. <b>' + esc_(d.moraDiaTxt) + ' por día</b>, con tope.</p>'
+    : '';
+  const beneficio = '<p style="font-size:14px;color:#1c4587;background:#eef3fb;border:1px solid #c9d8ef;border-radius:6px;padding:10px 12px;margin:16px 0 0">' +
+    'Pagar en fecha fortalece tu historial y te habilita <b>montos más altos</b> en tu próximo préstamo.</p>';
+  return hero +
+    '<p style="font-size:16px;margin:16px 0 10px">Hola ' + esc_(d.nombre) + ',</p>' +
+    '<p style="font-size:15px;color:#444;line-height:1.5;margin:0 0 4px">Gracias por elegirnos. Este es el detalle de lo que pediste:</p>' +
+    box + pasos + mora + beneficio +
+    '<p style="font-size:14px;color:#444;margin:18px 0 0">Gracias por tu confianza.<br>' + esc_(companyName_()) + '</p>';
+}
+
+/**
+ * APROBADO — CONTRATO PARA FIRMAR (al cliente; adjunta el PDF sin firmar).
+ * PURA: `d` = {nombre, dni, loanId, capitalTxt, plazoTxt, interesPct, interesTxt,
+ * totalTxt, cuotasTxt, vencTxt, moraDiaTxt, urlFirma}. Los campos vacíos no se
+ * muestran; sin urlFirma se pide el enlace al prestamista.
+ */
+function contratoParaFirmarHtml_(d) {
+  const acc = '#1c4587', tin = '#eef3fb';
+  const fila = (lbl, val, destacado) => !val ? '' :
+    '<tr><td style="padding:3px 0;color:#555">' + lbl + '</td>' +
+    '<td style="padding:3px 0;text-align:right;font-weight:bold;color:' +
+    (destacado ? acc + ';font-size:20px' : '#222') + '">' + esc_(val) + '</td></tr>';
+  const hero = '<table role="presentation" width="100%" style="border-collapse:collapse;background:' + acc + ';border-radius:8px"><tr>' +
+    '<td style="padding:24px 18px;text-align:center;color:#fff">' +
+    '<div style="font-size:32px;line-height:1">&#127881;</div>' +
+    '<div style="font-size:26px;font-weight:bold;margin-top:8px">¡Tu préstamo fue aprobado!</div>' +
+    '<div style="font-size:13px;opacity:.92;margin-top:4px">préstamo ' + esc_(d.loanId) + ' — falta solo tu firma</div>' +
+    '</td></tr></table>';
+  const box = '<table role="presentation" width="100%" style="border-collapse:collapse;background:' + tin + ';border-left:4px solid ' + acc + ';border-radius:6px;margin-top:18px"><tr>' +
+    '<td style="padding:16px 18px"><table role="presentation" width="100%" style="border-collapse:collapse;font-size:15px">' +
+    fila('Capital', d.capitalTxt, true) +
+    fila('Plazo' + (d.interesPct ? ' (interés ' + d.interesPct + ')' : ''), d.plazoTxt) +
+    fila('Interés', d.interesTxt) +
+    fila('Total a devolver', d.totalTxt, true) +
+    fila('Modalidad de pago', d.cuotasTxt) +
+    fila('Vencimiento', d.vencTxt) +
+    '</table></td></tr></table>';
+  const leer = '<p style="font-size:14px;color:#8a5a00;background:#fff8ec;border:1px solid #f0dcae;border-radius:6px;padding:11px 13px;margin:16px 0 0">' +
+    '<b>Leé el contrato completo y en detalle antes de firmarlo</b> (va adjunto, sin firmar): en particular el ' +
+    'costo total del crédito (Cláusula 3) y el régimen de mora e interés punitorio (Cláusula 8)' +
+    (d.moraDiaTxt ? ' — la mora es de aprox. <b>' + esc_(d.moraDiaTxt) + ' por día</b> de atraso, con tope' : '') +
+    '. Recién después de leerlo y firmarlo se libera el préstamo.</p>';
+  const cta = d.urlFirma
+    ? '<p style="margin:22px 0 8px;text-align:center"><a href="' + d.urlFirma + '" ' +
+      'style="background:' + acc + ';color:#fff;text-decoration:none;padding:14px 28px;border-radius:6px;font-weight:bold;font-size:16px;display:inline-block">Revisar y firmar mi contrato</a></p>' +
+      '<p style="font-size:12px;color:#888;text-align:center;margin:0">O copiá este enlace: ' + esc_(d.urlFirma) + '</p>' +
+      (d.dni ? '<p style="font-size:12px;color:#888;text-align:center;margin:6px 0 0">Para firmar vas a necesitar tu DNI (' + esc_(d.dni) + ').</p>' : '')
+    : '<p style="margin:18px 0 0"><b>Tu contrato está listo para firmar.</b> Pedile el enlace de firma al prestamista.</p>';
+  return hero +
+    '<p style="font-size:16px;margin:16px 0 10px">Hola ' + esc_(d.nombre) + ',</p>' +
+    '<p style="font-size:15px;color:#444;line-height:1.5;margin:0 0 4px">¡Buenas noticias! Aprobamos tu solicitud. Este es el detalle de tu préstamo:</p>' +
+    box + leer + cta;
+}
+
+/**
+ * CONTRATO FIRMADO — correo al CLIENTE (adjunta el PDF). PURA: `d` trae textos
+ * formateados: nombre, loanId, capitalTxt, interesTxt, totalTxt, vencTxt,
+ * cuotas = [{num, n, montoTxt, venceTxt}] (vacío = pago único), moraNota (bool).
+ */
+function contratoFirmadoClienteHtml_(d) {
+  const acc = '#1f7a5a', tin = '#e9f7f1';
+  const hero = '<table role="presentation" width="100%" style="border-collapse:collapse;background:' + acc + ';border-radius:8px"><tr>' +
+    '<td style="padding:24px 18px;text-align:center;color:#fff">' +
+    '<div style="font-size:32px;line-height:1">&#9989;</div>' +
+    '<div style="font-size:26px;font-weight:bold;margin-top:8px">Contrato firmado</div>' +
+    '<div style="font-size:13px;opacity:.92;margin-top:4px">préstamo ' + esc_(d.loanId) + ' — adjuntamos tu copia</div>' +
+    '</td></tr></table>';
+  const fila = (lbl, val, destacado) => !val ? '' :
+    '<tr><td style="padding:3px 0;color:#555">' + lbl + '</td>' +
+    '<td style="padding:3px 0;text-align:right;font-weight:bold;color:' +
+    (destacado ? acc + ';font-size:20px' : '#222') + '">' + esc_(val) + '</td></tr>';
+  const cuotasRows = (d.cuotas || []).map(c =>
+    fila('Cuota ' + c.num + ' de ' + c.n, c.montoTxt + ' — vence ' + c.venceTxt)).join('');
+  const box = '<table role="presentation" width="100%" style="border-collapse:collapse;background:' + tin + ';border-left:4px solid ' + acc + ';border-radius:6px;margin-top:18px"><tr>' +
+    '<td style="padding:16px 18px"><table role="presentation" width="100%" style="border-collapse:collapse;font-size:15px">' +
+    fila('Capital', d.capitalTxt) +
+    fila('Interés', d.interesTxt) +
+    fila('Total a pagar', d.totalTxt, true) +
+    ((d.cuotas && d.cuotas.length) ? cuotasRows : fila('Vencimiento', d.vencTxt)) +
+    '</table></td></tr></table>';
+  const mora = d.moraNota
+    ? '<p style="font-size:13px;color:#8a5a00;background:#fff8ec;border:1px solid #f0dcae;border-radius:6px;padding:10px 12px;margin:16px 0 0">' +
+      ((d.cuotas && d.cuotas.length)
+        ? 'Cada cuota vence el día indicado; el recargo por mora se aplica por separado a cada cuota vencida.'
+        : 'Pagando hasta el vencimiento abonás el total de arriba y nada más; pasada la fecha se suma un recargo diario por mora, con tope.') + '</p>'
+    : '';
+  return hero +
+    '<p style="font-size:16px;margin:16px 0 10px">Hola ' + esc_(d.nombre) + ',</p>' +
+    '<p style="font-size:15px;color:#444;line-height:1.5;margin:0 0 4px">¡Listo! Tu contrato quedó firmado. Adjuntamos el PDF para tu archivo. Este es el resumen de tu préstamo:</p>' +
+    box + mora +
+    '<p style="font-size:14px;color:#444;margin:18px 0 0">Gracias por tu confianza.<br>' + esc_(companyName_()) + '</p>';
+}
+
+/**
+ * CONTRATO FIRMADO — aviso al PRESTAMISTA (adjunta el PDF). PURA: `d` =
+ * {nombre, dni, loanId, capitalTxt, interesTxt, totalTxt, vencTxt, cuotas, firmaTxt}.
+ */
+function contratoFirmadoPrestamistaHtml_(d) {
+  const acc = '#1f7a5a', tin = '#e9f7f1';
+  const hero = '<table role="presentation" width="100%" style="border-collapse:collapse;background:' + acc + ';border-radius:8px"><tr>' +
+    '<td style="padding:24px 18px;text-align:center;color:#fff">' +
+    '<div style="font-size:32px;line-height:1">&#9989;</div>' +
+    '<div style="font-size:26px;font-weight:bold;margin-top:8px">' + esc_(d.loanId) + ' firmado</div>' +
+    '<div style="font-size:13px;opacity:.92;margin-top:4px">ya podés desembolsar</div>' +
+    '</td></tr></table>';
+  const fila = (lbl, val, destacado) => !val ? '' :
+    '<tr><td style="padding:3px 0;color:#555">' + lbl + '</td>' +
+    '<td style="padding:3px 0;text-align:right;font-weight:bold;color:' +
+    (destacado ? acc + ';font-size:20px' : '#222') + '">' + esc_(val) + '</td></tr>';
+  const cuotasRows = (d.cuotas || []).map(c =>
+    fila('Cuota ' + c.num + ' de ' + c.n, c.montoTxt + ' — vence ' + c.venceTxt)).join('');
+  const box = '<table role="presentation" width="100%" style="border-collapse:collapse;background:' + tin + ';border-left:4px solid ' + acc + ';border-radius:6px;margin-top:18px"><tr>' +
+    '<td style="padding:16px 18px"><table role="presentation" width="100%" style="border-collapse:collapse;font-size:15px">' +
+    fila('Prestatario', d.nombre + ' (DNI ' + d.dni + ')') +
+    fila('Firmó el', d.firmaTxt) +
+    fila('Capital a desembolsar', d.capitalTxt, true) +
+    fila('Interés', d.interesTxt) +
+    fila('Total a devolver', d.totalTxt) +
+    ((d.cuotas && d.cuotas.length) ? cuotasRows : fila('Vencimiento', d.vencTxt)) +
+    '</table></td></tr></table>';
+  return hero + box +
+    '<p style="font-size:14px;color:#1a7a3c;background:#eefaf1;border:1px solid #bfe6cb;border-radius:6px;padding:10px 12px;margin:16px 0 0">' +
+    'Al enviar el dinero, registrá el <b>desembolso</b> como siempre. El contrato firmado va adjunto (PDF) para tu archivo.</p>';
+}
+
 function avisoVencimientoHtml_(nombre, loanId, dias, montoTxt, vencTxt, moraDiaTxt, moraOff) {
   const c = avisoVencCfg_(dias);
   const acct = (typeof lenderAccount_ === 'function') ? lenderAccount_() : {};
