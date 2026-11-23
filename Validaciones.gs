@@ -1252,15 +1252,15 @@ function submitIntakeSmart(form) {
             ? row_('Cuenta de un tercero', '<b style="color:#a50e0e">SÍ</b> — ' + esc_(holderName) + ' · DNI ' + esc_(holderDniN) + ' · ' + esc_(holderEmailN) + ' · Tel ' + esc_(holderPhoneN)) +
               row_('DNI del titular (frente)', holderFrontUrl ? '<a href="' + holderFrontUrl + '">Ver documento</a>' : '—') +
               row_('DNI del titular (dorso)', holderBackUrl ? '<a href="' + holderBackUrl + '">Ver documento</a>' : '—') +
-              row_('Avisar al titular (WhatsApp)', holderWaUrl ? '<a href="' + holderWaUrl + '">📲 Pedir conformidad al titular</a>' : '— (sin teléfono válido para WhatsApp)') +
-              row_('⚠ Acción requerida', 'Antes de aprobar: pedile la conformidad al titular (botón de arriba o «Avisar al titular 📲» en la fila) y tildá «Titular acepta?».')
+              row_('Avisar al titular (WhatsApp)', holderWaUrl ? '<a href="' + holderWaUrl + '">&#128242; Pedir conformidad al titular</a>' : '— (sin teléfono válido para WhatsApp)') +
+              row_('⚠ Acción requerida', 'Antes de aprobar: pedile la conformidad al titular (botón de arriba o «Avisar al titular &#128242;» en la fila) y tildá «Titular acepta?».')
             : (needsAccount ? row_('Cuenta de destino', (payDetails ? '<b>' + esc_(payDetails) + '</b> — ' : '') + 'a nombre del solicitante') : '')) +
           row_('Referencia 1 (familiar)', esc_(ref1Name + ' · ' + ref1Rel + ' · ' + ref1PhoneN) + (reuseRefs ? ' <i>(en archivo)</i>' : '') + (refCli[0] ? ' — <b style="color:#a50e0e">cliente ' + esc_(refCli[0].id) + '</b>' : '')) +
           row_('Referencia 2 (no familiar)', esc_(ref2Name + ' · ' + ref2Rel + ' · ' + ref2PhoneN) + (reuseRefs ? ' <i>(en archivo)</i>' : '') + (refCli[1] ? ' — <b style="color:#a50e0e">cliente ' + esc_(refCli[1].id) + '</b>' : '')) +
           row_('Referencia 3 (adicional)', esc_(ref3Name + ' · ' + ref3Rel + ' · ' + ref3PhoneN) + (reuseRefs ? ' <i>(en archivo)</i>' : '') + (refCli[2] ? ' — <b style="color:#a50e0e">cliente ' + esc_(refCli[2].id) + '</b>' : '')) +
           ((v39 && v39.alertas && v39.alertas.length) ? row_('⚠ Alerta ubicación/dispositivo', esc_(v39.alertas.join(' · '))) : '') +
           ((dvDom && dvDom.msg) ? row_((dvDom.verdict === 'COINCIDE' ? '✓' : '⚠') + ' Domicilio del DNI', esc_(dvDom.msg)) : '') +
-          ((v40 && v40.items.length) ? row_('🔗 Conexiones por teléfono', esc_(v40.items.join(' · '))) : '') +
+          ((v40 && v40.items.length) ? row_('&#128279; Conexiones por teléfono', esc_(v40.items.join(' · '))) : '') +
           row_('Compromisos de pago', 'Aceptados ✓') +
           row_('Foto del frente del DNI', dniUrl ? '<a href="' + dniUrl + '">Ver documento</a>' : '— (cliente ya verificado)') +
           row_('Foto del dorso del DNI', cuilUrl ? '<a href="' + cuilUrl + '">Ver documento</a>' : '— (cliente ya verificado)') +
@@ -3633,11 +3633,20 @@ function submitProspecto(form) {
           row_('CUIL', esc_(cuV.norm)) +
           row_('Teléfono', esc_(phV.norm)) +
           row_('Estado', 'NUEVO') +
-          (waContact ? row_('WhatsApp', '<a href="' + waContact + '">📲 Escribir al prospecto</a>') : '') +
-          (w39 ? row_('⚠ Alerta ubicación/dispositivo', esc_(w39)) : '') +
-          ((v40 && v40.items.length) ? row_('🔗 Conexiones por teléfono', esc_(v40.items.join(' · '))) : '') +
+          // Emojis astrales (📲/🔗) van como entidades HTML (&#…;): algunos clientes de
+          // correo los rompen («������») si viajan como bytes crudos.
+          (waContact ? row_('WhatsApp', '<a href="' + waContact + '">&#128242; Escribir al prospecto</a>') : '') +
+          // SIEMPRE presente (espejo de la columna «Alertas (V-39/V-40)»): con alertas
+          // muestra el detalle; sin alertas lo dice — así «revisado y limpio» se
+          // distingue de «sin revisar».
+          row_('Alertas (V-39/V-40)', (function () {
+            const partes = [];
+            if (w39) partes.push('⚠ ' + esc_(w39));
+            if (v40 && v40.items.length) partes.push('&#128279; ' + esc_(v40.items.join(' · ')));
+            return partes.length ? partes.join('<br>') : '<i>— sin alertas</i>';
+          })()) +
           '</table>' +
-          '<p>Revisalo en la hoja <b>Prospectos</b>. Si califica, tildá <b>Aprobar y avisar 📲</b> para enviarle el enlace del formulario de solicitud, o <b>Rechazar?</b> para descartarlo.</p>');
+          '<p>Revisalo en la hoja <b>Prospectos</b>. Si califica, tildá <b>Aprobar y avisar &#128242;</b> para enviarle el enlace del formulario de solicitud, o <b>Rechazar?</b> para descartarlo.</p>');
       }
     } catch (e) { logError_('submitProspecto:lenderEmail', e); }
 
