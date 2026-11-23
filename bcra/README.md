@@ -232,8 +232,14 @@ matching always runs on the raw values.
 - **V-40** — informative phone-connection map (references who are clients, shared
   phones, reverse references, «Prospectos» matches), plus the prospect warnings.
 
-GUI: four searchable tabs inside **🚩 Fraud signals** (V-38 · References, V-39 ·
-Device / location, V-40 · Phone connections, Prospects) + rule checks inside the
+GUI: five tabs inside **🚩 Fraud signals** — four searchable tables (V-38 ·
+References, V-39 · Device / location, V-40 · Phone connections, Prospects) plus
+**🕸 Connections**: pick a person by name, toggle which rules to include, and see
+every connected client with the shared attribute (ref phone, IP, device, GPS,
+address, phone link), their BCRA and Impulso scores, a Good/Fair/Poor payer
+class, and the current status of their Impulso loans — with a hub-and-spoke
+graph below (line colour = rule, node colour = payer class; click a node or
+double-click a row to open that person). Rule checks also appear inside the
 Fraud card of the **Persona** view (one bullet per finding); the fraud-page
 Markdown export bundles signals and rules in one file. CLI:
 `python3 bcra/analyze_rules.py --all` → `out/_rules.md`.

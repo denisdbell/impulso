@@ -347,18 +347,20 @@ class RulesData:
                 if o["dniNorm"] and o["dniNorm"] != sig.get("dniNorm") and norm_address(o["address"]) == addr_n:
                     otros[o["dniNorm"]] = 1
             senales.append(("addr", sig.get("address", ""), otros))
-        exceeded, alertas = [], []
+        exceeded, alertas, detalle = [], [], []
         for key, valor, otros in senales:
             if not valor or not otros:
                 continue
             arr = list(otros)
+            detalle.append({"senal": key, "etiqueta": ETIQ[key], "valor": valor, "otros": arr})
             if 1 + len(arr) > self.cfg["max"]:
                 exceeded.append({"senal": key, "etiqueta": ETIQ[key], "valor": valor,
                                  "otros": arr, "max": self.cfg["max"]})
             else:
                 alertas.append("Shares %s with %d other person(s): %s"
                                % (ETIQ[key], len(arr), ", ".join(self.quien_detalle(k) for k in arr)))
-        return {"ok": not exceeded, "exceeded": exceeded or None, "alertas": alertas}
+        return {"ok": not exceeded, "exceeded": exceeded or None, "alertas": alertas,
+                "detalle": detalle}
 
     def exceeded_items(self, exceeded):
         """One sentence per exceeded V-39 signal — rendered as bullets in the GUI."""
@@ -416,57 +418,70 @@ class RulesData:
         return next((c for c in self.clientes if c["phoneNorm"] == phone_n and c["dniNorm"] != self_dni), None)
 
     def v38_for_client(self, c):
+        """→ (count, detail strings, matches) — matches = [(slot_idx, ref_name, phone, client)]."""
         ms = [self.ref_cliente_match(p, c["dniNorm"]) for p in c["refPhones"]]
         det = ["Ref %d (%s) → client %s (%s) — %s"
                % (i + 1, c["refNames"][i] or "—", m["id"], m["name"], self.resumen_prestamos(m["id"]))
                for i, m in enumerate(ms) if m]
-        return sum(1 for m in ms if m), det
+        matches = [(i, c["refNames"][i] or "—", c["refPhones"][i], m)
+                   for i, m in enumerate(ms) if m]
+        return sum(1 for m in ms if m), det, matches
 
     def conexiones(self, app_phone, refs, self_dni, skip_prospect_row=None):
-        """V-40 connection items. `skip_prospect_row` excludes the person's own
-        «Prospectos» row when scoring a prospect (row number, 1-based)."""
+        """V-40 connection items as dicts {text, cid, other, short}: `cid` is the
+        connected CLIENT id ('' for prospects), `other` a display label, `short`
+        a tiny edge label for the graph. `skip_prospect_row` excludes the
+        person's own «Prospectos» row when scoring a prospect (1-based)."""
         items, seen = [], set()
 
-        def add(k, t):
+        def add(k, text, cid="", other="", short=""):
             if k not in seen:
                 seen.add(k)
-                items.append(t)
+                items.append({"text": text, "cid": cid, "other": other, "short": short})
 
         for c in self.clientes:
             if app_phone and c["phoneNorm"] == app_phone and c["dniNorm"] and c["dniNorm"] != self_dni:
                 add("tel-cli:" + c["id"], "Same phone as client %s (%s) — %s"
-                    % (c["id"], c["name"], self.resumen_prestamos(c["id"])))
+                    % (c["id"], c["name"], self.resumen_prestamos(c["id"])),
+                    c["id"], c["name"], "same phone")
             if app_phone and c["dniNorm"] != self_dni and app_phone in c["refsN"]:
                 add("es-ref-de:" + c["id"], "Listed as a reference by %s (%s) — %s"
-                    % (c["id"], c["name"], self.resumen_prestamos(c["id"])))
+                    % (c["id"], c["name"], self.resumen_prestamos(c["id"])),
+                    c["id"], c["name"], "their reference")
         for slot, rname, ph in refs:
             if not ph:
                 continue
             cli = self.ref_cliente_match(ph, self_dni)
             if cli:
                 add("ref-cli:%s:%s" % (slot, cli["id"]), "%s (%s) is client %s (%s) — %s"
-                    % (slot, rname, cli["id"], cli["name"], self.resumen_prestamos(cli["id"])))
+                    % (slot, rname, cli["id"], cli["name"], self.resumen_prestamos(cli["id"])),
+                    cli["id"], cli["name"], slot + " is them")
             for c in self.clientes:
                 if c["dniNorm"] == self_dni:
                     continue
                 if ph in c["refsN"]:
                     add("ref-comp:%s:%s" % (slot, c["id"]),
                         "%s shares a phone with a reference of %s (%s) — %s"
-                        % (slot, c["id"], c["name"], self.resumen_prestamos(c["id"])))
+                        % (slot, c["id"], c["name"], self.resumen_prestamos(c["id"])),
+                        c["id"], c["name"], "shared " + slot.lower())
         for p in self.prospectos:
             if skip_prospect_row is not None and p["row"] == skip_prospect_row:
                 continue
             est = PROSPECT_STATE_EN.get(p["estado"], p["estado"]) + \
                   ((", captured " + p["fecha"]) if p["fecha"] else "")
             key = str(p["row"])
+            label = "prospect «%s»" % p["name"]
             if self_dni and p["dni"] and p["dni"] == self_dni:
-                add("pro-self:" + key, "Also registered as prospect «%s» (%s)" % (p["name"], est))
+                add("pro-self:" + key, "Also registered as prospect «%s» (%s)" % (p["name"], est),
+                    "", label, "is prospect")
                 continue
             if app_phone and p["phoneN"] == app_phone:
-                add("pro-tel:" + key, "Same phone as prospect «%s» (%s)" % (p["name"], est))
+                add("pro-tel:" + key, "Same phone as prospect «%s» (%s)" % (p["name"], est),
+                    "", label, "same phone")
             for slot, _rn, ph in refs:
                 if ph and p["phoneN"] == ph:
-                    add("pro-ref:%s:%s" % (slot, key), "%s is prospect «%s» (%s)" % (slot, p["name"], est))
+                    add("pro-ref:%s:%s" % (slot, key), "%s is prospect «%s» (%s)" % (slot, p["name"], est),
+                        "", label, slot + " is prospect")
         return items
 
 
@@ -479,12 +494,29 @@ def build_rules(xlsx_path, today=None):
     d = RulesData(xlsx_path, today)
     v38, v39, v40, pros = [], [], [], []
 
+    # Connection graph for the dashboard's Connections tab: per-client edges with
+    # the rule, the shared attribute and the connected client (+ node info).
+    edges = {}
+
+    def add_edge(cid, rule, attr, short, other_cid="", other_label="", value=""):
+        if cid:
+            edges.setdefault(cid, []).append({
+                "rule": rule, "attr": attr, "short": short,
+                "other_cid": other_cid, "other_label": other_label, "value": value})
+
+    nodes = {c["id"]: {"name": c["name"], "dni": c["dniNorm"],
+                       "loans": d.resumen_prestamos(c["id"])}
+             for c in d.clientes if c["id"]}
+
     for c in d.clientes:
         if not (c["name"] or c["dniNorm"]):
             continue
         token = c["dniNorm"] or c["id"]
 
-        n_ref, det38 = d.v38_for_client(c)
+        n_ref, det38, m38 = d.v38_for_client(c)
+        for i, rname, ph, m in m38:
+            add_edge(c["id"], "V-38", "Ref %d (%s) is this client — phone %s" % (i + 1, rname, ph),
+                     "Ref %d" % (i + 1), m["id"], m["name"], ph)
         if any(c["refPhones"]):
             v38.append({
                 "name": c["name"] or "—", "client_id": c["id"], "dni": c["dniNorm"] or "—",
@@ -508,6 +540,14 @@ def build_rules(xlsx_path, today=None):
             items39 = items39 + [dv["msg"]]
             if dv["verdict"] != ADDR_MATCH and status == "OK":
                 status, dec = "alert", "REVIEW"
+        # V-39 edges: every shared signal (blocking or alert level alike).
+        for s in chk.get("detalle") or []:
+            short = {"ip": "same IP", "fp": "same device", "token": "same device",
+                     "gps": "same GPS", "addr": "same address"}.get(s["senal"], s["senal"])
+            for dnio in s["otros"]:
+                o = d.by_dni.get(dnio)
+                add_edge(c["id"], "V-39", "shares %s «%s»" % (s["etiqueta"], s["valor"]), short,
+                         o["id"] if o else "", o["name"] if o else ("DNI " + dnio), s["valor"])
         v39.append({
             "name": c["name"] or "—", "client_id": c["id"], "dni": c["dniNorm"] or "—", "cuil": "",
             "status": status, "nsig": len(chk["exceeded"] or []),
@@ -519,10 +559,13 @@ def build_rules(xlsx_path, today=None):
 
         refs = [("Ref %d" % (i + 1), c["refNames"][i] or "—", c["refPhones"][i]) for i in range(3)]
         items = d.conexiones(c["phoneNorm"], refs, c["dniNorm"])
+        for it in items:
+            add_edge(c["id"], "V-40", it["text"], it["short"], it["cid"], it["other"])
+        texts = [it["text"] for it in items]
         if items:
             v40.append({
                 "name": c["name"] or "—", "client_id": c["id"], "dni": c["dniNorm"] or "—", "cuil": "",
-                "n": len(items), "items": items, "detail": "  |  ".join(items),
+                "n": len(items), "items": texts, "detail": "  |  ".join(texts),
                 "decision": "REVIEW", "token": token,
             })
 
@@ -534,7 +577,7 @@ def build_rules(xlsx_path, today=None):
             warn += ["⚠ V-39 blocks — " + w for w in d.exceeded_items(chk["exceeded"])]
         else:
             warn += ["⚠ V-39 — " + a for a in chk["alertas"]]
-        warn += ["🔗 V-40 — " + i for i in items]
+        warn += ["🔗 V-40 — " + it["text"] for it in items]
         if not warn:
             continue
         pros.append({
@@ -561,7 +604,8 @@ def build_rules(xlsx_path, today=None):
         "clients": len(d.clientes),
     }
     return {"cfg": d.cfg, "summary": summary, "v38": v38, "v39": v39, "v40": v40,
-            "prospects": pros, "today": d.today.isoformat()}
+            "prospects": pros, "edges": edges, "nodes": nodes,
+            "today": d.today.isoformat()}
 
 
 def quality_line(rules):

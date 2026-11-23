@@ -26,6 +26,7 @@ with fetch_impulso.py, or File ▸ Open workbook…).
 """
 
 import datetime
+import math
 import queue
 import re
 import threading
@@ -69,6 +70,21 @@ ACCENT = "#2563eb"
 RATING_COLOR = {"A": "#15803d", "B": "#65a30d", "C": "#d97706", "D": "#ea580c", "E": "#dc2626", "—": "#9ca3af"}
 DECISION_COLOR = {"OK": "#15803d", "REVIEW": "#d97706", "REJECT": "#dc2626", "NO RECORD": "#9ca3af"}
 DECISION_ROW_BG = {"OK": "#e9f7ef", "REVIEW": "#fdf3e3", "REJECT": "#fcebea", "NO RECORD": "#f3f4f6"}
+# Connections tab: edge colour per anti-fraud rule, node colour per payer class.
+RULE_COLOR = {"V-38": "#d97706", "V-39": "#dc2626", "V-40": "#2563eb"}
+PAYER_COLOR = {"Good": "#16a34a", "Fair": "#d97706", "Poor": "#dc2626", "—": "#9ca3af"}
+
+
+def payer_of_category(cat):
+    """Impulso profile → ('Good'|'Fair'|'Poor'|'—', decision tag for row colour)."""
+    c = (cat or "").lower()
+    if not c or "no record" in c or "new" in c:
+        return "—", "NO RECORD"
+    if "excellent" in c or "reliable" in c:
+        return "Good", "OK"
+    if "occasional" in c:
+        return "Fair", "REVIEW"
+    return "Poor", "REJECT"   # chronically late / overdue / in plan / frozen
 # Impulso per-loan status → colour
 LOAN_COLOR = {
     "repaid_ontime": "#15803d", "repaid_untimed": "#22c55e", "current": "#2563eb",
@@ -1123,6 +1139,9 @@ class App(tk.Tk):
             panel = RankingPanel(nb, cols, self.open_person, self.fonts)
             nb.add(panel, text=label)
             self.fraud_panels[key] = panel
+        conn = ttk.Frame(nb, style="TFrame")
+        nb.add(conn, text="🕸 Connections")
+        self._build_connections_tab(conn)
         sig = self.fraud_panels["signals"]
         sig._rows_fn = lambda: self.data.fraud_rows()
         page._panel = sig   # keeps the shared ranking-refresh paths working
@@ -1185,6 +1204,176 @@ class App(tk.Tk):
         self.fraud_panels["v39"].set_rows(self.data.rules_v39_rows())
         self.fraud_panels["v40"].set_rows(self.data.rules_v40_rows())
         self.fraud_panels["prospects"].set_rows(self.data.rules_prospect_rows())
+        self._refresh_connections()
+
+    # ---- Connections tab (who is linked to whom via V-38/39/40) ----
+    def _build_connections_tab(self, page):
+        bar = ttk.Frame(page, style="TFrame")
+        bar.pack(fill="x", pady=(8, 4))
+        ttk.Label(bar, text="Person:", style="Muted.TLabel").pack(side="left", padx=(6, 6))
+        self.conn_cb = ttk.Combobox(bar, width=40, state="readonly")
+        self.conn_cb.pack(side="left")
+        self.conn_cb.bind("<<ComboboxSelected>>", self._render_connections)
+        self.conn_rules = {}
+        for rule, lab in (("V-38", "V-38 references"), ("V-39", "V-39 device/location"),
+                          ("V-40", "V-40 phone")):
+            v = tk.BooleanVar(value=True)
+            ttk.Checkbutton(bar, text=lab, variable=v,
+                            command=self._render_connections).pack(side="left", padx=(14, 0))
+            self.conn_rules[rule] = v
+        cols = [("other", "Connected client", 180, "w"), ("rule", "Rule", 52, "center"),
+                ("attr", "Connection (shared attribute)", 330, "w"),
+                ("bcra", "BCRA", 52, "center"), ("imp", "Impulso", 58, "center"),
+                ("payer", "Payer", 56, "center"), ("loans", "Impulso loan status", 250, "w")]
+        self.conn_tree = ttk.Treeview(page, columns=[c[0] for c in cols],
+                                      show="headings", height=8)
+        for key, head, wdt, anchor in cols:
+            self.conn_tree.heading(key, text=head)
+            self.conn_tree.column(key, width=wdt, anchor=anchor, stretch=(key in ("attr", "loans")))
+        for dec, bgc in DECISION_ROW_BG.items():
+            self.conn_tree.tag_configure("dec_" + dec.replace(" ", "_"), background=bgc)
+        self.conn_tree.pack(fill="x", padx=6)
+        self.conn_tree.bind("<Double-1>", self._conn_open)
+        ttk.Label(page, text="Double-click a row (or click a node) to open that person. "
+                            "Node colour = payer class; line colour = rule.",
+                  style="Hint.TLabel").pack(anchor="w", padx=6, pady=(2, 0))
+        self.conn_canvas = tk.Canvas(page, bg=SURFACE, highlightthickness=0, height=330)
+        self.conn_canvas.pack(fill="both", expand=True, padx=6, pady=(6, 6))
+        self.conn_canvas.bind("<Configure>", lambda e: self._draw_connections_graph())
+        self._conn_map = {}
+        self._conn_nodes = []
+        self._conn_center = ""
+        self._conn_center_label = ""
+
+    def _refresh_connections(self):
+        E = (self.data.rules or {}).get("edges", {})
+        N = (self.data.rules or {}).get("nodes", {})
+        self._conn_map = {"%s (%s)" % ((N.get(cid, {}).get("name") or cid), cid): cid
+                          for cid in E}
+        self.conn_cb["values"] = sorted(self._conn_map)
+        if self.conn_cb.get() not in self._conn_map:
+            self.conn_cb.set("")
+        self._render_connections()
+
+    def _render_connections(self, *_):
+        label = self.conn_cb.get()
+        cid = self._conn_map.get(label, "")
+        self._conn_center, self._conn_center_label = cid, label
+        tree = self.conn_tree
+        tree.delete(*tree.get_children())
+        self._conn_nodes = []
+        if not cid:
+            self._draw_connections_graph()
+            return
+        rules = self.data.rules or {}
+        N = rules.get("nodes", {})
+        imp_by_dni = {str(c.get("dni") or "").lstrip("0"): c
+                      for c in self.data.icohort if c.get("dni")}
+        bcra_by_dni = {}
+        for c in self.data.bcohort:
+            dni = re.sub(r"\D", "", str(c.get("cuil") or ""))[2:10].lstrip("0")
+            if dni:
+                bcra_by_dni[dni] = c
+        enabled = {r for r, v in self.conn_rules.items() if v.get()}
+        agg = {}
+        for e in rules.get("edges", {}).get(cid, []):
+            if e["rule"] not in enabled:
+                continue
+            key = e["other_cid"] or e["other_label"]
+            if key not in agg:
+                info = N.get(e["other_cid"], {})
+                dni = str(info.get("dni") or "").lstrip("0")
+                imp, bc = imp_by_dni.get(dni), bcra_by_dni.get(dni)
+                payer, tag = payer_of_category(imp["category"] if imp else "")
+                agg[key] = {"cid": e["other_cid"], "label": e["other_label"] or key,
+                            "rules": set(), "shorts": [], "payer": payer, "tag": tag,
+                            "bcra": bc["score"] if bc else None,
+                            "imp": imp["score"] if imp else None,
+                            "loans": (info.get("loans") or "—") if e["other_cid"] else "—",
+                            "token": (imp.get("cuil") if imp else "") or info.get("dni", "")}
+            a = agg[key]
+            a["rules"].add(e["rule"])
+            if e["short"] not in a["shorts"]:
+                a["shorts"].append(e["short"])
+            who = ("%s (%s)" % (a["label"], a["cid"])) if a["cid"] else a["label"]
+            tree.insert("", "end", values=(
+                who, e["rule"], e["attr"],
+                a["bcra"] if a["bcra"] is not None else "—",
+                a["imp"] if a["imp"] is not None else "—",
+                a["payer"], a["loans"]),
+                tags=("dec_" + a["tag"].replace(" ", "_"), a["token"]))
+        self._conn_nodes = list(agg.values())
+        self._draw_connections_graph()
+
+    def _conn_open(self, _e):
+        sel = self.conn_tree.selection()
+        if sel:
+            tags = self.conn_tree.item(sel[0], "tags")
+            if len(tags) > 1 and tags[1]:
+                self.open_person(tags[1])
+
+    def _draw_connections_graph(self):
+        cv = getattr(self, "conn_canvas", None)
+        if not cv:
+            return
+        cv.delete("all")
+        f = self.fonts
+        w = max(cv.winfo_width(), 420)
+        h = max(cv.winfo_height(), 240)
+        lx = 12   # legend: rules + payer classes
+        for rule in ("V-38", "V-39", "V-40"):
+            cv.create_line(lx, h - 16, lx + 20, h - 16, fill=RULE_COLOR[rule], width=3)
+            cv.create_text(lx + 24, h - 16, text=rule, anchor="w", fill=MUTED, font=f["hint"])
+            lx += 78
+        for lab in ("Good", "Fair", "Poor", "—"):
+            cv.create_oval(lx, h - 21, lx + 10, h - 11, fill=PAYER_COLOR[lab], outline="")
+            cv.create_text(lx + 14, h - 16, text=(lab if lab != "—" else "no data"),
+                           anchor="w", fill=MUTED, font=f["hint"])
+            lx += 62
+        if not self._conn_center:
+            cv.create_text(w / 2, h / 2, text="Pick a person above to see their connection graph.",
+                           fill=MUTED, font=f["base"])
+            return
+        nodes = self._conn_nodes
+        if not nodes:
+            cv.create_text(w / 2, h / 2, text="No connections under the selected rules.",
+                           fill=MUTED, font=f["base"])
+            return
+        cx, cy = w / 2, (h - 26) / 2
+        n = len(nodes)
+        R0 = max(85, min(cx - 150, cy - 46))
+        for i, nd in enumerate(nodes):
+            ang = 2 * math.pi * i / n - math.pi / 2
+            R = R0 if (n <= 9 or i % 2 == 0) else R0 * 0.6   # two rings when crowded
+            x, y = cx + R * math.cos(ang), cy + R * math.sin(ang)
+            nd["_xy"] = (x, y)
+            for k, rule in enumerate(sorted(nd["rules"])):   # one line per rule
+                off = (k - (len(nd["rules"]) - 1) / 2.0) * 3.5
+                dx, dy = x - cx, y - cy
+                dist = math.hypot(dx, dy) or 1
+                px, py = -dy / dist * off, dx / dist * off
+                cv.create_line(cx + px, cy + py, x + px, y + py,
+                               fill=RULE_COLOR[rule], width=2)
+            cv.create_text((cx + x) / 2, (cy + y) / 2 - 8, text=", ".join(nd["shorts"][:2]),
+                           fill=MUTED, font=f["hint"])
+        for nd in nodes:
+            x, y = nd["_xy"]
+            tag = "cn_" + (nd["cid"] or nd["label"]).replace(" ", "_")
+            cv.create_oval(x - 9, y - 9, x + 9, y + 9, fill=PAYER_COLOR.get(nd["payer"], MUTED),
+                           outline=BG, width=2, tags=(tag,))
+            east = x >= cx
+            tx, anchor = (x + 13, "w") if east else (x - 13, "e")
+            scores = "B:%s · I:%s" % (nd["bcra"] if nd["bcra"] is not None else "—",
+                                      nd["imp"] if nd["imp"] is not None else "—")
+            cv.create_text(tx, y - 7, text=nd["label"][:20], anchor=anchor,
+                           fill=INK, font=f["small"], tags=(tag,))
+            cv.create_text(tx, y + 7, text=scores + ((" · " + nd["payer"]) if nd["payer"] != "—" else ""),
+                           anchor=anchor, fill=MUTED, font=f["hint"], tags=(tag,))
+            if nd["token"]:
+                cv.tag_bind(tag, "<Button-1>", lambda _e, t=nd["token"]: self.open_person(t))
+        cv.create_oval(cx - 11, cy - 11, cx + 11, cy + 11, fill="#1c4587",
+                       outline=BG, width=2)
+        cv.create_text(cx, cy - 22, text=self._conn_center_label, fill=INK, font=f["bold"])
 
     def _build_likelihood(self):
         page = ttk.Frame(self.content, style="TFrame")
