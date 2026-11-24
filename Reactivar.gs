@@ -416,6 +416,8 @@ function reactivarFuncionalidad() {
     run('Estadísticas', () => reactivateStats_(ss));
     run('Novedades (recibos + topes)', () => installNewFeatureColumns_(ss));
     run('Dispositivos', () => reactivateDispositivos_(ss));
+    run('Marcado de fraude (V-41)', () => (typeof ensureFraudeColumns_ === 'function') ? ensureFraudeColumns_(ss) : 'no disponible');
+    run('Feriados (V-42)', () => (typeof setupFeriados_ === 'function') ? (setupFeriados_(ss), 'hoja «Feriados» lista') : 'no disponible');
     // Validaciones de datos (listas/casillas) del módulo Validaciones.
     try { if (typeof applySheetValidations_ === 'function') applySheetValidations_(ss); } catch (e) { logError_('reactivar:validaciones', e); }
     SpreadsheetApp.flush();
@@ -919,7 +921,11 @@ function reactivateNew_(ss) {
   // Formato condicional por estado de la solicitud (usa toda la fila de datos).
   const verC = colByAny_(H, ['Verificado?']), rejC = colByAny_(H, ['Rechazar?']);
   const propC = colByAny_(H, ['¿Cuenta propia?']);
+  const badgeC = colByAny_(H, ['⚠ Alertas']);
   const width = sh.getMaxColumns(), rng = sh.getRange(2, 1, CFG.MAX_ROWS, width), rules = [];
+  // ⚠ Alertas (junto al nombre): resalta en rojo la celda cuando hay reglas disparadas.
+  if (badgeC) rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=$${a1col_(badgeC)}2<>""`)
+    .setBackground('#f4cccc').setFontColor('#a50e0e').setBold(true).setRanges([sh.getRange(2, badgeC, CFG.MAX_ROWS, 1)]).build());
   // Decisión explícita del prestamista (prioritaria): rechazado = rojo, verificado = verde.
   if (rejC) rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=$${a1col_(rejC)}2=TRUE`).setBackground('#f4cccc').setRanges([rng]).build());
   if (verC) rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=$${a1col_(verC)}2=TRUE`).setBackground('#d9ead3').setRanges([rng]).build());
@@ -1294,9 +1300,34 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
     }
   }
 
+  // V-41 (ADVIERTE) — alerta de fraude por conexión, re-evaluada al aprobar (las referencias y el
+  // estado «Fraude» pueden cambiar tras el envío). Warn-only: nunca bloquea ni pasa por fail().
+  let v41 = null;
+  try {
+    if (typeof fraudeConexiones_ === 'function') v41 = fraudeConexiones_({
+      dniNorm: dnV.norm, emailNorm: normEmail_(email),
+      phoneN: normPhoneE164_(phone) || phone, address: address,
+      refs: [{ slot: 'Ref 1', name: r1Name, phoneN: r1Ph.ok ? r1Ph.norm : '' },
+             { slot: 'Ref 2', name: r2Name, phoneN: r2Ph.ok ? r2Ph.norm : '' },
+             { slot: 'Ref 3', name: r3Name, phoneN: r3Ph.ok ? r3Ph.norm : '' }],
+    });
+  } catch (e) { logError_('approveApplicantV2_:v41', e); }
+
+  // V-42 (ADVIERTE) — alerta de feriado, re-evaluada con la fecha REAL del préstamo (aprobación) y
+  // su vencimiento. Warn-only: nunca bloquea ni pasa por fail().
+  let v42 = null;
+  try {
+    if (typeof feriadoCheck_ === 'function') {
+      const ld = new Date(), dd = addDays_(ld, termDays_(term) || 0);
+      v42 = feriadoCheck_([{ label: 'Préstamo', date: ld }, { label: 'Vencimiento', date: dd }]);
+    }
+  } catch (e) { logError_('approveApplicantV2_:v42', e); }
+
   return {
     ok: true, loanId: loanId, name: name, overridden: !!override,
     domicilio: (dvDom && dvDom.msg) ? ('Domicilio DNI: ' + dvDom.verdict) : '',
+    fraudAlert: (v41 && v41.texts.length) ? v41.texts.join(' · ') : '',
+    holidayAlert: (v42 && v42.reasons.length) ? v42.reasons.join(' · ') : '',
   };
 }
 
@@ -1313,7 +1344,7 @@ function verifyApplicantV2_(nb, row, override) {
     const res = approveApplicantV2_(ss, bs, nb, row, headerMap_(nb), override);
     if (res.ok) {
       try { reactivateBorrowers_(ss); } catch (e) { logError_('verifyApplicantV2_:reactivar', e); }
-      try { ss.toast('Aprobado ' + res.name + ' → ' + res.loanId + (res.overridden ? ' · límites anulados' : '') + ' · movido a Prestatarios (pendiente de firma).' + (res.domicilio ? ' · ' + res.domicilio : ''), '✔ Aprobado', 6); } catch (e) { }
+      try { ss.toast('Aprobado ' + res.name + ' → ' + res.loanId + (res.overridden ? ' · límites anulados' : '') + ' · movido a Prestatarios (pendiente de firma).' + (res.domicilio ? ' · ' + res.domicilio : '') + (res.fraudAlert ? ' · 🚩 ' + res.fraudAlert : '') + (res.holidayAlert ? ' · 📅 ' + res.holidayAlert : ''), '✔ Aprobado', 6); } catch (e) { }
     } else {
       try { ss.toast(res.msg, '⚠ No aprobado', 8); } catch (e) { }
     }

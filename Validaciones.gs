@@ -109,6 +109,8 @@ const VALIDATION_RULES = [
   ['V-38', 'Formulario y Aprobación', 'Referencias', 'A lo sumo UNA de las tres referencias puede ser cliente existente de Impulso Crédito (coincidencia del teléfono normalizado contra «Clientes», en cualquier casillero). Dos o más referencias-cliente → se bloquea el envío y la aprobación. No se anula con «Anular límites».', 'Como máximo una de tus referencias puede ser cliente nuestro. Reemplazá alguna referencia por una persona que no sea cliente.', 'BLOQUEA', 'ALTA'],
   ['V-39', 'Formulario y Aprobación', 'Anti-fraude', 'Máximo configurable («Máximo de personas por dispositivo/ubicación», por defecto 2) de personas DISTINTAS (por DNI) que comparten la misma IP (ventana en días), huella/token del dispositivo, ubicación GPS (radio en metros) o domicilio declarado normalizado. Bloquea el envío del formulario y la aprobación detallando cada señal excedida, su valor y la cantidad de personas; al solicitante no se le muestran los DNI de terceros. El detalle al PRESTAMISTA incluye además los préstamos vigentes y su estado de cada persona conectada. También se evalúa (solo como ADVERTENCIA, nunca bloquea) al registrarse un prospecto, y el aviso «Nuevo prospecto» incluye el detalle. Se anula con «Anular límites» SOLO en la aprobación. Interruptor: «Límite por dispositivo/ubicación (SÍ/NO)». Además, SOLO como información al prestamista (nunca bloquea): se compara el domicilio declarado contra el del DNI (hoja «Datos DNI (OCR)») y se informa COINCIDE / POSIBLE / NO COINCIDE en la columna de alerta, el correo de aviso y la aprobación. Sin fila de OCR no se informa nada, y este cotejo NO suma al conteo de personas.', 'Se superó el máximo de personas que pueden solicitar desde el mismo dispositivo o ubicación.', 'BLOQUEA', 'ALTA'],
   ['V-40', 'Formulario', 'Anti-fraude', 'Mapa informativo de CONEXIONES POR TELÉFONO del solicitante o prospecto: referencias que son clientes, clientes que comparten su teléfono o lo listan como referencia, referencias compartidas con otros prestatarios y coincidencias con la hoja «Prospectos» — con el estado de los préstamos (vigentes y saldo) de cada cliente conectado. Solo para el prestamista: correo de aviso, columna «Conexiones por teléfono» en Nuevos Prestatarios y columna «Alertas (V-39/V-40)» en Prospectos. No bloquea.', '—', 'ADVIERTE', 'MEDIA'],
+  ['V-41', 'Formulario y Aprobación', 'Anti-fraude', 'Si un cliente está marcado como FRAUDULENTO («Fraude» = SÍ en «Clientes»), toda nueva solicitud CONECTADA con él se informa al prestamista como ADVERTENCIA: mismo domicilio (normalizado), mismo teléfono, mismo correo o DNI, el cliente marcado lo tiene como referencia o viceversa, una referencia coincide con el cliente marcado, o comparte teléfono con una referencia suya. Se detalla cada conexión y el estado de los préstamos del cliente marcado. Solo para el prestamista: columna «Alerta de fraude» en «Nuevos Prestatarios» y correo de aviso (en rojo). La aprobación la re-evalúa. NUNCA bloquea ni se anula con «Anular límites».', '—', 'ADVIERTE', 'ALTA'],
+  ['V-42', 'Formulario y Aprobación', 'Riesgo temporal', 'Advierte (nunca bloquea) cuando la fecha de la solicitud o la de vencimiento cae en un feriado nacional (hoja «Feriados»), dentro de la semana de un feriado (ventana configurable, por defecto ±3 días) o en enero/febrero (meses de vacaciones). Solo para el prestamista: columna «Alerta de feriado» en «Nuevos Prestatarios», correo de aviso y aviso al aprobar. Configurable en «Configuración»: «Alerta de feriados (SÍ/NO)», «Días alrededor de feriado (ventana)», «Marcar enero/febrero como vacaciones (SÍ/NO)». También suma al recuento «⚠ Alertas» junto al nombre.', '—', 'ADVIERTE', 'MEDIA'],
 ];
 
 /* ==================== VALIDADORES DE CAMPO ==================== */
@@ -246,9 +248,10 @@ function clientesRows_() {
     cR2N = ccol_('Ref 2 Nombre', 0), cR2R = ccol_('Ref 2 Vínculo', 0), cR2P = ccol_('Ref 2 Teléfono', 0),
     cR3N = ccol_('Ref 3 Nombre', 0), cR3R = ccol_('Ref 3 Vínculo', 0), cR3P = ccol_('Ref 3 Teléfono', 0),
     cBloq = ccol_('Bloqueado', 0), cBloqM = ccol_('Motivo de bloqueo', 0),
-    cNoRec = ccol_('Recordatorios desactivados', 0);
+    cNoRec = ccol_('Recordatorios desactivados', 0),
+    cFraude = ccol_('Fraude', 0), cFraudeM = ccol_('Motivo de fraude', 0);
   const width = Math.max(cId, cName, cEmail, cDni, cPhone, cDniN, cEmailN, cPhoneN, cCuil, cAddr,
-    cR1N, cR1R, cR1P, cR2N, cR2R, cR2P, cR3N, cR3R, cR3P, cBloq, cBloqM, cNoRec);
+    cR1N, cR1R, cR1P, cR2N, cR2R, cR2P, cR3N, cR3R, cR3P, cBloq, cBloqM, cNoRec, cFraude, cFraudeM);
   const cell = (r, c) => c ? String(r[c - 1] || '').trim() : '';
   const data = sh.getRange(2, 1, sh.getLastRow() - 1, width).getValues();
   _clientesRowsCache = data.map((r, i) => ({
@@ -268,6 +271,8 @@ function clientesRows_() {
     bloqueado: (function () { const v = cell(r, cBloq).toUpperCase(); return v === 'SÍ' || v === 'SI'; })(),
     bloqueoMotivo: cell(r, cBloqM),
     sinRecordatorios: (function () { const v = cNoRec ? r[cNoRec - 1] : ''; return v === true || /^(sí|si|true|verdadero)$/i.test(String(v == null ? '' : v).trim()); })(),
+    fraude: (function () { const v = cFraude ? r[cFraude - 1] : ''; return v === true || /^(sí|si|true|verdadero)$/i.test(String(v == null ? '' : v).trim()); })(),
+    fraudeMotivo: cell(r, cFraudeM),
     row: i + 2,
   })).filter(o => o.id || o.dniNorm || o.emailNorm);
   return _clientesRowsCache;
@@ -368,6 +373,45 @@ function conexionesPorTelefono_(appPhoneN, refs, selfDniNorm) {
   return { items: items };
 }
 
+/**
+ * V-41 — ALERTA DE FRAUDE POR CONEXIÓN (solo informativo; superficie del PRESTAMISTA).
+ * Dado un solicitante, devuelve los clientes marcados como FRAUDULENTOS («Fraude» = SÍ en
+ * «Clientes») con los que está conectado por: mismo DNI/correo/teléfono (misma persona),
+ * mismo domicilio (normalizado), el cliente marcado lo tiene como referencia o viceversa,
+ * una referencia coincide con el cliente marcado, o una referencia comparte teléfono con una
+ * referencia del cliente marcado. Nunca bloquea. Coincidencia de una sola arista (one-hop),
+ * misma estructura/deduplicación que conexionesPorTelefono_.
+ * `applicant` = { dniNorm, emailNorm, phoneN, address, refs:[{slot,name,phoneN}, …] }.
+ * Devuelve { items:[{id,name,reasons:[…],loans}], texts:[…] }.
+ */
+function fraudeConexiones_(applicant) {
+  applicant = applicant || {};
+  const flagged = clientesRows_().filter(o => o.fraude);
+  if (!flagged.length) return { items: [], texts: [] };   // caso común: 0 trabajo
+  const appPhoneN = String(applicant.phoneN || '').trim();
+  const aAddr = normAddress_(applicant.address);          // '' si <8 chars → no coteja domicilio
+  const refs = (applicant.refs || []).filter(r => r && r.phoneN);
+  const items = [];
+  flagged.forEach(f => {
+    const reasons = [], seen = {};
+    const add = txt => { if (!seen[txt]) { seen[txt] = 1; reasons.push(txt); } };
+    if (applicant.dniNorm && f.dniNorm === applicant.dniNorm) add('mismo DNI (misma persona)');
+    if (applicant.emailNorm && f.emailNorm === applicant.emailNorm) add('mismo correo');
+    if (appPhoneN && f.phoneNorm === appPhoneN) add('mismo teléfono');
+    if (aAddr && normAddress_(f.address) === aAddr) add('mismo domicilio');
+    // Teléfonos de referencia del cliente marcado, normalizados una vez.
+    const fRefsN = [normPhoneE164_(f.ref1Phone), normPhoneE164_(f.ref2Phone), normPhoneE164_(f.ref3Phone)].filter(String);
+    if (appPhoneN && fRefsN.indexOf(appPhoneN) >= 0) add('el cliente marcado lo tiene como referencia');
+    refs.forEach(ref => {
+      if (ref.phoneN === f.phoneNorm) add(ref.slot + ' es el cliente marcado');
+      if (fRefsN.indexOf(ref.phoneN) >= 0) add(ref.slot + ' comparte teléfono con una referencia del cliente marcado');
+    });
+    if (reasons.length) items.push({ id: f.id, name: f.name, reasons: reasons, loans: resumenPrestamos_(f.id) });
+  });
+  const texts = items.map(it => it.id + ' (' + it.name + '): ' + it.reasons.join('; ') + ' — ' + it.loans);
+  return { items: items, texts: texts };
+}
+
 /* ============ LÍMITE POR DISPOSITIVO/UBICACIÓN (V-39) ============
  * Máximo configurable de personas DISTINTAS (por DNI) que comparten la misma IP,
  * huella/token del dispositivo, ubicación GPS o domicilio declarado. Señales técnicas:
@@ -382,6 +426,101 @@ function v39Config_() {
     radioM: settingMoney_('Radio GPS de coincidencia (metros)', 50),
     ipDias: (typeof settingDays_ === 'function') ? settingDays_('Ventana de coincidencia de IP (días)', 30) : 30,
   };
+}
+
+/* ============ ALERTA DE FERIADO / VACACIONES (V-42) ============
+ * Advierte (nunca bloquea) cuando la fecha de la solicitud o la de vencimiento cae en un feriado
+ * nacional (hoja «Feriados»), dentro de la semana de un feriado (ventana configurable) o en
+ * enero/febrero (meses de vacaciones). Solo informa al prestamista. */
+
+/** Ajustes del control de feriados desde "Configuración" (por defecto ENCENDIDO). */
+function feriadoConfig_() {
+  const siNoDef_ = k => String(getSetting_(k) || '').trim().toUpperCase() !== 'NO'; // vacío = SÍ
+  return {
+    on: siNoDef_('Alerta de feriados (SÍ/NO)'),
+    ventana: (typeof settingDays_ === 'function') ? settingDays_('Días alrededor de feriado (ventana)', 3) : 3,
+    mesesVac: siNoDef_('Marcar enero/febrero como vacaciones (SÍ/NO)'),
+  };
+}
+
+/** Feriados nacionales 2026 (y días puente tentativos) para sembrar la hoja «Feriados». */
+const FERIADOS_SEED_2026 = [
+  ['2026-01-01', 'Año Nuevo'], ['2026-02-16', 'Carnaval'], ['2026-02-17', 'Carnaval'],
+  ['2026-03-23', 'Puente turístico (tentativo)'], ['2026-03-24', 'Día de la Memoria'],
+  ['2026-04-02', 'Día del Veterano y Caídos en Malvinas'], ['2026-04-03', 'Viernes Santo'],
+  ['2026-05-01', 'Día del Trabajador'], ['2026-05-25', 'Revolución de Mayo'],
+  ['2026-06-15', 'Paso a la Inmortalidad del Gral. Güemes (traslado)'], ['2026-06-20', 'Paso a la Inmortalidad del Gral. Belgrano'],
+  ['2026-07-09', 'Día de la Independencia'], ['2026-07-10', 'Puente turístico (tentativo)'],
+  ['2026-08-17', 'Paso a la Inmortalidad del Gral. San Martín'], ['2026-10-12', 'Respeto a la Diversidad Cultural'],
+  ['2026-11-20', 'Día de la Soberanía Nacional'], ['2026-12-07', 'Puente turístico (tentativo)'],
+  ['2026-12-08', 'Inmaculada Concepción de María'], ['2026-12-25', 'Navidad'],
+];
+
+/** Crea la hoja «Feriados» (Fecha | Descripción) si falta y la siembra con 2026 si está vacía. */
+function setupFeriados_(ss) {
+  ss = ss || getSS_();
+  const sh = getOrCreate_(ss, CFG.SHEETS.HOLIDAYS);
+  const H = ['Fecha', 'Descripción'];
+  sh.getRange(1, 1, 1, H.length).setValues([H]).setFontWeight('bold').setBackground('#0b5394').setFontColor('#fff').setWrap(true);
+  sh.setColumnWidth(1, 110); sh.setColumnWidth(2, 340);
+  sh.getRange(2, 1, CFG.MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd');
+  sh.setFrozenRows(1);
+  if (sh.getLastRow() < 2) { // sembrar solo si no hay datos (no pisa ediciones del prestamista)
+    const rows = FERIADOS_SEED_2026.map(f => [new Date(f[0] + 'T00:00:00'), f[1]]);
+    sh.getRange(2, 1, rows.length, 2).setValues(rows);
+  }
+  invalidateFeriadosCache_();
+  return sh;
+}
+
+/** Lee la hoja «Feriados» como [{t, ymd, desc}] (memoizado por ejecución). */
+let _feriadosCache = null;
+function invalidateFeriadosCache_() { _feriadosCache = null; }
+function feriadosList_() {
+  if (_feriadosCache) return _feriadosCache;
+  const sh = getSS_().getSheetByName(CFG.SHEETS.HOLIDAYS);
+  const out = [];
+  if (sh && sh.getLastRow() >= 2) {
+    const data = sh.getRange(2, 1, sh.getLastRow() - 1, 2).getValues();
+    data.forEach(r => {
+      const v = r[0]; if (!v) return;
+      const d = (v instanceof Date) ? v : new Date(v);
+      if (isNaN(d.getTime())) return;
+      const s = startOfDay_(d);
+      out.push({ t: s.getTime(), ymd: Utilities.formatDate(s, Session.getScriptTimeZone(), 'yyyy-MM-dd'), desc: String(r[1] || '').trim() });
+    });
+  }
+  _feriadosCache = out; return out;
+}
+
+/**
+ * V-42 — comprueba una lista de fechas rotuladas contra feriados/semana de feriado/vacaciones.
+ * `labeledDates` = [{label, date}, …]. Devuelve { reasons:[str] }. Nunca lanza para el llamador
+ * (los sitios lo envuelven en try/catch, pero igual es defensiva). Fail-open si no hay config.
+ */
+function feriadoCheck_(labeledDates) {
+  const cfg = feriadoConfig_();
+  if (!cfg.on) return { reasons: [] };
+  const fer = feriadosList_(), DAY = 86400000, ventana = Math.max(0, cfg.ventana) * DAY;
+  const meses = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+  const reasons = [], seen = {};
+  const add = txt => { if (txt && !seen[txt]) { seen[txt] = 1; reasons.push(txt); } };
+  (labeledDates || []).forEach(ld => {
+    if (!ld || !(ld.date instanceof Date) || isNaN(ld.date.getTime())) return;
+    const s = startOfDay_(ld.date), t = s.getTime(), label = ld.label || 'Fecha';
+    // Exacto tiene prioridad sobre la ventana (mensaje más específico).
+    let exact = null, near = null;
+    for (const f of fer) {
+      const diff = Math.abs(f.t - t);
+      if (diff === 0) { exact = f; break; }
+      if (diff <= ventana && (!near || diff < Math.abs(near.t - t))) near = f;
+    }
+    if (exact) add(label + ' cae en feriado: ' + exact.desc + ' (' + exact.ymd + ')');
+    else if (near) add(label + ' en semana de feriado: ' + near.desc + ' (' + near.ymd + ')');
+    if (cfg.mesesVac && (s.getMonth() === 0 || s.getMonth() === 1))
+      add(label + ' en mes de vacaciones (' + meses[s.getMonth()] + ')');
+  });
+  return { reasons: reasons };
 }
 
 /** Etiqueta "DNI 30111222 (C-0012)" para la persona identificada por dniNorm (o ID de cliente). */
@@ -1076,6 +1215,28 @@ function submitIntakeSmart(form) {
          { slot: 'Ref 3', name: ref3Name, phoneN: ref3PhoneN }], dnV.norm);
     } catch (e) { logError_('submitIntakeSmart:v40', e); }
 
+    // V-41 (ADVIERTE) — alerta de fraude por conexión: si el solicitante está conectado con un
+    // cliente marcado como fraudulento, se informa al prestamista (columna «Alerta de fraude» +
+    // correo). Nunca bloquea; un error acá tampoco (fail-open).
+    let v41 = null;
+    try {
+      v41 = fraudeConexiones_({
+        dniNorm: dnV.norm, emailNorm: emV.norm,
+        phoneN: normPhoneE164_(phone) || String(phone || '').trim(), address: address,
+        refs: [{ slot: 'Ref 1', name: ref1Name, phoneN: ref1PhoneN },
+               { slot: 'Ref 2', name: ref2Name, phoneN: ref2PhoneN },
+               { slot: 'Ref 3', name: ref3Name, phoneN: ref3PhoneN }],
+      });
+    } catch (e) { logError_('submitIntakeSmart:v41', e); }
+
+    // V-42 (ADVIERTE) — alerta de feriado/vacaciones: la fecha de la solicitud o la de vencimiento
+    // (proyectada = solicitud + plazo) cae en un feriado, su semana o enero/febrero. Fail-open.
+    let v42 = null;
+    try {
+      const reqD = new Date(), dueD = addDays_(reqD, termDays_(term) || 0);
+      v42 = feriadoCheck_([{ label: 'Solicitud', date: reqD }, { label: 'Vencimiento', date: dueD }]);
+    } catch (e) { logError_('submitIntakeSmart:v42', e); }
+
     // V-39 (BLOQUEA) — límite de personas distintas por IP/dispositivo/GPS/domicilio. Corre ANTES
     // de cualquier escritura (alta de cliente, fotos, fila en "Nuevos Prestatarios"). Un error
     // interno del control nunca bloquea la solicitud (fail-open; la aprobación re-chequea).
@@ -1138,10 +1299,10 @@ function submitIntakeSmart(form) {
     // Registro en "Nuevos Prestatarios" (mismo orden de columnas que NB).
     const ss = getSS_();
     const nb = ss.getSheetByName(CFG.SHEETS.NEW) || setupNew_(ss) || ss.getSheetByName(CFG.SHEETS.NEW);
-    // Cols: 1 Fecha,2 Nombre,3 Correo,4 DNI,5 Teléfono,6 Monto,7 Plazo,8 Notas,
-    //       9 dniFrente,10 dniDorso,11 Verificado?,12 Rechazar?,13 Resultado,
-    //       14 Verificar BCRA?,15 Parámetro BCRA,16 CUIL.
-    const rowVals = [new Date(), safeCell_(name), emV.norm, dnV.norm, phone, amount, term, safeCell_(notes), dniUrl, cuilUrl,
+    // Cols: 1 Fecha,2 Nombre,3 ⚠ Alertas,4 Correo,5 DNI,6 Teléfono,7 Monto,8 Plazo,9 Notas,
+    //       10 dniFrente,11 dniDorso,12 Verificado?,13 Rechazar?,14 Resultado,
+    //       15 Verificar BCRA?,16 Parámetro BCRA,17 CUIL. (El '' tras el nombre es «⚠ Alertas».)
+    const rowVals = [new Date(), safeCell_(name), '', emV.norm, dnV.norm, phone, amount, term, safeCell_(notes), dniUrl, cuilUrl,
       false, false, 'Pendiente de verificación', false, 'DNI', cuil];
     const row = nbAppend_(nb, rowVals);
     // PERF: TODOS los campos extra de "Nuevos Prestatarios" en UN solo setValues (forma de pago,
@@ -1149,7 +1310,18 @@ function submitIntakeSmart(form) {
     // setSheetFieldByHeader_ (cada uno releía el encabezado + 1 setValue). El formato de fecha/monto
     // ya viene de la columna (setupNew_), así que no hace falta setNumberFormat por fila.
     try {
+      // ⚠ Alertas (junto al nombre): recuento de REGLAS disparadas (1 por regla): V-05 correo
+      // duplicado, V-07 teléfono duplicado, V-39 ubicación/dispositivo (o domicilio del DNI que no
+      // coincide), V-40 conexiones por teléfono, V-41 fraude, V-42 feriado.
+      const nAlertas =
+        ((((v39 && v39.alertas && v39.alertas.length) || (dvDom && dvDom.msg && dvDom.verdict !== 'COINCIDE')) ? 1 : 0)) +
+        ((v40 && v40.items.length) ? 1 : 0) +
+        ((v41 && v41.texts.length) ? 1 : 0) +
+        ((v42 && v42.reasons.length) ? 1 : 0) +
+        ((emailDup && emailDup.length) ? 1 : 0) +
+        ((phoneDup && phoneDup.length) ? 1 : 0);
       const nbFields = {
+        '⚠ Alertas': nAlertas ? ('⚠ ' + nAlertas) : '',
         'Forma de Pago': safeCell_(payMethodFull),
         'Dirección': safeCell_(address),
         'Ref 1 Nombre': safeCell_(ref1Name), 'Ref 1 Vínculo': safeCell_(ref1Rel), 'Ref 1 Teléfono': ref1PhoneN,
@@ -1167,6 +1339,10 @@ function submitIntakeSmart(form) {
         })(),
         // V-40: conexiones por teléfono (informativas para el prestamista).
         'Conexiones por teléfono': (v40 && v40.items.length) ? safeCell_('🔗 ' + v40.items.join(' · ')) : '',
+        // V-41: alerta de fraude por conexión (informativa para el prestamista).
+        'Alerta de fraude': (v41 && v41.texts.length) ? safeCell_('🚩 ' + v41.texts.join(' · ')) : '',
+        // V-42: alerta de feriado/vacaciones (informativa para el prestamista).
+        'Alerta de feriado': (v42 && v42.reasons.length) ? safeCell_('📅 ' + v42.reasons.join(' · ')) : '',
       };
       if (isThirdParty) {
         nbFields['Titular de la cuenta'] = safeCell_(holderName);
@@ -1270,6 +1446,11 @@ function submitIntakeSmart(form) {
           ((v39 && v39.alertas && v39.alertas.length) ? row_('⚠ Alerta ubicación/dispositivo', esc_(v39.alertas.join(' · '))) : '') +
           ((dvDom && dvDom.msg) ? row_((dvDom.verdict === 'COINCIDE' ? '✓' : '⚠') + ' Domicilio del DNI', esc_(dvDom.msg)) : '') +
           ((v40 && v40.items.length) ? row_('&#128279; Conexiones por teléfono', esc_(v40.items.join(' · '))) : '') +
+          ((v41 && v41.items.length)
+            ? row_('&#128681; Alerta de FRAUDE', '<b style="color:#a50e0e">' +
+                v41.items.map(it => esc_(it.id + ' (' + it.name + '): ' + it.reasons.join('; ') + ' — ' + it.loans)).join('<br>') + '</b>')
+            : '') +
+          ((v42 && v42.reasons.length) ? row_('&#128197; Alerta de feriado', esc_(v42.reasons.join(' · '))) : '') +
           row_('Compromisos de pago', 'Aceptados ✓') +
           row_('Foto del frente del DNI', dniUrl ? '<a href="' + dniUrl + '">Ver documento</a>' : '— (cliente ya verificado)') +
           row_('Foto del dorso del DNI', cuilUrl ? '<a href="' + cuilUrl + '">Ver documento</a>' : '— (cliente ya verificado)') +
@@ -1816,6 +1997,8 @@ function configurarValidaciones() {
     const ss = getSS_();
     ensureClientesSchema_(ss);
     ensureClienteBloqueoColumns_(ss);
+    ensureFraudeColumns_(ss);   // V-41 — marcado de fraude (casilla + columna de alerta)
+    setupFeriados_(ss);         // V-42 — hoja «Feriados» (se siembra con 2026 si está vacía)
     applySheetValidations_(ss);
     buildValidacionesSheet_(ss);
     SpreadsheetApp.flush();
@@ -1858,6 +2041,74 @@ function ensureClienteBloqueoColumns_(ss) {
   if (typeof invalidateClientesCache_ === 'function') invalidateClientesCache_();
 }
 
+/**
+ * V-41 — INSTALADOR del marcado de fraude. Idempotente; resuelve columnas por nombre y NO
+ * toca datos existentes. Agrupa en UN solo lugar todo lo que la función necesita:
+ *   • «Clientes»: casilla «Fraude» (+ nota) y «Motivo de fraude» (texto libre).
+ *   • «Nuevos Prestatarios»: columna informativa «Alerta de fraude» (ancho/ajuste/nota) donde
+ *     el envío del formulario y la aprobación informan los clientes marcados conectados.
+ * Lo llaman configurarValidaciones y reactivarFuncionalidad, y el menú (instalarMarcadoFraude).
+ * Devuelve un resumen de lo instalado.
+ */
+function ensureFraudeColumns_(ss) {
+  ss = ss || getSS_();
+  const N = CFG.MAX_ROWS, done = [];
+  // Clientes: casilla «Fraude» + «Motivo de fraude».
+  const cl = ss.getSheetByName(CFG.SHEETS.CLIENTS);
+  if (cl) {
+    const cFraude = clientesHeaderCol_(cl, 'Fraude', true);
+    if (cFraude) {
+      cl.getRange(2, cFraude, N, 1).insertCheckboxes();
+      cl.getRange(1, cFraude).setNote('Tildá para marcar al cliente como fraudulento. Al enviarse una nueva solicitud, todo solicitante conectado (domicilio, teléfono, correo/DNI o referencias) se informa al prestamista como advertencia (V-41). No bloquea.');
+      done.push('Clientes: «Fraude» + «Motivo de fraude»');
+    }
+    clientesHeaderCol_(cl, 'Motivo de fraude', true); // texto libre, sin validación
+    invalidateClientesHdrCache_();
+    invalidateClientesRows_();
+    if (typeof invalidateClientesCache_ === 'function') invalidateClientesCache_();
+  }
+  // Nuevos Prestatarios: columna informativa «Alerta de fraude».
+  const nb = ss.getSheetByName(CFG.SHEETS.NEW);
+  if (nb) {
+    const cFr = clientesHeaderCol_(nb, 'Alerta de fraude', true);
+    if (cFr > 0) {
+      nb.setColumnWidth(cFr, 280);
+      nb.getRange(2, cFr, N, 1).setWrap(true);
+      nb.getRange(1, cFr).setNote('🚩 V-41 — clientes marcados como fraudulentos («Fraude» = SÍ en «Clientes») conectados con el solicitante por domicilio, teléfono, correo/DNI o referencias, con el estado de sus préstamos. Advertencia informativa; no bloquea.');
+      done.push('Nuevos Prestatarios: «Alerta de fraude»');
+    }
+  }
+  return done.length ? done.join(' · ') : 'sin cambios (hojas ausentes)';
+}
+
+/** Punto de entrada manual (menú/editor): instala el marcado de fraude (V-41). */
+function instalarMarcadoFraude() {
+  return guard_('instalarMarcadoFraude', function () {
+    const res = ensureFraudeColumns_(getSS_());
+    SpreadsheetApp.flush();
+    try { SpreadsheetApp.getActive().toast('Marcado de fraude (V-41) instalado — ' + res, '🚩 Listo', 6); } catch (e) { }
+    return res;
+  });
+}
+
+/**
+ * Punto de entrada manual (menú/editor): instala el control de feriados (V-42) y el recuento «⚠
+ * Alertas». Crea/siembra la hoja «Feriados», aplica la migración de columnas de «Nuevos
+ * Prestatarios» (badge junto al nombre + «Alerta de feriado») vía setupNew_ y el formato
+ * condicional vía reactivateNew_. Idempotente.
+ */
+function instalarAlertasFeriado() {
+  return guard_('instalarAlertasFeriado', function () {
+    const ss = getSS_();
+    setupFeriados_(ss);
+    if (typeof setupNew_ === 'function') setupNew_(ss);          // migración de columnas (badge + feriado)
+    if (typeof reactivateNew_ === 'function') reactivateNew_(ss); // formato condicional del badge
+    SpreadsheetApp.flush();
+    try { SpreadsheetApp.getActive().toast('Alertas de feriado (V-42) + recuento ⚠ instalados.', '📅 Listo', 6); } catch (e) { }
+    return 'OK';
+  });
+}
+
 /** Instala validaciones de datos (listas / casillas) consistentes con el catálogo. */
 function applySheetValidations_(ss) {
   ss = ss || getSS_();
@@ -1892,7 +2143,7 @@ function applySheetValidations_(ss) {
   const bs = ss.getSheetByName(CFG.SHEETS.BORROWERS);
   if (bs) bs.getRange(2, PB.TERM, N, 1).setDataValidation(plazoDv);
   const nb = ss.getSheetByName(CFG.SHEETS.NEW);
-  if (nb) nb.getRange(2, 7, N, 1).setDataValidation(plazoDv); // col 7 = Plazo
+  if (nb) nb.getRange(2, NB.indexOf('Plazo (meses)') + 1, N, 1).setDataValidation(plazoDv); // Plazo (por nombre)
 }
 
 /** Crea/actualiza la hoja "Validaciones" con el catálogo V-01…V-24. */

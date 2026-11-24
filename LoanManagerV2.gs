@@ -36,7 +36,7 @@ const CFG = {
     SIGN: 'Firmas', CLIENTS: 'Clientes', INSTALLMENTS: 'Cuotas', LEVELS: 'Niveles de Clientes',
     DEVICES: 'Dispositivos', FREEZE_REQ: 'Solicitudes de Congelamiento', PLAN_REQ: 'Solicitudes de Plan de Pago',
     PAYFORM: 'Registrar Pago', DNI_CHECK: 'Verificación de DNI', PROSPECTS: 'Prospectos',
-    DEBT_ANALYSIS: 'Análisis de Deuda',
+    DEBT_ANALYSIS: 'Análisis de Deuda', HOLIDAYS: 'Feriados',
   },
 };
 const ST = { ACTIVE: 'ACTIVO', OVERDUE: 'VENCIDO', PAID: 'PAGADO', CLEARED: 'SALDADO', PLAN: 'EN PLAN', FROZEN: 'CONGELADO' };
@@ -99,7 +99,7 @@ const CUOTAS_HEADERS = ['ID Cuota', 'ID Préstamo', 'Nº Cuota', 'Fecha de Venci
   'Monto Cuota', 'Monto Pagado', 'Saldo Cuota', 'Estado', 'Último Aviso'];
 const CU = { CUOTA_ID: 1, LOAN_ID: 2, NUM: 3, DUE: 4, AMOUNT: 5, PAID: 6, BALANCE: 7, STATE: 8, NOTICE: 9 };
 // Encabezados de "Nuevos Prestatarios" (el formulario agrega filas aquí, en este orden).
-const NB = ['Fecha de Envío', 'Nombre completo', 'Correo', 'DNI', 'Teléfono', 'Monto Solicitado',
+const NB = ['Fecha de Envío', 'Nombre completo', '⚠ Alertas', 'Correo', 'DNI', 'Teléfono', 'Monto Solicitado',
   'Plazo (meses)', 'Notas / Motivo', 'Foto del frente del DNI', 'Foto del dorso del DNI', 'Verificado?', 'Rechazar?', 'Resultado',
   'Verificar BCRA?', 'Parámetro BCRA', 'CUIL', 'Nombre BCRA', 'Peor Situación', '% al día', 'Decisión', 'Puntaje BCRA', 'Calificación de Riesgo', 'Resumen BCRA', 'Dirección', 'Forma de Pago',
   'Anular límites',
@@ -108,7 +108,7 @@ const NB = ['Fecha de Envío', 'Nombre completo', 'Correo', 'DNI', 'Teléfono', 
   'Ref 3 Nombre', 'Ref 3 Vínculo', 'Ref 3 Teléfono', 'Avisar Ref 3 📲', 'Ref 3 Validada?', 'Compromiso aceptado',
   '¿Cuenta propia?', 'Titular de la cuenta', 'DNI del titular', 'Correo del titular', 'Teléfono del titular',
   'DNI titular (frente)', 'DNI titular (dorso)', 'Titular acepta?', 'Avisar al titular 📲',
-  'Alerta ubicación/dispositivo', 'Conexiones por teléfono'];
+  'Alerta ubicación/dispositivo', 'Conexiones por teléfono', 'Alerta de fraude', 'Alerta de feriado'];
 
 /* ============================ MENÚ ============================ */
 function onOpen() {
@@ -176,6 +176,8 @@ function onOpen() {
       .addItem('⚙ Instalar análisis de deuda (columnas + hoja + disparador)', 'instalarAnalisisDeuda')
       .addItem('➕ Agregar SOLO columnas de análisis BCRA (Prospectos)', 'crearColumnasBcraProspectos')
       .addItem('➕ Crear columna «BCRA (comprimido)» (Clientes)', 'crearColumnaBcraComprimido')
+      .addItem('🚩 Instalar marcado de fraude (casilla «Fraude» + alerta V-41)', 'instalarMarcadoFraude')
+      .addItem('📅 Instalar alertas de feriado + recuento ⚠ (V-42 + badge)', 'instalarAlertasFeriado')
       .addItem('➕ Crear hoja de Recordatorios de pago', 'createRemindersSheet_')
       .addItem('📄 Crear hoja de Estudio de Contratos', 'createAgreementSheet_')
       .addItem('📄 Crear/actualizar hoja de Estudio de Estados', 'createStatementsSheet_')
@@ -3628,12 +3630,18 @@ function setupNew_(ss) {
   let sh = ss.getSheetByName(CFG.SHEETS.NEW) || ss.getSheetByName('New Borrowers');
   if (!sh) sh = ss.insertSheet(CFG.SHEETS.NEW);
   else if (sh.getName() !== CFG.SHEETS.NEW && !ss.getSheetByName(CFG.SHEETS.NEW)) sh.setName(CFG.SHEETS.NEW);
+  // Badge «⚠ Alertas»: en hojas EXISTENTES con datos, inserta físicamente la columna junto a
+  // «Nombre completo» ANTES de reescribir el encabezado (setValues solo reescribe la fila 1; sin
+  // este corrimiento los datos quedarían desalineados). Idempotente: solo si la columna falta.
+  { const hm0 = headerMap_(sh), nameC0 = hm0['Nombre completo'];
+    if (nameC0 && !hm0['⚠ Alertas']) sh.insertColumnAfter(nameC0); }
   sh.getRange(1, 1, 1, NB.length).setValues([NB]).setFontWeight('bold').setBackground('#b45f06').setFontColor('#fff').setWrap(true);
   sh.setFrozenRows(1);
   const cb = SpreadsheetApp.newDataValidation().requireCheckbox().build();
-  sh.getRange(2, 11, CFG.MAX_ROWS, 1).setDataValidation(cb); // Verificado?
-  sh.getRange(2, 12, CFG.MAX_ROWS, 1).setDataValidation(cb); // Rechazar?
-  sh.getRange(2, 14, CFG.MAX_ROWS, 1).setDataValidation(cb); // Verificar BCRA?
+  // Columnas resueltas por NOMBRE (robusto al corrimiento por «⚠ Alertas»).
+  sh.getRange(2, NB.indexOf('Verificado?') + 1, CFG.MAX_ROWS, 1).setDataValidation(cb); // Verificado?
+  sh.getRange(2, NB.indexOf('Rechazar?') + 1, CFG.MAX_ROWS, 1).setDataValidation(cb); // Rechazar?
+  sh.getRange(2, NB.indexOf('Verificar BCRA?') + 1, CFG.MAX_ROWS, 1).setDataValidation(cb); // Verificar BCRA?
   const overCol = NB.indexOf('Anular límites') + 1;
   if (overCol > 0) sh.getRange(2, overCol, CFG.MAX_ROWS, 1).setDataValidation(cb); // Anular límites (override)
   // Casillas para marcar cada referencia como verificada por el prestamista.
@@ -3642,12 +3650,13 @@ function setupNew_(ss) {
     if (c > 0) { sh.getRange(2, c, CFG.MAX_ROWS, 1).setDataValidation(cb); sh.setColumnWidth(c, 100); sh.getRange(1, c).setNote('Tildá cuando hayas contactado y verificado esta referencia.'); }
   });
   const paramDv = SpreadsheetApp.newDataValidation().requireValueInList(['DNI', 'CUIL'], true).build();
-  const paramRange = sh.getRange(2, 15, CFG.MAX_ROWS, 1); // Parámetro BCRA
+  const paramRange = sh.getRange(2, NB.indexOf('Parámetro BCRA') + 1, CFG.MAX_ROWS, 1); // Parámetro BCRA
   paramRange.setDataValidation(paramDv);
   paramRange.setValue('DNI');
   sh.getRange(2, 1, CFG.MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd hh:mm');
-  sh.getRange(2, 6, CFG.MAX_ROWS, 1).setNumberFormat(CFG.CURRENCY_FMT);
-  [150, 170, 200, 130, 120, 130, 100, 200, 190, 190, 90, 90, 220,
+  sh.getRange(2, NB.indexOf('Monto Solicitado') + 1, CFG.MAX_ROWS, 1).setNumberFormat(CFG.CURRENCY_FMT);
+  // Anchos por posición (el 56 es «⚠ Alertas», insertada tras «Nombre completo»).
+  [150, 170, 56, 200, 130, 120, 130, 100, 200, 190, 190, 90, 90, 220,
     110, 120, 120, 170, 110, 90, 130, 100, 170, 460].forEach((w, i) => sh.setColumnWidth(i + 1, w));
   // Anchos de las columnas de la cuenta de destino / titular (cuenta de terceros).
   [['¿Cuenta propia?', 110], ['Titular de la cuenta', 180], ['DNI del titular', 120],
@@ -3673,12 +3682,26 @@ function setupNew_(ss) {
     sh.getRange(2, conexCol, CFG.MAX_ROWS, 1).setWrap(true);
     sh.getRange(1, conexCol).setNote('🔗 V-40 — conexiones por teléfono: referencias que son clientes, clientes que comparten el teléfono del solicitante o lo listan como referencia, referencias compartidas y coincidencias con «Prospectos», con el estado de los préstamos de cada cliente conectado. Informativo, no bloquea.');
   }
+  // La columna informativa V-41 «Alerta de fraude» (ancho/nota) la instala ensureFraudeColumns_.
+  // Columna informativa V-42: alerta de feriado/vacaciones (fecha de solicitud o de vencimiento).
+  const feriadoCol = NB.indexOf('Alerta de feriado') + 1;
+  if (feriadoCol > 0) {
+    sh.setColumnWidth(feriadoCol, 260);
+    sh.getRange(2, feriadoCol, CFG.MAX_ROWS, 1).setWrap(true);
+    sh.getRange(1, feriadoCol).setNote('📅 V-42 — la fecha de la solicitud o de vencimiento cae en un feriado, en la semana de un feriado o en enero/febrero (vacaciones). Informativo, no bloquea. Editá la hoja «Feriados» para el calendario.');
+  }
+  // Columna «⚠ Alertas» (junto al nombre): recuento de reglas disparadas (V-05/07/39/40/41/42).
+  const badgeCol = NB.indexOf('⚠ Alertas') + 1;
+  if (badgeCol > 0) {
+    sh.getRange(2, badgeCol, CFG.MAX_ROWS, 1).setHorizontalAlignment('center');
+    sh.getRange(1, badgeCol).setNote('⚠ Cantidad de reglas de validación disparadas para esta solicitud (contactos duplicados, ubicación/dispositivo, conexiones, fraude y feriado). Vacío = sin alertas.');
+  }
   // Casilla "Titular acepta?" (cuenta de terceros): el titular confirmó que acepta recibir el dinero.
   const taCol = NB.indexOf('Titular acepta?') + 1;
   if (taCol > 0) { sh.getRange(2, taCol, CFG.MAX_ROWS, 1).setDataValidation(cb); sh.getRange(1, taCol).setNote('Tildá SOLO cuando el titular de la cuenta (cuenta de terceros) confirmó —por WhatsApp o teléfono— que acepta recibir el dinero. Obligatorio para aprobar; NO se anula con «Anular límites». Usá «Avisar al titular 📲» para pedir su conformidad.'); }
-  sh.getRange(2, 23, CFG.MAX_ROWS, 1).setWrap(true); // Resumen BCRA
-  sh.getRange('K1').setNote('Tilde "Verificado?" para aprobar (pasa a Prestatarios) o "Rechazar?" para archivar en Rechazados.');
-  sh.getRange('N1').setNote('Tilde "Verificar BCRA?" para consultar la Central de Deudores del BCRA. En "Parámetro BCRA" elegí DNI o CUIL: con CUIL se usa el valor de la columna CUIL (si está vacío, se deriva del DNI).');
+  sh.getRange(2, NB.indexOf('Resumen BCRA') + 1, CFG.MAX_ROWS, 1).setWrap(true); // Resumen BCRA
+  sh.getRange(1, NB.indexOf('Verificado?') + 1).setNote('Tilde "Verificado?" para aprobar (pasa a Prestatarios) o "Rechazar?" para archivar en Rechazados.');
+  sh.getRange(1, NB.indexOf('Verificar BCRA?') + 1).setNote('Tilde "Verificar BCRA?" para consultar la Central de Deudores del BCRA. En "Parámetro BCRA" elegí DNI o CUIL: con CUIL se usa el valor de la columna CUIL (si está vacío, se deriva del DNI).');
   if (overCol > 0) sh.getRange(1, overCol).setNote('Tilde "Anular límites" ANTES de tildar "Verificado?" para aprobar aunque el prestatario ya tenga ' + MAX_LOANS_PER_CLIENT + ' préstamos, se exceda el capital disponible, el BCRA marque RECHAZAR o se supere el límite por dispositivo/ubicación (V-39). NO omite las referencias con teléfono válido (V-27/V-34) ni el tope de referencias que son clientes (V-38): siguen siendo obligatorios.');
 }
 
@@ -6699,8 +6722,8 @@ function submitIntake(form) {
     const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd-HHmmss');
     const dniUrl = savePhoto_(folder, form.dniPhoto, name + ' DNI ' + stamp);
     const cuilUrl = savePhoto_(folder, form.cuilPhoto, name + ' CUIL ' + stamp);
-    const row = nbAppend_(nb, [new Date(), safeCell_(name), email, dni, phone, amount, term, safeCell_(notes), dniUrl, cuilUrl, false, false, 'Pendiente de verificación']);
-    nb.getRange(row, 1).setNumberFormat('yyyy-mm-dd hh:mm'); nb.getRange(row, 6).setNumberFormat(CFG.CURRENCY_FMT);
+    const row = nbAppend_(nb, [new Date(), safeCell_(name), '', email, dni, phone, amount, term, safeCell_(notes), dniUrl, cuilUrl, false, false, 'Pendiente de verificación']); // '' = «⚠ Alertas» (col 3)
+    nb.getRange(row, 1).setNumberFormat('yyyy-mm-dd hh:mm'); nb.getRange(row, NB.indexOf('Monto Solicitado') + 1).setNumberFormat(CFG.CURRENCY_FMT);
     // Forma de pago: se escribe por nombre de encabezado (columna al final de NB).
     try { setSheetFieldByHeader_(nb, row, 'Forma de Pago', safeCell_(payMethodFull)); } catch (e) { logError_('submitIntake:payMethod', e); }
     try {
