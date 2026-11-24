@@ -2667,6 +2667,12 @@ function intakeSmartHtml_() {
     <script>
       ${deviceCaptureJs_()}
       var f=document.getElementById('f'),btn=document.getElementById('btn'),msg=document.getElementById('msg'),calc=document.getElementById('calc');
+      // PERF: captura de dispositivo PRE-ENCENDIDA. collectDeviceInfo() tarda hasta ~4 s (geo-IP + GPS);
+      // antes se lanzaba RECIÉN al tocar "Confirmar y enviar", bloqueando el envío. Ahora se arranca
+      // apenas el usuario llega al último paso / abre la confirmación, de modo que al enviar ya está
+      // (casi) lista. Se guarda la PROMESA una sola vez (idempotente); nunca se vuelve a llamar.
+      var devCapP=null;
+      function warmDeviceCapture(){ try{ if(!devCapP && typeof collectDeviceInfo==='function') devCapP=collectDeviceInfo(); }catch(e){} }
       // PERF: comprime/achica cada foto en el navegador ANTES de subir (canvas → JPEG). Un DNI de
       // teléfono de ~5 MB baja a ~0,3 MB → la subida y el guardado en Drive son mucho más rápidos.
       function compressImageFile(file, maxEdge, quality){
@@ -3201,6 +3207,7 @@ function intakeSmartHtml_() {
           '</table>'+
           '<p style="margin-top:10px;color:#2e7d32;font-size:13px">✅ Si pagás a tiempo, subís de nivel y tu próximo límite crece.</p>'+
           '<p style="margin-top:12px">¿Confirmás que querés pedir este préstamo por <b>'+t+' días</b> a <b>'+pct+'%</b> de interés?</p>';
+        warmDeviceCapture(); // PERF: arranca la captura mientras el usuario lee y confirma (se espera menos al enviar)
         confirmOverlay.style.display='flex';
         return true;
       }
@@ -3209,6 +3216,12 @@ function intakeSmartHtml_() {
         confirmOverlay.style.display='none';
         msg.style.display='none';btn.disabled=true;btn.textContent='Subiendo…';formView.style.display='none';loadingView.style.display='block';
         startProgress();
+        // PERF: la compresión de fotos y la captura de dispositivo corren EN PARALELO (antes iban en
+        // serie: primero la espera de hasta 4 s del dispositivo y RECIÉN DESPUÉS la compresión). La
+        // compresión se arranca YA; la captura suele venir pre-encendida (warmDeviceCapture) desde el
+        // último paso / la confirmación, así que al llegar acá ya está (casi) lista.
+        try{ setProgress(45,'Optimizando las fotos…'); }catch(e){}
+        var imgP = compressFormImages(['dniPhoto','cuilPhoto','holderDniFront','holderDniBack']);
         // El envío NUNCA debe quedar colgado por la captura de dispositivo: se corre con un tope de
         // 4 s y, pase lo que pase, se envía (con los datos que haya o vacío). Si la llamada al
         // servidor falla al serializar el formulario, se MUESTRA el error en vez de quedar en 96%.
@@ -3216,17 +3229,16 @@ function intakeSmartHtml_() {
         function enviar(device){ if(sent)return; sent=true;
           try{ var meta = { userAgent: navigator.userAgent, ip: CLIENT_IP, device: device||{}, dwellMs: Date.now()-PAGE_OPEN };
             var dm=document.getElementById('deviceMeta'); if(dm) dm.value=JSON.stringify(meta); }catch(e){}
-          try{ setProgress(45,'Optimizando las fotos…'); }catch(e){}
-          // Comprime las fotos en el navegador ANTES de subir; luego el formulario (con archivos) se
+          // Espera a que la compresión (ya en curso) termine; luego el formulario (con archivos) se
           // envía SOLO (sin 2º parámetro), con deviceMeta/honeypot dentro del propio form.
-          compressFormImages(['dniPhoto','cuilPhoto','holderDniFront','holderDniBack']).then(function(){
+          imgP.then(function(){
             try{ setProgress(62,'Subiendo la solicitud…'); }catch(e){}
             try{ google.script.run.withSuccessHandler(onSuccess).withFailureHandler(onFail).submitIntakeSmart(f); }
             catch(err){ onFail(err); }
           });
         }
         Promise.race([
-          collectDeviceInfo().catch(function(){ return DEV_INFO||{}; }),
+          (devCapP || collectDeviceInfo()).catch(function(){ return DEV_INFO||{}; }), // reutiliza la captura pre-encendida
           new Promise(function(res){ setTimeout(function(){ res(DEV_INFO||{}); }, 4000); }) // al vencer, manda lo ya recolectado (no {})
         ]).then(enviar);
       });
@@ -3253,6 +3265,7 @@ function intakeSmartHtml_() {
       }
       function showStep(n){
         n=Math.max(1,Math.min(MAXSTEP,n)); curStep=n;
+        if(n===MAXSTEP) warmDeviceCapture(); // PERF: en el último paso ya se enciende la captura de dispositivo
         var steps=document.querySelectorAll('.wstep');
         for(var i=0;i<steps.length;i++){ steps[i].classList.toggle('active', String(steps[i].getAttribute('data-step'))===String(n)); }
         var chips=document.querySelectorAll('#stepper .schip');
