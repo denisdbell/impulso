@@ -490,6 +490,56 @@ def expiry_date(s):
         return None
 
 
+def birth_date(s):
+    """V-50 — best-effort birth date from the DNI's «FECHA DE NACIMIENTO» field
+    (same DD/MM/YYYY or DD-MMM-YYYY formats as the other dates). None if absent."""
+    if not s:
+        return None
+    U = str(s).upper()
+    m = re.search(r"\b(\d{1,2})[/\-. ](\d{1,2})[/\-. ](\d{4})\b", U)
+    if m:
+        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    else:
+        m = re.search(r"\b(\d{1,2})[/\-. ]([A-Z]{3})[/\-. ](\d{4})\b", U)
+        if not m or m.group(2) not in _MONTHS:
+            return None
+        d, mo, y = int(m.group(1)), _MONTHS[m.group(2)], int(m.group(3))
+    try:
+        return datetime.date(y, mo, d)
+    except ValueError:
+        return None
+
+
+def _dhash(path, size=8):
+    """V-48 — 64-bit difference hash of an image, or None if it can't be read.
+    Robust to resizing/recompression; near-identical images share a low Hamming distance."""
+    try:
+        from PIL import Image
+        try:
+            from pillow_heif import register_heif_opener
+            register_heif_opener()
+        except Exception:
+            pass
+    except ImportError:
+        return None
+    try:
+        with Image.open(path) as im:
+            im = im.convert("L").resize((size + 1, size), Image.BILINEAR)
+            px = list(im.getdata())
+    except Exception:
+        return None
+    bits = 0
+    for row in range(size):
+        base = row * (size + 1)
+        for col in range(size):
+            bits = (bits << 1) | (1 if px[base + col] > px[base + col + 1] else 0)
+    return bits
+
+
+def _hamming(a, b):
+    return bin(a ^ b).count("1")
+
+
 # --------------------------------------------------------------------------- #
 # File grouping (one subfolder = one person)
 # --------------------------------------------------------------------------- #
@@ -588,7 +638,7 @@ def match_cliente(fields, persona_from_file, dni_folder, clients):
     return {"cliente": None, "via": NO_MATCH, "ambiguo": False}
 
 
-def anomalies(fields, match, group, dni_persona_counts, today):
+def anomalies(fields, match, group, dni_persona_counts, today, photo_dup=False):
     """Anomaly catalog → {estado, labels} (port of dniAnomalies_ + extras)."""
     labels = []
     dn_ocr = analyze_impulso.norm_dni(fields.get("dni"))
@@ -625,6 +675,17 @@ def anomalies(fields, match, group, dni_persona_counts, today):
         labels.append("DNI shared across people")
     if expiry_date(fields.get("vencimiento")) and expiry_date(fields.get("vencimiento")) < today:
         labels.append("Document expired")
+    # V-48 — the same DNI photo appears under a different person
+    if photo_dup:
+        labels.append("Duplicate DNI photo (same image as another person)")
+    # V-50 — age from the birth date: under 18 is ineligible; an implausible age hints at a bad read/forgery
+    bd = birth_date(fields.get("nacimiento"))
+    if bd:
+        age = (today - bd).days // 365
+        if age < 18:
+            labels.append("Underage (under 18)")
+        elif age > 100:
+            labels.append("Implausible age (%d)" % age)
 
     return {"estado": REVIEW if labels else OK, "labels": labels}
 
@@ -685,12 +746,30 @@ def build_verifications(photo_dir, clients, today=None, progress=lambda m: None,
             dni_persona.setdefault(eff, set()).add(norm_name(g["persona"]))
     dni_persona_counts = {k: len(v) for k, v in dni_persona.items()}
 
+    # V-48 — perceptual-hash the photos; the SAME image reused by a different person is a strong lead.
+    # Cheap next to OCR; O(G²) Hamming per side over ≤ a few hundred groups.
+    for g in groups:
+        g["_ph_frente"] = _dhash(g["frente"]) if g["frente"] else None
+        g["_ph_dorso"] = _dhash(g["dorso"]) if g["dorso"] else None
+    dup_photo = set()   # subfolders whose front/back matches a DIFFERENT person's
+    PH_MAX = 6          # Hamming distance ≤ this on a 64-bit dHash = effectively the same image
+    for side in ("_ph_frente", "_ph_dorso"):
+        hashed = [g for g in groups if g.get(side) is not None]
+        for i in range(len(hashed)):
+            for j in range(i + 1, len(hashed)):
+                a, b = hashed[i], hashed[j]
+                if norm_name(a["persona"]) == norm_name(b["persona"]):
+                    continue    # same person across sessions → not a duplicate
+                if _hamming(a[side], b[side]) <= PH_MAX:
+                    dup_photo.add(a["subfolder"])
+                    dup_photo.add(b["subfolder"])
+
     # Pass 2 — match + anomalies → records
     records = []
     for g in groups:
         fields = g["_fields"]
         match = match_cliente(fields, g["persona"], g["dni_folder"], clients)
-        an = anomalies(fields, match, g, dni_persona_counts, today)
+        an = anomalies(fields, match, g, dni_persona_counts, today, photo_dup=g["subfolder"] in dup_photo)
         cli = match["cliente"]
         estado = an["estado"] if cli else NO_MATCH
         records.append({

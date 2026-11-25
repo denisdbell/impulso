@@ -61,6 +61,7 @@ BOOT_SEED = 42
 BCRA_BAD_SIT = 3        # situación ≥ 3 counts as a bad BCRA mark
 BCRA_WINDOW = 12        # months before origination scanned for bad marks
 PLAZO_LONG_DAYS = 30    # term ≥ this → "long" (the dominant risk factor)
+REBORROW_FEATURE_DAYS = 30  # V-53 candidate — a prior loan within N days of origination (rapid reborrow)
 CAP_SPLIT = 100_000     # profile bucket split for Capital (report only)
 N_PRIOR_CAP = 3         # n_prior_good is capped here
 AUC_GATE = 0.65         # shipping gate: LOOCV AUC must reach this
@@ -78,6 +79,14 @@ FEATURE_LABEL = {
     "bcra_missing": "no usable BCRA file",
     "bcra_bad12": "BCRA situación ≥ %d in prior %d months" % (BCRA_BAD_SIT, BCRA_WINDOW),
 }
+
+# V-53 — candidate features: computed by featurize() but intentionally NOT in the active
+# FEATURES set. The model is pre-registered and parsimonious (EPV≈3); activating a feature
+# requires it to clear the same bar on more data (the AUC_GATE must still hold on LOOCV), so
+# the shipped model and its calibration never silently degrade. To evaluate one on current data:
+#   loocv_by_client(dataset, l2, feats=FEATURES + ["prior_recent"])
+CANDIDATE_FEATURES = ["prior_recent"]
+FEATURE_LABEL["prior_recent"] = "a prior loan within %d days (rapid reborrow)" % REBORROW_FEATURE_DAYS
 
 # Display decision reuses the combined-score cutoffs so ranking row colors work.
 def decision_of_p(pct):
@@ -200,8 +209,10 @@ def prior_history(loans_sorted, d):
 # ---------------------------------------------------------------------------- #
 # Features (single path for training AND scoring)
 # ---------------------------------------------------------------------------- #
-def featurize(capital, plazo, n_prior_good, prior_any_bad, bcra):
-    """bcra = result of bcra_asof() or None (missing)."""
+def featurize(capital, plazo, n_prior_good, prior_any_bad, bcra, prior_recent=0):
+    """bcra = result of bcra_asof() or None (missing). `prior_recent` is a V-53 candidate
+    signal (leak-free, as-of origination); it is emitted here but is NOT in the active
+    FEATURES set, so fit()/loocv()/profile ignore it until it is explicitly activated."""
     return {
         "plazo_long": 1.0 if (plazo or 0) >= PLAZO_LONG_DAYS else 0.0,
         "logcap": math.log(max(float(capital or 0), 1.0)),
@@ -209,6 +220,7 @@ def featurize(capital, plazo, n_prior_good, prior_any_bad, bcra):
         "prior_any_bad": 1.0 if prior_any_bad else 0.0,
         "bcra_missing": 0.0 if bcra else 1.0,
         "bcra_bad12": 1.0 if (bcra and bcra["worst12"] >= BCRA_BAD_SIT) else 0.0,
+        "prior_recent": 1.0 if prior_recent else 0.0,   # V-53 candidate (dark)
     }
 
 
@@ -231,12 +243,16 @@ def build_dataset(clients, bcra_map, today):
                 continue
             npg, pab = prior_history(loans, l["fecha"])
             bc = bcra_asof(bcra_map.get(cl["cuil"]), l["fecha"]) if cl["cuil"] else None
+            # V-53 candidate (leak-free): a prior loan originated within N days before this one.
+            prec = 1 if any(p is not l and p["fecha"] and p["fecha"] < l["fecha"]
+                            and (l["fecha"] - p["fecha"]).days <= REBORROW_FEATURE_DAYS
+                            for p in loans) else 0
             rows.append({
                 "loan_id": l["loan_id"], "client_id": cl["client_id"],
                 "cuil": cl["cuil"], "dni": cl["dni"], "name": cl["name"],
                 "fecha": l["fecha"], "y": y, "status": l["status"],
                 "days_late": l["days_late"],
-                "feats": featurize(l["capital"], l["term"], npg, pab, bc),
+                "feats": featurize(l["capital"], l["term"], npg, pab, bc, prec),
             })
     rows.sort(key=lambda r: (r["client_id"], r["fecha"], r["loan_id"]))
     return rows, excluded

@@ -32,6 +32,7 @@ they are the actual labels in the workbook.
 
 import argparse
 import datetime
+import math
 import re
 import sys
 import unicodedata
@@ -54,6 +55,8 @@ IP_MIN = 2       # same IP across ≥2 people (≥3 is stronger)
 GPS_MIN = 2      # identical GPS fix across ≥2 people
 
 FAST_DWELL_S = 3         # a form filled in ≤3 s looks automated/scripted
+IMPOSSIBLE_KMH = 250     # V-52 — implied speed between two GPS submissions above this = impossible travel
+MIN_TRAVEL_KM = 50       # V-52 — ignore sub-50 km hops (GPS jitter / same city)
 RISK_HIGH, RISK_REVIEW, RISK_OK = "High", "Review", "OK"
 _RISK_ORDER = {RISK_HIGH: 0, RISK_REVIEW: 1, RISK_OK: 2}
 
@@ -109,6 +112,27 @@ def _short(s, n=10):
 
 def _is_real_gps(s):
     return bool(_GPS_RE.match(_s(s)))
+
+
+def _parse_gps(s):
+    """(lat, lon) floats from a 'lat,long' string, or None."""
+    if not _GPS_RE.match(_s(s)):
+        return None
+    try:
+        lat, lon = _s(s).split(",")
+        return (float(lat), float(lon.strip()))
+    except (ValueError, IndexError):
+        return None
+
+
+def _haversine_km(lat1, lon1, lat2, lon2):
+    """Great-circle distance in km between two lat/lon points."""
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(min(1.0, math.sqrt(a)))
 
 
 def _who(entry):
@@ -325,6 +349,30 @@ def build_devices(xlsx_path, clients=None, today=None):
         for kind in e.get("_clusters", []):
             fl.append("Shared %s" % kind.lower())
 
+    # ---- V-52: impossible travel — same person's GPS fixes too far apart, too fast ----
+    by_person = defaultdict(list)
+    for e in recs:
+        if e["dni"] and _is_real_gps(e["gps"]) and _ts_key(e["ts"]) != datetime.datetime.min:
+            by_person[e["dni"]].append(e)
+    for es in by_person.values():
+        es.sort(key=lambda e: _ts_key(e["ts"]))
+        for i in range(1, len(es)):
+            a, b = es[i - 1], es[i]
+            pa, pb = _parse_gps(a["gps"]), _parse_gps(b["gps"])
+            if not pa or not pb:
+                continue
+            km = _haversine_km(pa[0], pa[1], pb[0], pb[1])
+            if km < MIN_TRAVEL_KM:
+                continue
+            hours = (_ts_key(b["ts"]) - _ts_key(a["ts"])).total_seconds() / 3600.0
+            kmh = (km / hours) if hours > 0 else float("inf")
+            if kmh >= IMPOSSIBLE_KMH:
+                b["flags"].append("Impossible travel (%d km in %.1fh)" % (round(km), max(hours, 0.0)))
+                if kmh == float("inf") or kmh >= 2 * IMPOSSIBLE_KMH:
+                    b["riesgo"] = RISK_HIGH
+                elif b["riesgo"] != RISK_HIGH:
+                    b["riesgo"] = RISK_REVIEW
+
     flags = [{
         "name": e["name"] or "—", "dni": e["dni"] or "—", "token": e["token"],
         "when": _fmt_dt(e["ts"]), "riesgo": e["riesgo"], "loan": e["loan"],
@@ -349,6 +397,7 @@ def build_devices(xlsx_path, clients=None, today=None):
         "webdriver": sum(1 for e in recs if e["webdriver"]),
         "vpn": sum(1 for e in recs if e["vpn"] or (e["iploc"] and _HOSTING_RE.search(e["iploc"]))),
         "geo_mismatch": sum(1 for e in recs if "revisar" in e["iploc"].lower()),
+        "impossible_travel": sum(1 for e in recs if any(f.startswith("Impossible travel") for f in e["flags"])),
         "fast_dwell": sum(1 for e in recs if e["dwell"] is not None and 0 < e["dwell"] <= FAST_DWELL_S),
         "flagged": len(flags),
     }

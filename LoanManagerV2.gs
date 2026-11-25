@@ -108,7 +108,7 @@ const NB = ['Fecha de Envío', 'Nombre completo', '⚠ Alertas', 'Correo', 'DNI'
   'Ref 3 Nombre', 'Ref 3 Vínculo', 'Ref 3 Teléfono', 'Avisar Ref 3 📲', 'Ref 3 Validada?', 'Compromiso aceptado',
   '¿Cuenta propia?', 'Titular de la cuenta', 'DNI del titular', 'Correo del titular', 'Teléfono del titular',
   'DNI titular (frente)', 'DNI titular (dorso)', 'Titular acepta?', 'Avisar al titular 📲',
-  'Alerta ubicación/dispositivo', 'Conexiones por teléfono', 'Alerta de fraude', 'Alerta de feriado'];
+  'Alerta ubicación/dispositivo', 'Conexiones por teléfono', 'Alerta de fraude', 'Alerta de feriado', 'Alertas adicionales'];
 
 /* ============================ MENÚ ============================ */
 function onOpen() {
@@ -184,6 +184,7 @@ function onOpen() {
       .addItem('🎉 Agregar configuración de la Promoción (sorteo)', 'configurarPromocion')
       .addItem('🚩 Instalar marcado de fraude (casilla «Fraude» + alerta V-41)', 'instalarMarcadoFraude')
       .addItem('📅 Instalar alertas de feriado + recuento ⚠ (V-42 + badge)', 'instalarAlertasFeriado')
+      .addItem('🧩 Instalar validaciones adicionales (V-43/44/46/47/49: columna + ajustes)', 'instalarValidacionesAdicionales')
       .addItem('➕ Crear hoja de Recordatorios de pago', 'createRemindersSheet_')
       .addItem('📄 Crear hoja de Estudio de Contratos', 'createAgreementSheet_')
       .addItem('📄 Crear/actualizar hoja de Estudio de Estados', 'createStatementsSheet_')
@@ -908,6 +909,13 @@ function ensureIntakeRefColumns_(ss) {
         nb.getRange(2, cCx, CFG.MAX_ROWS, 1).setWrap(true);
         nb.getRange(1, cCx).setNote('🔗 V-40 — conexiones por teléfono: referencias que son clientes, clientes que comparten el teléfono del solicitante o lo listan como referencia, referencias compartidas y coincidencias con «Prospectos», con el estado de los préstamos de cada cliente conectado. Informativo, no bloquea.');
       }
+      // Columna informativa V-43/44/46/47/49: alertas adicionales consolidadas.
+      const cEx = clientesHeaderCol_(nb, 'Alertas adicionales', true);
+      if (cEx > 0) {
+        nb.setColumnWidth(cEx, 260);
+        nb.getRange(2, cEx, CFG.MAX_ROWS, 1).setWrap(true);
+        nb.getRange(1, cEx).setNote('V-43 velocidad de re-préstamo · V-44 solicitud duplicada · V-46 cuenta destino (CBU/CVU/alias) · V-47 correo desechable/typo · V-49 nombre casi igual. Alertas informativas para el prestamista; no bloquean.');
+      }
     }
     // Columnas "Avisar Ref 1/2/3 📲": enlace de WhatsApp JUNTO al teléfono de cada referencia. Se
     // INSERTAN (no se agregan al final) para que queden al lado del número; es no destructivo
@@ -1037,6 +1045,10 @@ function setupSettings_(ss) {
     ['Días de aviso de vencimiento (lista)', '30,15,7,3'],
     ['Días de aviso de cuota (plan)', '7,3,1'],
     ['Días entre avisos de congelado', '7'],
+    // V-43 — ventana (días) para avisar «re-préstamo rápido»: pedir de nuevo dentro de N días del último préstamo.
+    ['Umbral de re-préstamo (días)', '7'],
+    // V-47 — dominios de correo desechables adicionales (coma/espacio-separados) que suman a la lista interna.
+    ['Dominios desechables', ''],
     // Avisos del día del vencimiento + cobranza (dunning) automática: 0 = "vence hoy"; positivos = días de atraso.
     ['Avisos de atraso activos (SÍ/NO)', 'SÍ'],
     ['Días de aviso de atraso (lista)', '0,1,3,7,15,30'],
@@ -3737,7 +3749,14 @@ function setupNew_(ss) {
     sh.getRange(2, feriadoCol, CFG.MAX_ROWS, 1).setWrap(true);
     sh.getRange(1, feriadoCol).setNote('📅 V-42 — la fecha de la solicitud o de vencimiento cae en un feriado, en la semana de un feriado o en enero/febrero (vacaciones). Informativo, no bloquea. Editá la hoja «Feriados» para el calendario.');
   }
-  // Columna «⚠ Alertas» (junto al nombre): recuento de reglas disparadas (V-05/07/39/40/41/42).
+  // Columna informativa V-43/44/46/47/49: alertas adicionales consolidadas.
+  const extraCol = NB.indexOf('Alertas adicionales') + 1;
+  if (extraCol > 0) {
+    sh.setColumnWidth(extraCol, 260);
+    sh.getRange(2, extraCol, CFG.MAX_ROWS, 1).setWrap(true);
+    sh.getRange(1, extraCol).setNote('V-43 velocidad de re-préstamo · V-44 solicitud duplicada · V-46 cuenta destino (CBU/CVU/alias) · V-47 correo desechable/typo · V-49 nombre casi igual. Alertas informativas para el prestamista; no bloquean.');
+  }
+  // Columna «⚠ Alertas» (junto al nombre): recuento de reglas disparadas (V-05/07/39/40/41/42/43/44/46/47/49).
   const badgeCol = NB.indexOf('⚠ Alertas') + 1;
   if (badgeCol > 0) {
     sh.getRange(2, badgeCol, CFG.MAX_ROWS, 1).setHorizontalAlignment('center');
@@ -6461,10 +6480,22 @@ function restaurarInteresFilaActiva() {
  * y el texto del mensaje son CONFIGURABLES (hoja "Configuración"). */
 
 const PROMO_HEADERS = ['ID Cliente', 'Nombre', 'Teléfono', 'Préstamos pagados', 'Días de anticipación (máx)',
-  'Invitar al sorteo 📲', 'Siguió + compartió IG', 'Captura recibida', 'Participa en el sorteo', 'Notas'];
-const PROMO_WA_DEFAULT = '¡Hola {nombre}! 🎉 En {empresa} premiamos a quienes pagaron su préstamo en tiempo y forma. ' +
-  'Participá de nuestro SORTEO del {fecha}. Para entrar: 1) Seguí nuestro Instagram {instagram}. ' +
-  '2) Compartí nuestra página en tu historia. 3) Envianos las capturas por este chat como comprobante. ¡Mucha suerte! 🍀';
+  'Premio', 'Invitar al sorteo 📲', 'Siguió + compartió IG', 'Captura recibida', 'Participa en el sorteo', 'Notas'];
+const PROMO_WA_DEFAULT = '¡Hola {nombre}! 🎉🎁\n\n' +
+  'En {empresa} premiamos a quienes pagan sus préstamos SIEMPRE en fecha… ¡como vos! 🏆👏\n\n' +
+  '🎊 Participás por {premio}.\n\n' +
+  '🗓️ El sorteo se realiza el {fecha}.\n\n' +
+  '¿Cómo participar? ¡Es muy fácil! 👇\n' +
+  '1️⃣ Seguinos en Instagram {instagram} 📲\n' +
+  '2️⃣ Compartí nuestra página en tu historia 📸\n' +
+  '3️⃣ Enviános las capturas por este chat como comprobante ✅\n\n' +
+  '¡Mucha suerte! 🍀💚 {empresa}';
+// Plantillas ANTIGUAS autogeneradas (sin {premio}): si la guardada en «Configuración» coincide con
+// alguna de estas, se considera "sin personalizar" y se actualiza a PROMO_WA_DEFAULT (ver
+// promoMessageTemplate_). NO se pisa un mensaje realmente editado por el prestamista.
+const PROMO_WA_OLD_DEFAULTS = [
+  '¡Hola {nombre}! 🎉 En {empresa} premiamos a quienes pagaron su préstamo en tiempo y forma. Participá de nuestro SORTEO del {fecha}. Para entrar: 1) Seguí nuestro Instagram {instagram}. 2) Compartí nuestra página en tu historia. 3) Envianos las capturas por este chat como comprobante. ¡Mucha suerte! 🍀',
+];
 
 /** Fecha del sorteo (Configuración "Fecha del sorteo (promoción)"). Acepta AAAA-MM-DD, DD/MM/AAAA o
  *  una celda de fecha. Predet. 20-dic-2026. */
@@ -6478,13 +6509,44 @@ function promoRaffleDate_() {
 }
 /** Instagram de la empresa (Configuración), para el mensaje del sorteo. */
 function promoInstagram_() { return String(getSetting_('Instagram de la empresa (@usuario)') || '').trim(); }
-/** Mensaje de WhatsApp de la promoción, con los marcadores {nombre}/{empresa}/{instagram}/{fecha} resueltos. */
-function promoWaMessage_(name) {
-  const tpl = String(getSetting_('Mensaje de WhatsApp de la promoción') || '').trim() || PROMO_WA_DEFAULT;
+/** Plantilla EFECTIVA del mensaje: la guardada en «Configuración», salvo que esté vacía o sea una
+ *  versión ANTIGUA autogenerada (sin {premio}) → usa PROMO_WA_DEFAULT. Así una plantilla vieja no
+ *  "pisa" la nueva, pero se respeta cualquier texto realmente personalizado por el prestamista. */
+function promoMessageTemplate_() {
+  const cur = String(getSetting_('Mensaje de WhatsApp de la promoción') || '').trim();
+  return (!cur || PROMO_WA_OLD_DEFAULTS.indexOf(cur) >= 0) ? PROMO_WA_DEFAULT : cur;
+}
+/** Mensaje de WhatsApp de la promoción, con los marcadores {nombre}/{empresa}/{instagram}/{fecha}/{premio}
+ *  resueltos. `premio` es la frase del premio de ESE cliente (ver promoPrizeInfo_). */
+function promoWaMessage_(name, premio) {
+  let tpl = promoMessageTemplate_();
+  // Compatibilidad: si una plantilla personalizada NO incluye {premio}, se agrega al final para que
+  // el premio (préstamo sin interés / condonación de interés) SIEMPRE aparezca.
+  if (tpl.indexOf('{premio}') < 0 && String(premio || '').trim()) tpl += '\n\n🎁 Tu premio: {premio}.';
   return tpl.replace(/\{nombre\}/g, String(name || '').trim() || 'cliente')
     .replace(/\{empresa\}/g, companyName_())
     .replace(/\{instagram\}/g, promoInstagram_() || 'nuestro Instagram')
-    .replace(/\{fecha\}/g, fmtDate_(promoRaffleDate_()));
+    .replace(/\{fecha\}/g, fmtDate_(promoRaffleDate_()))
+    .replace(/\{premio\}/g, String(premio || '').trim() || 'un premio especial 🎁');
+}
+/**
+ * Premio que le corresponde a un cliente de la promoción:
+ *   • CON préstamo activo → CONDONACIÓN del interés de ese préstamo (paga solo el capital).
+ *   • SIN préstamo activo → PRÉSTAMO SIN INTERÉS hasta su nivel (escalera de graduación V-32).
+ * `lvl` = graduationLevelFor_(…). Devuelve {sheet, wa} (texto breve para la hoja y con emojis para WhatsApp).
+ */
+function promoPrizeInfo_(hasActive, lvl) {
+  if (hasActive) return {
+    sheet: 'Condonación de interés (préstamo actual)',
+    wa: 'la CONDONACIÓN TOTAL del interés de tu préstamo actual 🤑 (¡pagás SOLO el capital! 💰)',
+  };
+  // Si no se pudo calcular el nivel, cae al "Límite inicial" configurado (nunca $0).
+  const fallback = (typeof settingMoney_ === 'function') ? settingMoney_('Límite inicial (préstamo nuevo)', 150000) : 150000;
+  const monto = fmtMoney_((lvl && lvl.max) || fallback), nivel = (lvl && lvl.level) || 'tu nivel';
+  return {
+    sheet: 'Préstamo SIN interés hasta ' + monto + ' (' + nivel + ')',
+    wa: 'un PRÉSTAMO SIN INTERÉS 🤑 de hasta ' + monto + ' 💵 (' + nivel + ' 🏆)',
+  };
 }
 /**
  * Contexto de la PROMOCIÓN (una sola lectura): por cliente, sus préstamos con TODAS las señales de
@@ -6603,9 +6665,10 @@ function setupPromoSheet_(ss) {
   sh.getRange(1, 1, 1, PROMO_HEADERS.length).setValues([PROMO_HEADERS])
     .setFontWeight('bold').setBackground('#38761d').setFontColor('#fff').setWrap(true);
   sh.setFrozenRows(1);
-  [110, 220, 130, 120, 160, 150, 160, 140, 160, 240].forEach((w, i) => sh.setColumnWidth(i + 1, w));
-  sh.getRange(1, 6).setNote('Abre WhatsApp con la invitación al sorteo: seguir + compartir el Instagram y enviar capturas. El texto, el Instagram y la fecha salen de «Configuración».');
-  sh.getRange(1, 9).setNote('Tildá cuando el cliente completó los pasos (siguió, compartió y envió las capturas): queda habilitado para el sorteo del ' + fmtDate_(promoRaffleDate_()) + '.');
+  [110, 220, 130, 120, 160, 300, 150, 160, 140, 160, 220].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  sh.getRange(1, 6).setNote('Premio del cliente: PRÉSTAMO SIN INTERÉS hasta su nivel (si NO tiene préstamo activo) o CONDONACIÓN del interés de su préstamo actual (si tiene uno vigente). Se calcula solo.');
+  sh.getRange(1, 7).setNote('Abre WhatsApp con la invitación al sorteo: incluye el premio, seguir + compartir el Instagram y enviar capturas. El texto, el Instagram y la fecha salen de «Configuración».');
+  sh.getRange(1, 10).setNote('Tildá cuando el cliente completó los pasos (siguió, compartió y envió las capturas): queda habilitado para el sorteo del ' + fmtDate_(promoRaffleDate_()) + '.');
   return sh;
 }
 /**
@@ -6615,27 +6678,50 @@ function setupPromoSheet_(ss) {
 function buildPromo_(silent) {
   return guard_('buildPromo_', function () {
     const ss = getSS_(), sh = setupPromoSheet_(ss);
+    // Si en «Configuración» quedó la plantilla ANTIGUA autogenerada (sin premio/nivel), actualizala a
+    // la nueva. No toca una plantilla realmente personalizada por el prestamista.
+    try {
+      const stsh = ss.getSheetByName(CFG.SHEETS.SETTINGS);
+      const cur = String(getSetting_('Mensaje de WhatsApp de la promoción') || '').trim();
+      if (stsh && PROMO_WA_OLD_DEFAULTS.indexOf(cur) >= 0) setSettingValue_(stsh, 'Mensaje de WhatsApp de la promoción', PROMO_WA_DEFAULT);
+    } catch (e) { logError_('buildPromo_:upgradeMsg', e); }
     // Limpia datos + casillas previas (conserva encabezados).
     const clearH = Math.max(sh.getMaxRows() - 1, 1);
     sh.getRange(2, 1, clearH, PROMO_HEADERS.length).clearContent().clearDataValidations();
     const ctx = promoContext_(ss);
+    // Nivel/límite de graduación (V-32) para el premio. DEFENSIVO: si falla, no corta la promoción.
+    let repCtx = null;
+    try { repCtx = repaymentContext_(ss); } catch (e) { logError_('buildPromo_:repaymentContext', e); }
     const elegibles = [];
     clientesRows_().forEach(c => {
       if (!c.id) return;
       const st = promoClientStats_(ctx, c.id, c.dniNorm);
-      if (st.eligible) elegibles.push({ c: c, st: st });
+      if (!st.eligible) return;
+      // Premio por cliente (envuelto en try/catch: un fallo en el nivel NUNCA debe cortar la lista ni
+      // los enlaces de WhatsApp). Con préstamo ACTIVO → condonación del interés; sin préstamo activo →
+      // préstamo SIN interés hasta su nivel. (Los elegibles no tienen VENCIDO/CONGELADO/EN PLAN.)
+      let prize;
+      try {
+        const hasActive = (ctx.byClient[c.id] || []).some(L => String(L.estado || '').toUpperCase() === ST.ACTIVE);
+        const lvl = repCtx ? graduationLevelFor_(computeRepaymentHistory_(repCtx, c.id, c.dniNorm)) : null;
+        prize = promoPrizeInfo_(hasActive, lvl);
+      } catch (e) { logError_('buildPromo_:premio', e); prize = promoPrizeInfo_(false, null); }
+      elegibles.push({ c: c, st: st, prize: prize });
     });
     // Orden: más préstamos pagados primero; a igualdad, mayor anticipación.
     elegibles.sort((a, b) => (b.st.settledCount - a.st.settledCount) || (b.st.maxDaysEarly - a.st.maxDaysEarly));
     if (elegibles.length) {
-      const vals = elegibles.map(({ c, st }) => [c.id, safeCell_(c.name), c.phone, st.settledCount, st.maxDaysEarly, '', false, false, false, '']);
+      const vals = elegibles.map(({ c, st, prize }) => [c.id, safeCell_(c.name), c.phone, st.settledCount, st.maxDaysEarly, prize.sheet, '', false, false, false, '']);
       sh.getRange(2, 1, vals.length, PROMO_HEADERS.length).setValues(vals);
       const cb = SpreadsheetApp.newDataValidation().requireCheckbox().build();
-      sh.getRange(2, 7, vals.length, 3).setDataValidation(cb);   // casillas: siguió+compartió · captura · participa
-      elegibles.forEach(({ c }, i) => {
-        const num = waNumberAR_(c.phone);
-        if (num) sh.getRange(i + 2, 6).setFormula('=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(promoWaMessage_(c.name)) + '","📲 Invitar")');
-        else sh.getRange(i + 2, 6).setValue('(sin teléfono válido)');
+      sh.getRange(2, 8, vals.length, 3).setDataValidation(cb);   // casillas (cols 8-10): siguió+compartió · captura · participa
+      elegibles.forEach(({ c, prize }, i) => {
+        const num = waNumberAR_(c.phone), cell = sh.getRange(i + 2, 7);
+        if (num) {
+          const msg = promoWaMessage_(c.name, prize.wa);
+          cell.setFormula('=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📲 Invitar")');
+          try { cell.setNote(msg); } catch (e) { }   // el mensaje COMPLETO queda visible al pasar el mouse
+        } else { cell.setValue('(sin teléfono válido)'); try { cell.clearNote(); } catch (e) { } }
       });
     }
     if (!silent) {

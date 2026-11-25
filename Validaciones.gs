@@ -111,6 +111,11 @@ const VALIDATION_RULES = [
   ['V-40', 'Formulario', 'Anti-fraude', 'Mapa informativo de CONEXIONES POR TELÉFONO del solicitante o prospecto: referencias que son clientes, clientes que comparten su teléfono o lo listan como referencia, referencias compartidas con otros prestatarios y coincidencias con la hoja «Prospectos» — con el estado de los préstamos (vigentes y saldo) de cada cliente conectado. Solo para el prestamista: correo de aviso, columna «Conexiones por teléfono» en Nuevos Prestatarios y columna «Alertas (V-39/V-40)» en Prospectos. No bloquea.', '—', 'ADVIERTE', 'MEDIA'],
   ['V-41', 'Formulario y Aprobación', 'Anti-fraude', 'Si un cliente está marcado como FRAUDULENTO («Fraude» = SÍ en «Clientes»), toda nueva solicitud CONECTADA con él se informa al prestamista como ADVERTENCIA: mismo domicilio (normalizado), mismo teléfono, mismo correo o DNI, el cliente marcado lo tiene como referencia o viceversa, una referencia coincide con el cliente marcado, o comparte teléfono con una referencia suya. Se detalla cada conexión y el estado de los préstamos del cliente marcado. Solo para el prestamista: columna «Alerta de fraude» en «Nuevos Prestatarios» y correo de aviso (en rojo). La aprobación la re-evalúa. NUNCA bloquea ni se anula con «Anular límites».', '—', 'ADVIERTE', 'ALTA'],
   ['V-42', 'Formulario y Aprobación', 'Riesgo temporal', 'Advierte (nunca bloquea) cuando la fecha de la solicitud o la de vencimiento cae en un feriado nacional (hoja «Feriados»), dentro de la semana de un feriado (ventana configurable, por defecto ±3 días) o en enero/febrero (meses de vacaciones). Solo para el prestamista: columna «Alerta de feriado» en «Nuevos Prestatarios», correo de aviso y aviso al aprobar. Configurable en «Configuración»: «Alerta de feriados (SÍ/NO)», «Días alrededor de feriado (ventana)», «Marcar enero/febrero como vacaciones (SÍ/NO)». También suma al recuento «⚠ Alertas» junto al nombre.', '—', 'ADVIERTE', 'MEDIA'],
+  ['V-43', 'Formulario', 'Anti-fraude', 'Velocidad de re-préstamo / rotación: advierte (nunca bloquea) si el solicitante pide teniendo préstamos VIGENTES o VENCIDOS, o si vuelve a pedir pocos días después de su último préstamo («Umbral de re-préstamo (días)», por defecto 7). Señal de posible sobreendeudamiento o rotación de deuda; informativa para el prestamista. Reutiliza los datos ya cargados de «Prestatarios».', '—', 'ADVIERTE', 'MEDIA'],
+  ['V-44', 'Formulario', 'Anti-fraude', 'Solicitud duplicada: advierte si ya existe OTRA solicitud PENDIENTE (ni verificada ni rechazada) en «Nuevos Prestatarios» con el mismo DNI, teléfono o correo. Detecta reenvíos o intentos múltiples en paralelo. No bloquea.', '—', 'ADVIERTE', 'MEDIA'],
+  ['V-46', 'Formulario', 'Cuenta destino', 'Integridad de la cuenta destino (acompaña a V-37): valida el dígito verificador del CBU/CVU (22 dígitos) y el formato del alias. Advierte (no bloquea) si la cuenta parece mal copiada, para evitar transferencias a una cuenta equivocada.', '—', 'ADVIERTE', 'MEDIA'],
+  ['V-47', 'Formulario', 'Correo', 'Reputación del dominio de correo: advierte si el correo usa un dominio desechable/temporal conocido (configurable en «Dominios desechables») o si el dominio se parece por un carácter a un proveedor conocido (posible typo, p. ej. gmial.com). No bloquea.', '—', 'ADVIERTE', 'MEDIA'],
+  ['V-49', 'Formulario', 'Anti-fraude', 'Nombre casi idéntico: advierte si el nombre del solicitante coincide o se parece (distancia ≤ 2) al de otro cliente con OTRO DNI, o a un cliente bloqueado/fraudulento (posible fraccionamiento de identidad o evasión por cambio mínimo de grafía). Informativo para el prestamista; no bloquea.', '—', 'ADVIERTE', 'MEDIA'],
 ];
 
 /* ==================== VALIDADORES DE CAMPO ==================== */
@@ -225,6 +230,164 @@ function levenshtein_(a, b, max) {
     prev = cur;
   }
   return prev[b.length];
+}
+
+/* ========== NUEVOS CONTROLES ADVISORIOS ANTI-FRAUDE / MAL PROSPECTO (V-43…V-49) ==========
+ * Todos ADVIERTEN (nunca bloquean) y son fail-open: el llamador los envuelve en try/catch.
+ * PERFORMANCE: reutilizan los cachés memoizados que la solicitud ya cargó
+ * (clientesRows_, prestamosPorCliente_) → O(n) sobre arreglos en memoria, SIN lecturas extra de
+ * hojas, salvo V-44 que hace UNA sola lectura por lote de «Nuevos Prestatarios» (memoizada). */
+
+/** Dígito verificador de un bloque de CBU/CVU (algoritmo estándar módulo 10 con pesos). */
+function cbuCheckDigit_(digits, weights) {
+  let s = 0;
+  for (let i = 0; i < weights.length; i++) s += (+digits.charAt(i)) * weights[i];
+  return (10 - (s % 10)) % 10;
+}
+/** ¿El texto es un CBU/CVU (22 dígitos) con ambos dígitos verificadores correctos? */
+function isValidCbu_(raw) {
+  const d = String(raw || '').replace(/\D/g, '');
+  if (d.length !== 22) return false;
+  const b1 = d.slice(0, 8), b2 = d.slice(8);
+  const v1 = cbuCheckDigit_(b1, [7, 1, 3, 9, 7, 1, 3]);
+  const v2 = cbuCheckDigit_(b2, [3, 9, 7, 1, 3, 9, 7, 1, 3, 9, 7, 1, 3]);
+  return (+b1.charAt(7) === v1) && (+b2.charAt(13) === v2);
+}
+/** V-46 — valida la cuenta destino declarada (alias/CBU/CVU). O(1). {ok, kind, msg}. */
+function vCuentaDestino_(txt) {
+  const t = String(txt || '').trim();
+  if (!t) return { ok: true, kind: '', msg: '' };             // vacío lo maneja V-37
+  const digits = t.replace(/\D/g, '');
+  // Parece CBU/CVU (mayormente dígitos, ≥ 20) → validar dígitos verificadores.
+  if (/^[\d\s.\-]+$/.test(t) && digits.length >= 20) {
+    if (digits.length !== 22) return { ok: false, kind: 'CBU/CVU', msg: 'El CBU/CVU debe tener 22 dígitos (tiene ' + digits.length + ').' };
+    return isValidCbu_(digits)
+      ? { ok: true, kind: 'CBU/CVU', msg: '' }
+      : { ok: false, kind: 'CBU/CVU', msg: 'El CBU/CVU (22 dígitos) no pasa el dígito verificador: revisá que esté bien copiado.' };
+  }
+  // Si no, se asume alias: formato laxo (6 a 20 caracteres: letras, dígitos y . - _).
+  if (!/^[a-z0-9][a-z0-9.\-_]{4,19}$/i.test(t))
+    return { ok: false, kind: 'alias', msg: 'El alias no tiene un formato válido (6 a 20 caracteres: letras, números, punto o guion).' };
+  return { ok: true, kind: 'alias', msg: '' };
+}
+
+/** V-47 — dominios de correo desechables conocidos (lista interna; se amplía con «Dominios desechables»). */
+const DISPOSABLE_EMAIL_DOMAINS_ = {
+  'mailinator.com': 1, 'guerrillamail.com': 1, '10minutemail.com': 1, 'tempmail.com': 1, 'temp-mail.org': 1,
+  'yopmail.com': 1, 'getnada.com': 1, 'trashmail.com': 1, 'sharklasers.com': 1, 'maildrop.cc': 1,
+  'throwawaymail.com': 1, 'fakeinbox.com': 1, 'dispostable.com': 1, 'mailnesia.com': 1, 'mohmal.com': 1,
+  'tempr.email': 1, 'emailondeck.com': 1, 'mailcatch.com': 1, 'spam4.me': 1, 'burnermail.io': 1,
+};
+/** Proveedores comunes para detectar typos de dominio (distancia ≤ 1). */
+const COMMON_EMAIL_DOMAINS_ = ['gmail.com', 'hotmail.com', 'outlook.com', 'yahoo.com', 'yahoo.com.ar',
+  'live.com', 'icloud.com', 'protonmail.com'];
+/** ¿`a` y `b` difieren solo por un intercambio de dos caracteres adyacentes? (p. ej. gmial/gmail) */
+function isAdjTranspose_(a, b) {
+  if (a.length !== b.length) return false;
+  const diff = [];
+  for (let i = 0; i < a.length; i++) if (a.charAt(i) !== b.charAt(i)) { diff.push(i); if (diff.length > 2) return false; }
+  return diff.length === 2 && diff[1] === diff[0] + 1 &&
+    a.charAt(diff[0]) === b.charAt(diff[1]) && a.charAt(diff[1]) === b.charAt(diff[0]);
+}
+/** V-47 — correo de dominio desechable o parecido por un carácter a un proveedor conocido. {disposable, typo, msg} | null. */
+function emailDomainRisk_(emailNorm) {
+  const e = String(emailNorm || '');
+  const at = e.lastIndexOf('@');
+  if (at < 0) return null;
+  const domain = e.slice(at + 1);
+  if (!domain) return null;
+  // Desechables: lista interna + override de «Configuración» (opcional).
+  let extra = '';
+  try { extra = String(getSetting_('Dominios desechables') || ''); } catch (e2) { extra = ''; }
+  let extraHit = false;
+  if (extra) extra.split(/[,\s;]+/).forEach(d => { if (d && d.trim().toLowerCase() === domain) extraHit = true; });
+  if (DISPOSABLE_EMAIL_DOMAINS_[domain] || extraHit)
+    return { disposable: true, typo: '', msg: 'Correo de dominio desechable (' + domain + ').' };
+  // Typo de proveedor conocido (p. ej. gmial.com, hotmai.com).
+  for (let i = 0; i < COMMON_EMAIL_DOMAINS_.length; i++) {
+    const good = COMMON_EMAIL_DOMAINS_[i];
+    if (domain !== good && (levenshtein_(domain, good, 1) <= 1 || isAdjTranspose_(domain, good)))
+      return { disposable: false, typo: good, msg: 'Dominio de correo parecido a «' + good + '» (¿typo?): ' + domain + '.' };
+  }
+  return null;
+}
+
+/** V-49 — nombres casi idénticos con OTRO DNI (fraccionamiento de identidad) o parecidos a un
+ *  cliente bloqueado/fraudulento. O(n) sobre el caché ya cargado de Clientes, con poda O(1) por
+ *  longitud (levenshtein_ corta temprano). {texts:[...]}. */
+function nombreCasiIgual_(name, dniNorm) {
+  const out = [];
+  const a = normName_(name);
+  if (!a || a.length < 10) return { texts: out };
+  const rows = clientesRows_();
+  for (let i = 0; i < rows.length && out.length < 5; i++) {
+    const o = rows[i];
+    if (o.dniNorm && o.dniNorm === dniNorm) continue;         // misma persona: no es duplicado
+    const b = normName_(o.name);
+    if (!b || Math.abs(b.length - a.length) > 2) continue;    // poda por longitud (O(1))
+    const mark = o.fraude ? ' 🚩' : (o.bloqueado ? ' 🚫' : '');
+    if (b === a) out.push('Mismo nombre con otro DNI: ' + (o.id || '¿?') + mark);
+    else if (levenshtein_(a, b, 2) <= 2) out.push('Nombre casi igual a ' + (o.id || '¿?') + mark + ' («' + String(o.name || '').trim() + '»)');
+  }
+  return { texts: out };
+}
+
+/** V-43 — velocidad de re-préstamo / rotación. Reutiliza prestamosPorCliente_ (ya en caché por
+ *  V-40/V-41): O(1) tras esa única lectura. {texts:[...]}. */
+function velocidadReprestamo_(clientId) {
+  const out = [];
+  const id = String(clientId || '').trim();
+  if (!id) return { texts: out };
+  const loans = prestamosPorCliente_()[id] || [];
+  if (!loans.length) return { texts: out };
+  const vencidos = loans.filter(l => l.estado === ST.OVERDUE).length;
+  const vigentes = loans.filter(l => l.estado !== ST.PAID && l.estado !== ST.CLEARED).length;
+  if (vencidos > 0) out.push('pide con ' + vencidos + ' préstamo(s) VENCIDO(s)');
+  else if (vigentes > 0) out.push('pide con ' + vigentes + ' préstamo(s) vigente(s)');
+  // Re-préstamo rápido: días desde el último préstamo ≤ umbral.
+  const win = Math.max(0, parseInt(String(getSetting_('Umbral de re-préstamo (días)') || '7'), 10) || 0);
+  if (win > 0) {
+    const times = loans.map(l => (l.fecha instanceof Date) ? l.fecha.getTime() : NaN).filter(isFinite);
+    if (times.length) {
+      const dias = Math.floor((Date.now() - Math.max.apply(null, times)) / 86400000);
+      if (dias >= 0 && dias <= win) out.push('último préstamo hace ' + dias + ' día(s)');
+    }
+  }
+  return { texts: out };
+}
+
+/** Filas PENDIENTES de «Nuevos Prestatarios» (ni verificadas ni rechazadas), normalizadas.
+ *  UNA lectura por ejecución (memoizada), para V-44. */
+let _nuevosPendientesCache = null;
+function invalidateNuevosPendientes_() { _nuevosPendientesCache = null; }
+function nuevosPendientes_() {
+  if (_nuevosPendientesCache) return _nuevosPendientesCache;
+  _nuevosPendientesCache = [];
+  const sh = getSS_().getSheetByName(CFG.SHEETS.NEW);
+  if (!sh || sh.getLastRow() < 2) return _nuevosPendientesCache;
+  const H = headerMap_(sh);
+  const cDni = H['DNI'] || 0, cTel = H['Teléfono'] || 0, cCor = H['Correo'] || 0,
+    cVer = H['Verificado?'] || 0, cRech = H['Rechazar?'] || 0;
+  const width = Math.max(cDni, cTel, cCor, cVer, cRech);
+  if (!width) return _nuevosPendientesCache;
+  const data = sh.getRange(2, 1, sh.getLastRow() - 1, width).getValues();
+  const truthy = v => v === true || /^(sí|si|true|verdadero|x)$/i.test(String(v == null ? '' : v).trim());
+  _nuevosPendientesCache = data.map((r, i) => ({
+    row: i + 2,
+    dniNorm: normDni_(cDni ? r[cDni - 1] : ''),
+    phoneNorm: normPhoneE164_(cTel ? r[cTel - 1] : ''),
+    emailNorm: normEmail_(cCor ? r[cCor - 1] : ''),
+    verificado: cVer ? truthy(r[cVer - 1]) : false,
+    rechazado: cRech ? truthy(r[cRech - 1]) : false,
+  })).filter(o => !o.verificado && !o.rechazado && (o.dniNorm || o.phoneNorm || o.emailNorm));
+  return _nuevosPendientesCache;
+}
+/** V-44 — ¿cuántas OTRAS solicitudes pendientes comparten la identidad? */
+function solicitudPendienteDuplicada_(dniNorm, phoneNorm, emailNorm) {
+  return nuevosPendientes_().filter(o =>
+    (dniNorm && o.dniNorm === dniNorm) ||
+    (phoneNorm && o.phoneNorm === phoneNorm) ||
+    (emailNorm && o.emailNorm === emailNorm)).length;
 }
 
 /**
@@ -1296,6 +1459,25 @@ function submitIntakeSmart(form) {
     const holderFrontUrl = isThirdParty ? savePhoto_(folder, form.holderDniFront, holderName + ' DNI ' + stamp) : '';
     const holderBackUrl = isThirdParty ? savePhoto_(folder, form.holderDniBack, holderName + ' DNI dorso ' + stamp) : '';
 
+    // NUEVOS CONTROLES ADVISORIOS (V-43 velocidad · V-44 solicitud duplicada · V-46 cuenta destino ·
+    // V-47 correo · V-49 nombre casi igual). Todos ADVIERTEN, nunca bloquean (fail-open). PERFORMANCE:
+    // reutilizan los cachés ya cargados (clientesRows_, prestamosPorCliente_); solo V-44 agrega UNA
+    // lectura por lote de «Nuevos Prestatarios». Se consolidan en la columna «Alertas adicionales».
+    let extraAlertas = [], nExtra = 0;
+    try {
+      const appPhoneN = normPhoneE164_(phone) || String(phone || '').trim();
+      const v43 = velocidadReprestamo_(clientId);
+      if (v43 && v43.texts.length) { extraAlertas.push('🔁 ' + v43.texts.join(' · ')); nExtra++; }
+      const v44n = solicitudPendienteDuplicada_(dnV.norm, appPhoneN, emV.norm);
+      if (v44n > 0) { extraAlertas.push('📄 ' + v44n + ' solicitud(es) pendiente(s) de la misma identidad'); nExtra++; }
+      const v46 = needsAccount ? vCuentaDestino_(payDetails) : null;
+      if (v46 && !v46.ok) { extraAlertas.push('🏦 ' + v46.msg); nExtra++; }
+      const v47 = emailDomainRisk_(emV.norm);
+      if (v47 && v47.msg) { extraAlertas.push('✉ ' + v47.msg); nExtra++; }
+      const v49 = nombreCasiIgual_(name, dnV.norm);
+      if (v49 && v49.texts.length) { extraAlertas.push('👥 ' + v49.texts.join(' · ')); nExtra++; }
+    } catch (e) { logError_('submitIntakeSmart:extraAlertas', e); }
+
     // Registro en "Nuevos Prestatarios" (mismo orden de columnas que NB).
     const ss = getSS_();
     const nb = ss.getSheetByName(CFG.SHEETS.NEW) || setupNew_(ss) || ss.getSheetByName(CFG.SHEETS.NEW);
@@ -1319,7 +1501,8 @@ function submitIntakeSmart(form) {
         ((v41 && v41.texts.length) ? 1 : 0) +
         ((v42 && v42.reasons.length) ? 1 : 0) +
         ((emailDup && emailDup.length) ? 1 : 0) +
-        ((phoneDup && phoneDup.length) ? 1 : 0);
+        ((phoneDup && phoneDup.length) ? 1 : 0) +
+        (nExtra || 0); // V-43/44/46/47/49 (una por regla disparada)
       const nbFields = {
         '⚠ Alertas': nAlertas ? ('⚠ ' + nAlertas) : '',
         'Forma de Pago': safeCell_(payMethodFull),
@@ -1343,6 +1526,8 @@ function submitIntakeSmart(form) {
         'Alerta de fraude': (v41 && v41.texts.length) ? safeCell_('🚩 ' + v41.texts.join(' · ')) : '',
         // V-42: alerta de feriado/vacaciones (informativa para el prestamista).
         'Alerta de feriado': (v42 && v42.reasons.length) ? safeCell_('📅 ' + v42.reasons.join(' · ')) : '',
+        // V-43/44/46/47/49: alertas adicionales consolidadas (informativas para el prestamista).
+        'Alertas adicionales': extraAlertas.length ? safeCell_(extraAlertas.join(' | ')) : '',
       };
       if (isThirdParty) {
         nbFields['Titular de la cuenta'] = safeCell_(holderName);
@@ -1592,7 +1777,8 @@ function prestamosPorCliente_() {
   const cliC = colByAny_(H, ['ID Cliente']) || PB.CLIENT_ID;
   const salC = colByAny_(H, ['Saldo Pendiente']) || PB.BALANCE;
   const stC = colByAny_(H, ['Estado']) || PB.STATE;
-  const data = bs.getRange(2, 1, bs.getLastRow() - 1, Math.max(idC, cliC, salC, stC)).getValues();
+  const fchC = colByAny_(H, ['Fecha del Préstamo', 'Fecha Préstamo', 'Fecha de Préstamo', 'Fecha Prestamo']) || PB.LOAN_DATE; // V-43 — fecha de alta
+  const data = bs.getRange(2, 1, bs.getLastRow() - 1, Math.max(idC, cliC, salC, stC, fchC)).getValues();
   data.forEach(r => {
     const cid = String(r[cliC - 1] || '').trim();
     const lid = String(r[idC - 1] || '').trim();
@@ -1601,6 +1787,7 @@ function prestamosPorCliente_() {
       loanId: lid,
       estado: String(r[stC - 1] || '').trim().toUpperCase(),
       saldo: Number(r[salC - 1]) || 0,
+      fecha: (fchC && r[fchC - 1] instanceof Date) ? r[fchC - 1] : null, // V-43
     });
   });
   return _prestamosResumenCache;
@@ -2107,6 +2294,57 @@ function instalarAlertasFeriado() {
     try { SpreadsheetApp.getActive().toast('Alertas de feriado (V-42) + recuento ⚠ instalados.', '📅 Listo', 6); } catch (e) { }
     return 'OK';
   });
+}
+
+/**
+ * Punto de entrada manual (menú/editor): instala los controles ADVISORIOS nuevos
+ * V-43 (velocidad de re-préstamo), V-44 (solicitud duplicada), V-46 (cuenta destino),
+ * V-47 (correo desechable/typo) y V-49 (nombre casi igual). Crea la columna «Alertas
+ * adicionales» en «Nuevos Prestatarios» y agrega sus ajustes en «Configuración» (sin
+ * reconstruir hojas ni pisar valores existentes). Idempotente.
+ */
+function instalarValidacionesAdicionales() {
+  return guard_('instalarValidacionesAdicionales', function () {
+    const ss = getSS_();
+    const done = [];
+    // 1) Columna «Alertas adicionales» en «Nuevos Prestatarios» (V-43/44/46/47/49).
+    const nb = ss.getSheetByName(CFG.SHEETS.NEW);
+    if (nb) {
+      const existed = clientesHeaderCol_(nb, 'Alertas adicionales', false) > 0;
+      const cEx = clientesHeaderCol_(nb, 'Alertas adicionales', true); // crea al final sólo si falta
+      if (cEx > 0) {
+        nb.setColumnWidth(cEx, 260);
+        nb.getRange(2, cEx, CFG.MAX_ROWS, 1).setWrap(true);
+        nb.getRange(1, cEx).setNote('V-43 velocidad de re-préstamo · V-44 solicitud duplicada · V-46 cuenta destino (CBU/CVU/alias) · V-47 correo desechable/typo · V-49 nombre casi igual. Alertas informativas para el prestamista; no bloquean.');
+        if (!existed) done.push('columna «Alertas adicionales» en «Nuevos Prestatarios»');
+      }
+    } else {
+      throw new Error('No existe la hoja «' + CFG.SHEETS.NEW + '». Ejecutá ① Configurar primero.');
+    }
+    // 2) Ajustes en «Configuración» (los AGREGA si faltan; no pisa valores ya cargados).
+    const stsh = ss.getSheetByName(CFG.SHEETS.SETTINGS);
+    if (stsh) {
+      if (ensureSettingRow_(stsh, 'Umbral de re-préstamo (días)', '7')) done.push('ajuste «Umbral de re-préstamo (días)» = 7');
+      if (ensureSettingRow_(stsh, 'Dominios desechables', '')) done.push('ajuste «Dominios desechables» (vacío)');
+    }
+    SpreadsheetApp.flush();
+    const msg = done.length ? ('Instalado: ' + done.join(' · ')) : 'Ya estaba todo instalado (sin cambios).';
+    try { SpreadsheetApp.getActive().toast(msg, '🧩 Validaciones V-43/44/46/47/49', 7); } catch (e) { }
+    return msg;
+  });
+}
+
+/** Agrega una fila [clave, valor] a «Configuración» SOLO si la clave no existe aún
+ *  (cotejo normalizado con hkey_). Devuelve true si la creó. No pisa valores existentes. */
+function ensureSettingRow_(stsh, key, defaultVal) {
+  const last = stsh.getLastRow();
+  if (last >= 1) {
+    const col = stsh.getRange(1, 1, last, 1).getValues();
+    for (let i = 0; i < col.length; i++) if (hkey_(col[i][0]) === hkey_(key)) return false; // ya existe
+  }
+  stsh.appendRow([key, defaultVal]);
+  if (typeof invalidateSettingsCache_ === 'function') invalidateSettingsCache_();
+  return true;
 }
 
 /** Instala validaciones de datos (listas / casillas) consistentes con el catálogo. */

@@ -391,6 +391,14 @@ def analyze_client(cl, today):
 
     # category (priority: current trouble → history pattern → clean)
     closed = [l for l in loans if l["status"] in ("repaid_ontime", "repaid_untimed", "repaid_late")]
+    # V-51 — payment-timing behaviour among on-time closed loans: a borrower who always pays
+    # BUT consistently at the due date (thin buffer) is a weaker prospect than one who pays early.
+    on_time_margins = [(l["venc"] - max(l["pay_dates"])).days
+                       for l in loans
+                       if l["status"] == "repaid_ontime" and l["pay_dates"] and l["venc"]]
+    pay_margin_median = (sorted(on_time_margins)[len(on_time_margins) // 2]
+                         if on_time_margins else None)
+    last_minute = len(on_time_margins) >= 2 and pay_margin_median is not None and pay_margin_median <= 1
     if overdue_now:
         category = "Currently overdue"
         why = "%d loan(s) past due now (worst %d days)." % (len(overdue_now), cur_overdue_days)
@@ -409,6 +417,9 @@ def analyze_client(cl, today):
     elif not closed:
         category = "New — no closed loans yet"
         why = "%d active loan(s), none completed yet; paying as agreed." % n
+    elif n >= 2 and last_minute:
+        category = "Punctual but last-minute"
+        why = "All %d loans on time, but typically paid right at the due date (median margin ≤ 1 day) — thin buffer." % n
     elif n >= 2:
         category = "Excellent — always on time"
         why = "All %d loans repaid on time, no delinquency ever." % n
@@ -434,6 +445,7 @@ def analyze_client(cl, today):
         counts=counts, on_time_rate=round(100 * perf_share),
         avg_days_late=(round(sum(late_days) / len(late_days)) if late_days else None),
         worst_now=worst_now, history_comp=round(history_comp),
+        pay_margin_median=pay_margin_median,  # V-51 — median days-early among on-time loans
     )
     return a
 

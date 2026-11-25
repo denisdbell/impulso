@@ -50,6 +50,19 @@ GPS_SHARE_MIN = 3  # same for an identical GPS fix
 # Risk levels (shown to the user).
 RISK_HIGH, RISK_REVIEW, RISK_OK = "High", "Review", "OK"
 
+# V-47 — throwaway email domains (indicative) + common providers for typo detection.
+DISPOSABLE_EMAIL_DOMAINS = {
+    "mailinator.com", "guerrillamail.com", "10minutemail.com", "tempmail.com", "temp-mail.org",
+    "yopmail.com", "getnada.com", "trashmail.com", "sharklasers.com", "maildrop.cc",
+    "throwawaymail.com", "fakeinbox.com", "dispostable.com", "mailnesia.com", "mohmal.com",
+    "tempr.email", "emailondeck.com", "mailcatch.com", "spam4.me", "burnermail.io",
+}
+COMMON_EMAIL_DOMAINS = ("gmail.com", "hotmail.com", "outlook.com", "yahoo.com", "yahoo.com.ar",
+                        "live.com", "icloud.com", "protonmail.com")
+REBORROW_FAST_DAYS = 14   # V-43 — two originations within N days = rapid reborrow
+LOAN_VELOCITY_90D = 3     # V-43 — this many loans in 90 days = high velocity
+RING_MIN = 3              # V-45 — a connected identity cluster of this size is a signal
+
 
 # --------------------------------------------------------------------------- #
 # small helpers
@@ -109,6 +122,70 @@ def _own_account_yes(v):
     return s not in ("NO", "FALSE", "0", "N")
 
 
+def _edit_le(a, b, k):
+    """True if the Levenshtein distance between a and b is <= k (bounded, early-exit)."""
+    if abs(len(a) - len(b)) > k:
+        return False
+    prev = list(range(len(b) + 1))
+    for i in range(1, len(a) + 1):
+        cur = [i]
+        best = i
+        ai = a[i - 1]
+        for j in range(1, len(b) + 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (0 if ai == b[j - 1] else 1)))
+            if cur[j] < best:
+                best = cur[j]
+        if best > k:
+            return False
+        prev = cur
+    return prev[len(b)] <= k
+
+
+def _is_adj_transpose(a, b):
+    """True if a and b differ only by one adjacent character swap (e.g. gmial/gmail)."""
+    if len(a) != len(b):
+        return False
+    diff = []
+    for i in range(len(a)):
+        if a[i] != b[i]:
+            diff.append(i)
+            if len(diff) > 2:
+                return False
+    return (len(diff) == 2 and diff[1] == diff[0] + 1
+            and a[diff[0]] == b[diff[1]] and a[diff[1]] == b[diff[0]])
+
+
+def _email_domain_risk(email):
+    """V-47 — (code, label, detail) for a disposable or typo'd email domain, else None."""
+    at = email.rfind("@")
+    if at < 0:
+        return None
+    domain = email[at + 1:]
+    if not domain:
+        return None
+    if domain in DISPOSABLE_EMAIL_DOMAINS:
+        return ("email_disposable", "Disposable email domain", domain)
+    for good in COMMON_EMAIL_DOMAINS:
+        if domain != good and (_edit_le(domain, good, 1) or _is_adj_transpose(domain, good)):
+            return ("email_typo", "Email domain looks like a typo", "%s≈%s" % (domain, good))
+    return None
+
+
+def _as_date(v):
+    """Best-effort date from a cell (datetime, date, or common string formats)."""
+    if isinstance(v, datetime.datetime):
+        return v.date()
+    if isinstance(v, datetime.date):
+        return v
+    s = _s(v)
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.datetime.strptime(s[:10], fmt).date()
+        except ValueError:
+            pass
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # core
 # --------------------------------------------------------------------------- #
@@ -163,10 +240,17 @@ def build_fraud(xlsx_path, dni_records=None, today=None):
     for cid, c in clients.items():
         for rp in c["ref_phones"]:
             ref_owner[rp].add(cid)
+    by_name = defaultdict(set)   # V-49 — normalized name -> cids (exact near-duplicate across DNIs)
+    for cid, c in clients.items():
+        nn = _norm_name(c["name"])
+        if len(nn) >= 10:
+            by_name[nn].add(cid)
 
     # ---- 3) loans: active flag, loan→client, denormalized name/DNI ----
     P = _table(wb, "Prestatarios")
     active_cid, loan_cid = set(), {}
+    overdue_cid = set()                 # V-43/V-45 — clients with a VENCIDO loan
+    loan_dates = defaultdict(list)      # V-43 — origination dates per client
     titular_owner = defaultdict(set)
     inconsistent_loan = set()
     thirdparty_cid = set()
@@ -178,6 +262,12 @@ def build_fraud(xlsx_path, dni_records=None, today=None):
             estado = _s(P.get(r, "Estado")).upper()
             if estado and estado not in ("PAGADO", "SALDADO", "RECHAZADO", "ANULADO"):
                 active_cid.add(cid)
+            if estado == "VENCIDO":
+                overdue_cid.add(cid)
+            ld_date = _as_date(P.get(r, "Fecha Préstamo") or P.get(r, "Fecha del Préstamo")
+                               or P.get(r, "Fecha de Préstamo"))
+            if ld_date and cid:
+                loan_dates[cid].append(ld_date)
             if cid in clients:
                 ld = analyze_impulso.norm_dni(P.get(r, "DNI"))
                 ln = _norm_name(P.get(r, "Nombre"))
@@ -260,6 +350,52 @@ def build_fraud(xlsx_path, dni_records=None, today=None):
                 best = max(best, len(bucket))
         return best
 
+    # ---- 4b) identity ring (V-45): union-find over every shared-attribute edge ----
+    # Near-linear O(E·α(N)); reuses the indexes already built. Groups clients that share a
+    # DNI/CUIL/email/phone/address/device/IP or a reference phone into connected clusters.
+    parent = {cid: cid for cid in clients}
+
+    def _find(x):
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:   # path compression
+            parent[x], x = root, parent[x]
+        return root
+
+    def _union(a, b):
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for _idx in (by_dni, by_cuil, by_email, by_phone, by_addr, fp_idx, ip_idx):
+        for bucket in _idx.values():
+            members = [m for m in bucket if m in parent]
+            for m in members[1:]:
+                _union(members[0], m)
+    # A shared reference phone links the referrers; a reference equal to a client's own phone links them.
+    phone_to_cid = {}
+    for cid, c in clients.items():
+        if c["phone"]:
+            phone_to_cid.setdefault(c["phone"], cid)
+    for rp, owners in ref_owner.items():
+        owners = [o for o in owners if o in parent]
+        for o in owners[1:]:
+            _union(owners[0], o)
+        tgt = phone_to_cid.get(rp)
+        if tgt and owners:
+            _union(owners[0], tgt)
+    _comp = defaultdict(list)
+    for cid in clients:
+        _comp[_find(cid)].append(cid)
+    ring_of = {}
+    for members in _comp.values():
+        if len(members) >= 2:
+            risky = sum(1 for m in members
+                        if m in active_cid or m in overdue_cid or clients[m]["bloqueado"] or m in webdriver_cid)
+            for m in members:
+                ring_of[m] = {"size": len(members), "risky": risky}
+
     # ---- 5) per-client signal assembly ----
     def add(c, code, label, weight, detail=""):
         c["signals"].append({"code": code, "label": label, "weight": weight, "detail": detail})
@@ -318,6 +454,33 @@ def build_fraud(xlsx_path, dni_records=None, today=None):
         if cid in inconsistent_pay:
             add(c, "pay_mismatch", "Payment Name/DNI differs from client", LOW)
 
+        # V-47 — disposable / typo'd email domain
+        if c["email"]:
+            er = _email_domain_risk(c["email"])
+            if er:
+                add(c, er[0], er[1], LOW, er[2])
+        # V-49 — same (normalized) name on a different DNI (possible identity splitting)
+        nn = _norm_name(c["name"])
+        if len(nn) >= 10:
+            dnis = {clients[o]["dni"] for o in by_name.get(nn, ()) if clients[o]["dni"]}
+            if len(dnis) > 1:
+                add(c, "name_dup", "Same name on a different DNI", MED, "%d DNIs" % len(dnis))
+        # V-43 — reborrow velocity / rotation
+        dts = sorted(loan_dates.get(cid, []))
+        if len(dts) >= 2:
+            fast = min((dts[i] - dts[i - 1]).days for i in range(1, len(dts)))
+            if fast <= REBORROW_FAST_DAYS:
+                add(c, "reborrow", "Rapid reborrow", MED, "%d-day gap" % fast)
+        recent = sum(1 for d in dts if (today - d).days <= 90)
+        if recent >= LOAN_VELOCITY_90D:
+            add(c, "loan_velocity", "High loan velocity", MED, "%d in 90d" % recent)
+        # V-45 — member of a connected identity cluster
+        ring = ring_of.get(cid)
+        if ring and ring["size"] >= RING_MIN:
+            w = HIGH if (ring["risky"] >= 2 or ring["size"] >= 4) else MED
+            add(c, "ring", "In a connected identity cluster", w,
+                "%d people, %d with active/blocked loans" % (ring["size"], ring["risky"]))
+
     # account holder shared across >1 borrower → flag those borrowers
     for tdni, owners in titular_owner.items():
         if len(owners) > 1:
@@ -334,6 +497,8 @@ def build_fraud(xlsx_path, dni_records=None, today=None):
             "Front and back mismatch": ("front_back", "DNI front/back mismatch", MED),
             "DNI shared across people": ("doc_shared", "Same DNI on multiple people (photo)", HIGH),
             "Document expired": ("doc_expired", "Document expired", LOW),
+            "Duplicate DNI photo (same image as another person)": ("photo_dup", "Same DNI photo on another person", HIGH),
+            "Underage (under 18)": ("underage", "Document age under 18", MED),
         }
         for rec in dni_records:
             cid = rec.get("cliente_id")
