@@ -634,6 +634,9 @@ function writeBorrowerRowFormulas_(bs, r) {
   const dismC = colByAny_(H, ['Mora deshabilitada']);
   const DISM = dismC ? a1col_(dismC) : ''; // casilla "Mora deshabilitada" → fija el recargo en 0 (prevalece)
   const BM = bmC ? a1col_(bmC) : K; // si aún no existe la columna, el Estado cae al saldo base
+  // Condonación de interés + gracia (resueltas por nombre; vacías si las columnas no existen).
+  const waivC = colByAny_(H, ['Interés condonado']); const WAIV = waivC ? a1col_(waivC) : '';
+  const grcC = colByAny_(H, ['Gracia (días)']); const GRC = grcC ? a1col_(grcC) : '';
   let payLoanL = 'B', payAmtL = 'D';
   if (pg) { const PH = headerIndex_(pg); payLoanL = a1col_(colByAny_(PH, ['ID Préstamo', 'ID Prestamo']) || 2); payAmtL = a1col_(colByAny_(PH, ['Monto Pagado']) || 4); }
   const PGN = CFG.SHEETS.PAYMENTS;
@@ -645,7 +648,9 @@ function writeBorrowerRowFormulas_(bs, r) {
   const maxCuotaDue = `MAXIFS('${CUN}'!$${cuDueL}:$${cuDueL},'${CUN}'!$${cuLoanL}:$${cuLoanL},$${A}${r})`;
   const vencFb = `IF($${D}${r}=15,$${F}${r}+15,IF(OR($${D}${r}=30,$${D}${r}=60,$${D}${r}=90),$${F}${r}+$${D}${r},EDATE($${F}${r},$${D}${r})))`;
   setF(['Vencimiento', 'Fecha de Vencimiento'], `=IF($${F}${r}="","",IF(${maxCuotaDue}>0,${maxCuotaDue},${vencFb}))`);
-  setF(['Interés', 'Interes'], `=IF($${C}${r}="","",$${C}${r}*$${E}${r})`);
+  setF(['Interés', 'Interes'], WAIV
+    ? `=IF($${C}${r}="","",IF($${WAIV}${r}=TRUE,0,$${C}${r}*$${E}${r}))`   // 0 si el interés está condonado
+    : `=IF($${C}${r}="","",$${C}${r}*$${E}${r})`);
   setF(['Total a Pagar', 'Total a pagar'], `=IF($${C}${r}="","",$${C}${r}+$${Hh}${r})`);
   setF(['Total Pagado'], `=IF($${A}${r}="","",SUMIF('${PGN}'!$${payLoanL}:$${payLoanL},$${A}${r},'${PGN}'!$${payAmtL}:$${payAmtL}))`);
   // Saldo Pendiente = Total − Pagado (≥0), capital + interés. El recargo por mora va APARTE.
@@ -664,7 +669,11 @@ function writeBorrowerRowFormulas_(bs, r) {
   const planCc = colByAny_(H, ['Suma de cuotas', 'Total a Pagar (con mora)']);
   const PLAN = planCc ? a1col_(planCc) : '';
   const planExpr = PLAN ? `N($${PLAN}${r})>N($${I}${r})+0.009` : 'FALSE';
-  setF(['Estado'], `=IF($${A}${r}="","",IF($${BM}${r}<=0,"${ST.PAID}",IF(OR(${cuotaVencidaExpr_('$' + A + r)},TODAY()>$${G}${r}),"${ST.OVERDUE}",IF(${planExpr},"${ST.PLAN}","${ST.ACTIVE}"))))`);
+  // Condonación de interés: no se marca VENCIDO hasta pasar vencimiento + "Gracia (días)" (la
+  // compuerta vale TRUE para los NO condonados → el estado queda idéntico al anterior).
+  const grcGate = (WAIV && GRC) ? `IF($${WAIV}${r}=TRUE,TODAY()>($${G}${r}+N($${GRC}${r})),TRUE)` : `TRUE`;
+  const overdueExpr = `AND(${grcGate},OR(${cuotaVencidaExpr_('$' + A + r)},TODAY()>$${G}${r}))`;
+  setF(['Estado'], `=IF($${A}${r}="","",IF($${BM}${r}<=0,"${ST.PAID}",IF(${overdueExpr},"${ST.OVERDUE}",IF(${planExpr},"${ST.PLAN}","${ST.ACTIVE}"))))`);
   // Enlace de Firma = enlace clicable a la página de firma del contrato (o "✔ Firmado").
   const firmaC = colByAny_(H, ['Estado de Firma']);
   const tokFC = colByAny_(H, ['Token de acceso']);

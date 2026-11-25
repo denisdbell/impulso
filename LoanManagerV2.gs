@@ -36,7 +36,7 @@ const CFG = {
     SIGN: 'Firmas', CLIENTS: 'Clientes', INSTALLMENTS: 'Cuotas', LEVELS: 'Niveles de Clientes',
     DEVICES: 'Dispositivos', FREEZE_REQ: 'Solicitudes de Congelamiento', PLAN_REQ: 'Solicitudes de Plan de Pago',
     PAYFORM: 'Registrar Pago', DNI_CHECK: 'Verificación de DNI', PROSPECTS: 'Prospectos',
-    DEBT_ANALYSIS: 'Análisis de Deuda', HOLIDAYS: 'Feriados',
+    DEBT_ANALYSIS: 'Análisis de Deuda', HOLIDAYS: 'Feriados', PROMO: 'Promoción',
   },
 };
 const ST = { ACTIVE: 'ACTIVO', OVERDUE: 'VENCIDO', PAID: 'PAGADO', CLEARED: 'SALDADO', PLAN: 'EN PLAN', FROZEN: 'CONGELADO' };
@@ -127,6 +127,7 @@ function onOpen() {
     .addItem('💵 Retiro disponible (sin frenar crecimiento)', 'showWithdrawable')
     .addItem('🔎 Análisis de deuda de prospectos (BCRA)', 'abrirAnalisisDeuda')
     .addItem('🔄 Refrescar lista de prospectos (análisis)', 'refrescarListaProspectos')
+    .addItem('🎉 Armar/actualizar Promoción (sorteo de buenos pagadores)', 'refrescarPromocion')
     .addSeparator()
     // — Gestión de préstamos (fila activa) —
     .addItem('🔄 Reestructurar préstamo vencido (congelar mora + plan de cuotas)', 'restructurarPrestamoUI')
@@ -139,6 +140,9 @@ function onOpen() {
       .addItem('Condonar mora (poner en 0)', 'condonarMoraFilaActiva')
       .addItem('Fijar un importe de mora…', 'fijarMoraFilaActiva')
       .addItem('Restaurar mora automática', 'restaurarMoraFilaActiva'))
+    .addSubMenu(ui.createMenu('💳 Condonar interés (fila activa)')
+      .addItem('Condonar interés + gracia…', 'condonarInteresFilaActiva')
+      .addItem('Restaurar interés (revertir)', 'restaurarInteresFilaActiva'))
     .addSubMenu(ui.createMenu('🚫 Bloqueo de clientes (fila activa en Clientes)')
       .addItem('Bloquear cliente…', 'bloquearClienteFilaActiva')
       .addItem('Desbloquear cliente', 'desbloquearClienteFilaActiva'))
@@ -176,6 +180,8 @@ function onOpen() {
       .addItem('⚙ Instalar análisis de deuda (columnas + hoja + disparador)', 'instalarAnalisisDeuda')
       .addItem('➕ Agregar SOLO columnas de análisis BCRA (Prospectos)', 'crearColumnasBcraProspectos')
       .addItem('➕ Crear columna «BCRA (comprimido)» (Clientes)', 'crearColumnaBcraComprimido')
+      .addItem('💳 Crear columnas de condonación de interés (Prestatarios)', 'agregarColumnasCondonacionInteres')
+      .addItem('🎉 Agregar configuración de la Promoción (sorteo)', 'configurarPromocion')
       .addItem('🚩 Instalar marcado de fraude (casilla «Fraude» + alerta V-41)', 'instalarMarcadoFraude')
       .addItem('📅 Instalar alertas de feriado + recuento ⚠ (V-42 + badge)', 'instalarAlertasFeriado')
       .addItem('➕ Crear hoja de Recordatorios de pago', 'createRemindersSheet_')
@@ -337,6 +343,19 @@ function moraGraceDays_() {
   const raw = String(getSetting_('Días de gracia antes de mora') || '').replace(/[^0-9.\-]/g, '').trim();
   const n = raw === '' ? 0 : Number(raw);
   return (isFinite(n) && n >= 0) ? Math.floor(n) : 0;
+}
+/** Días de gracia por CONDONACIÓN DE INTERÉS (Configuración). Es el valor con que se llena
+ *  "Gracia (días)" al tildar "Interés condonado" si está vacío. Predet. 7. */
+function waiverGraceDays_() {
+  const raw = String(getSetting_('Días de gracia (condonación de interés)') || '').replace(/[^0-9.\-]/g, '').trim();
+  const n = raw === '' ? 7 : Number(raw);
+  return (isFinite(n) && n >= 0) ? Math.floor(n) : 7;
+}
+/** Gracia efectiva (días) de la mora de un préstamo: la del préstamo SOLO si el interés está
+ *  condonado; si no, undefined → el motor usa la gracia global moraGraceDays_(). Se activa por
+ *  "condonado" (no por graceDias>0), para que condonar con 0 días NO caiga a la gracia global. */
+function effWaiverGrace_(loan) {
+  return (loan && loan.condonado) ? Math.max(0, Math.floor(Number(loan.graceDias) || 0)) : undefined;
 }
 /** Tope acumulado de mora como FRACCIÓN del TOTAL A DEVOLVER (capital + interés).
  *  Ajuste "Tope de mora (% del total a devolver)"; acepta la clave anterior
@@ -592,6 +611,10 @@ function applyFeatureUpdates() {
       'Límite inicial (préstamo nuevo)', 'Incremento de graduación', 'Límite máximo por historial (graduación)',
       'Atraso que congela el nivel (días)', 'Atraso que reinicia el nivel (días)',
       'Días de gracia antes de mora', 'Tope de mora (% del total a devolver)',
+      // Condonación de interés: días de gracia sin mora al condonar el interés de un préstamo.
+      'Días de gracia (condonación de interés)',
+      // Promoción / sorteo de buenos pagadores (hoja «Promoción»).
+      'Fecha del sorteo (promoción)', 'Instagram de la empresa (@usuario)', 'Mensaje de WhatsApp de la promoción',
       // Congelamiento (Parte 2): tope de futuros préstamos para clientes que congelaron,
       // y porcentaje que debe estar PAGADO antes de aprobar/congelar.
       'Tope de préstamo tras congelamiento', 'Porcentaje a pagar para congelar (%)',
@@ -825,6 +848,12 @@ function applyFeatureUpdates() {
       setupPlanRequests_(ss);
       done.push('columna «Plan desde» en «Prestatarios» + hoja «Solicitudes de Plan de Pago»');
     } catch (e) { logError_('applyFeatureUpdates:planPago', e); }
+    // 7e) Condonación de interés (+ gracia): columnas + ajuste + reinstalación de fórmulas. Reutiliza
+    //     la función suelta (menú ▸ ⚙ Configuración ▸ ➕ Crear columnas de condonación de interés).
+    try {
+      const nCond = setupCondonacionColumns_(ss);
+      done.push('columnas de condonación de interés en «Prestatarios»' + (nCond ? ' (' + nCond + ' nueva[s])' : ' (ya existían)'));
+    } catch (e) { logError_('applyFeatureUpdates:condonacionInteres', e); }
     // 8) "Pagos Atrasados": columnas "Tope de mora" y "Plan de pago 📅 (3 cuotas)" — la
     //    reconstrucción reafirma los encabezados nuevos y recalcula el % del tope.
     try { rebuildLateSheet_(ss); done.push('columnas «Tope de mora» + «Plan de pago 📅» en «Pagos Atrasados»'); }
@@ -961,6 +990,10 @@ function setupSettings_(ss) {
     ['Recargo por Mora diario (%)', '5'],
     ['Días de gracia antes de mora', '0'],
     ['Tope de mora (% del total a devolver)', '100'],
+    ['Días de gracia (condonación de interés)', '7'],
+    ['Fecha del sorteo (promoción)', '2026-12-20'],
+    ['Instagram de la empresa (@usuario)', ''],
+    ['Mensaje de WhatsApp de la promoción', PROMO_WA_DEFAULT],
     ['Límite inicial (préstamo nuevo)', '150000'],
     ['Incremento de graduación', '50000'],
     ['Límite máximo por historial (graduación)', '500000'],
@@ -1108,6 +1141,11 @@ function writeBorrowerFormulas_(sh, N) {
   // Letra de "Mora deshabilitada" (resuelta por nombre; vacía si la columna aún no existe).
   const disCol = colByAny_(headerIndex_(sh), ['Mora deshabilitada']);
   const DIS = disCol ? colL_(disCol) : '';
+  // Letras de "Interés condonado" (waiver) y "Gracia (días)" — por nombre (vacías si faltan).
+  const waivCol = colByAny_(headerIndex_(sh), ['Interés condonado']);
+  const WAIV = waivCol ? colL_(waivCol) : '';
+  const grcColF = colByAny_(headerIndex_(sh), ['Gracia (días)']);
+  const GRC = grcColF ? colL_(grcColF) : '';
   const fName = [], fRate = [], fDue = [], fITP = [], fState = [], fCount = [], fMora = [], fBalMora = [], fPlan = [];
   for (let r = 2; r <= N + 1; r++) {
     fName.push([  // C Nombre y D DNI: se resuelven de "Clientes" por ID Cliente.
@@ -1117,12 +1155,14 @@ function writeBorrowerFormulas_(sh, N) {
     fRate.push([`=IF($${TE}${r}="","",IFS($${TE}${r}=15,0.25,OR($${TE}${r}=30,$${TE}${r}=1),0.5,OR($${TE}${r}=60,$${TE}${r}=2),1,OR($${TE}${r}=90,$${TE}${r}=3),1,TRUE,"⚠ PLAZO INVÁLIDO"))`]);
     fDue.push([`=IF(OR($${FE}${r}="",$${TE}${r}=""),"",IF($${TE}${r}=15,$${FE}${r}+15,IF(OR($${TE}${r}=30,$${TE}${r}=60,$${TE}${r}=90),$${FE}${r}+$${TE}${r},EDATE($${FE}${r},$${TE}${r}))))`]);
     fITP.push([
-      `=IF(OR($${CAP}${r}="",NOT(ISNUMBER($${RA}${r}))),"",$${CAP}${r}*$${RA}${r})`,   // Interés
+      (WAIV
+        ? `=IF(OR($${CAP}${r}="",NOT(ISNUMBER($${RA}${r}))),"",$${CAP}${r}*IF($${WAIV}${r}=TRUE,0,$${RA}${r}))`   // Interés (0 si condonado)
+        : `=IF(OR($${CAP}${r}="",NOT(ISNUMBER($${RA}${r}))),"",$${CAP}${r}*$${RA}${r})`),                        // Interés
       `=IF($${INT}${r}="","",$${CAP}${r}+$${INT}${r})`,                                 // Total a Pagar
       `=IF($${A}${r}="","",SUMIF('${P}'!$${PPLOAN}:$${PPLOAN},$${A}${r},'${P}'!$${PPAMT}:$${PPAMT}))`, // Total Pagado
       borrowerBalanceFormula_(r),                                                        // Saldo Pendiente
     ]);
-    fState.push([borrowerStateFormula_(r)]);                                             // Estado
+    fState.push([borrowerStateFormula_(r, WAIV, GRC)]);                                  // Estado (gracia si condonado)
     // Préstamos VIGENTES del prestatario (por ID Cliente, excluyendo PAGADO/SALDADO);
     // numérico para poder pintarlo. Coincide con clientLoanCount_ / el tope V-25.
     fCount.push([`=IF($${CLI}${r}="","",COUNTIFS($${CLI}$2:$${CLI}${N + 1},$${CLI}${r},$${EST}$2:$${EST}${N + 1},"<>${ST.PAID}",$${EST}$2:$${EST}${N + 1},"<>${ST.CLEARED}"))`]);
@@ -1232,7 +1272,7 @@ function signingLinkFormula_(r, A, firmaL, base, tokL) {
  * No depende del saldo escrito por script, así que el estado cambia solo al
  * ingresar el pago (en la hoja "Pagos" o desde el panel).
  */
-function borrowerStateFormula_(r) {
+function borrowerStateFormula_(r, WAIV, GRC) {
   const A = colL_(PB.LOAN_ID), TO = colL_(PB.TOTAL), PA = colL_(PB.PAID), VE = colL_(PB.DUE), BM = colL_(PB.BALANCE_MORA), PL = colL_(PB.TOTAL_PLAN), FS = colL_(PB.FROZEN_SINCE), PS = colL_(PB.PLAN_SINCE);
   // PAGADO sólo cuando el monto a pagar CON MORA ("Saldo con Mora") llega a 0: un préstamo
   // pagado tarde con recargo pendiente NO figura como PAGADO hasta saldar también la mora.
@@ -1240,8 +1280,15 @@ function borrowerStateFormula_(r) {
   // mora dejó de crecer) — prevalece sobre VENCIDO/ACTIVO para que se vea de un vistazo.
   // EN PLAN (flag): si "Plan desde" tiene fecha → plan de pago (Acuerdo) vigente, prevalece sobre VENCIDO.
   // EN PLAN (suma): préstamo reestructurado al día — la "Suma de cuotas" supera el "Total a Pagar".
+  // CONDONACIÓN DE INTERÉS: si "Interés condonado" está tildado, NO se marca VENCIDO hasta pasar
+  // vencimiento + "Gracia (días)" (el vencimiento NO se mueve; sólo se posterga la DETECCIÓN). La
+  // compuerta vale TRUE para préstamos NO condonados → el estado queda EXACTAMENTE como antes.
+  const grcGate = (WAIV && GRC)
+    ? `IF($${WAIV}${r}=TRUE,TODAY()>($${VE}${r}+N($${GRC}${r})),TRUE)`
+    : `TRUE`;
+  const overdue = `AND(${grcGate},OR(${cuotaVencidaExpr_('$' + A + r)},AND($${VE}${r}<>"",TODAY()>$${VE}${r})))`;
   return `=IF($${A}${r}="","",IF(AND(ISNUMBER($${TO}${r}),ISNUMBER($${PA}${r}),$${PA}${r}>=$${TO}${r}-0.009,N($${BM}${r})<=0.009),"${ST.PAID}",` +
-    `IF($${FS}${r}<>"","${ST.FROZEN}",IF($${PS}${r}<>"","${ST.PLAN}",IF(OR(${cuotaVencidaExpr_('$' + A + r)},AND($${VE}${r}<>"",TODAY()>$${VE}${r})),"${ST.OVERDUE}",IF(OR($${TO}${r}="",$${PA}${r}=""),"…",IF(N($${PL}${r})>N($${TO}${r})+0.009,"${ST.PLAN}","${ST.ACTIVE}")))))))`;
+    `IF($${FS}${r}<>"","${ST.FROZEN}",IF($${PS}${r}<>"","${ST.PLAN}",IF(${overdue},"${ST.OVERDUE}",IF(OR($${TO}${r}="",$${PA}${r}=""),"…",IF(N($${PL}${r})>N($${TO}${r})+0.009,"${ST.PLAN}","${ST.ACTIVE}")))))))`;
 }
 /** Sub-expresión de fórmula: ¿el préstamo (celda con su ID) tiene alguna cuota VENCIDA en "Cuotas"? */
 function cuotaVencidaExpr_(loanIdCellA1) {
@@ -4592,8 +4639,9 @@ function rebuildLateSheet_(ss) {
     venC = col(['Fecha de Vencimiento', 'Vencimiento'], PB.DUE), intC = col(['Interés', 'Interes'], PB.INTEREST),
     totC = col(['Total a Pagar', 'Total a pagar'], PB.TOTAL), notC = col(['Último Aviso'], PB.NOTICE),
     adjC = colByAny_(H, ['Mora (ajuste)']), sinceC = colByAny_(H, ['Congelado el']), daysAccC = colByAny_(H, ['Días congelados', 'Dias congelados']),
-    planSinceC = colByAny_(H, ['Plan desde']), disC = colByAny_(H, ['Mora deshabilitada']);
-  const maxCol = Math.max(idC, cliC, capC, plzC, tasC, fecC, venC, intC, totC, notC, adjC || 0, sinceC || 0, daysAccC || 0, planSinceC || 0, disC || 0);
+    planSinceC = colByAny_(H, ['Plan desde']), disC = colByAny_(H, ['Mora deshabilitada']),
+    waivCc = colByAny_(H, ['Interés condonado']), grcCc = colByAny_(H, ['Gracia (días)']);
+  const maxCol = Math.max(idC, cliC, capC, plzC, tasC, fecC, venC, intC, totC, notC, adjC || 0, sinceC || 0, daysAccC || 0, planSinceC || 0, disC || 0, waivCc || 0, grcCc || 0);
   const bdata = bs.getRange(2, 1, last - 1, maxCol).getValues();
   const payMap = loanPaymentsAll_();   // todos los pagos en UNA lectura
   for (let i = 0; i < bdata.length; i++) {
@@ -4605,13 +4653,21 @@ function rebuildLateSheet_(ss) {
     if (!(dueDate instanceof Date) || isNaN(dueDate.getTime())) continue;
     if (daysLate_(dueDate, today) <= 0) continue;  // seguimos listando los vencidos aunque estén congelados
     if (planSinceC && g(planSinceC) instanceof Date) continue;  // EN PLAN (Acuerdo): va en "En Plan", no en Pagos Atrasados
+    // Condonación de interés: dentro de la ventana de gracia (vencimiento + "Gracia (días)") el
+    // préstamo NO entra en "Pagos Atrasados" (sin mora ni avisos). Pasada la gracia sí entra, pero
+    // con el interés condonado (base = capital) — lo resuelve accruedMoraFast_ vía waiverSchedule_.
+    const condonado = !!(waivCc && g(waivCc) === true);
+    const graceDias = grcCc ? (Number(g(grcCc)) || 0) : 0;
+    if (condonado && daysLate_(dueDate, today) <= graceDias) continue;
     const principal = Number(g(capC)) || 0;
     let rate = Number(g(tasC)) || 0; if (!rate) rate = loanRateForTerm_(term);
     let interest = Number(g(intC)) || 0; if (!interest) interest = round2_(principal * rate);
     let totalDue = Number(g(totC)) || 0; if (!totalDue) totalDue = round2_(principal + interest);
+    if (condonado) { interest = 0; totalDue = round2_(principal); }   // repaga solo el capital
     const cli = getClienteById_(String(g(cliC) || '').trim()) || {};  // Clientes está cacheado
     const loan = { loanId: loanId, clientId: String(g(cliC) || '').trim(), name: cli.name || '', email: cli.email || '',
-      phone: cli.phone || '', dni: cli.dni || '', principal: principal, term: term, rate: rate, loanDate: ld, dueDate: dueDate, interest: interest, totalDue: totalDue };
+      phone: cli.phone || '', dni: cli.dni || '', principal: principal, term: term, rate: rate, loanDate: ld, dueDate: dueDate, interest: interest, totalDue: totalDue,
+      condonado: condonado, graceDias: graceDias };
     const pays = payMap[loanId] || [];
     const totalPaid = pays.reduce((s, p) => s + p.amount, 0);
     const base = Math.max(0, round2_(totalDue - totalPaid));            // capital + interés pendiente
@@ -4737,6 +4793,23 @@ function loanSchedule_(loan) {
     });
   }
   return out;
+}
+/**
+ * Cronograma para el MOTOR DE MORA, con la CONDONACIÓN DE INTERÉS aplicada. Igual que
+ * loanSchedule_, salvo que para un préstamo condonado de PAGO ÚNICO devuelve una cuota explícita
+ * con el VENCIMIENTO REAL del préstamo y monto = CAPITAL (sin interés). Esto evita el respaldo de
+ * computeOutstanding_ que, sin cronograma, deduce el vencimiento de la TASA (15/30/60): con tasa 0
+ * caería a 60 días. En multicuota (90 días/reestructura) loanSchedule_ ya reparte loan.totalDue,
+ * que para un condonado vale el capital, así que ya queda sin interés. Devuelve null si no aplica
+ * (préstamo NO condonado de pago único → comportamiento histórico intacto). */
+function waiverSchedule_(loan) {
+  const s = loanSchedule_(loan);
+  if (s) return s;
+  if (loan && loan.condonado && loan.dueDate instanceof Date) {
+    const cap = round2_(Number(loan.principal) || 0);
+    return [{ due: loan.dueDate, amount: cap, principalShare: cap }];
+  }
+  return null;
 }
 
 /**
@@ -4921,9 +4994,11 @@ function accruedMoraFast_(loan, asOf, pays, override, frozen) {
   if (override != null) return override;
   const eff = effMoraAsOf2_(frozen, asOf);
   const rate = loanRateForTerm_(loan.term);
-  const sched = loanSchedule_(loan), far = new Date(9999, 0, 1);
-  const withMora = computeOutstanding_(loan.principal, rate, loan.loanDate, pays, eff, far, undefined, undefined, undefined, sched);
-  const principalDue = computeOutstanding_(loan.principal, rate, loan.loanDate, pays, eff, far, 0, undefined, undefined, sched);
+  // Condonación de interés: cronograma de CAPITAL (sin interés) + gracia del préstamo. El motor
+  // ignora `rate` cuando hay cronograma, así que la base de mora queda sobre el capital.
+  const sched = waiverSchedule_(loan), far = new Date(9999, 0, 1), grc = effWaiverGrace_(loan);
+  const withMora = computeOutstanding_(loan.principal, rate, loan.loanDate, pays, eff, far, undefined, grc, undefined, sched);
+  const principalDue = computeOutstanding_(loan.principal, rate, loan.loanDate, pays, eff, far, 0, grc, undefined, sched);
   const m = Math.max(0, round2_(withMora - principalDue));
   const cap = moraCapAmount_(loan);                 // tope = % × capital
   return cap > 0 ? Math.min(m, cap) : m;
@@ -4955,12 +5030,14 @@ function accruedMora_(loan, asOf) {
   const effAsOf = effectiveMoraAsOf_(loan.loanId, asOf);
   const rate = loanRateForTerm_(loan.term);
   const pays = loanPayments_(loan.loanId);
-  const sched = loanSchedule_(loan), far = new Date(9999, 0, 1);
-  const withMora = computeOutstanding_(loan.principal, rate, loan.loanDate, pays, effAsOf, far, undefined, undefined, undefined, sched);
+  // Condonación de interés: cronograma de CAPITAL (sin interés) + gracia del préstamo (ver
+  // waiverSchedule_/effWaiverGrace_). El motor ignora `rate` cuando hay cronograma.
+  const sched = waiverSchedule_(loan), far = new Date(9999, 0, 1), grc = effWaiverGrace_(loan);
+  const withMora = computeOutstanding_(loan.principal, rate, loan.loanDate, pays, effAsOf, far, undefined, grc, undefined, sched);
   // Capital+interés pendiente SIN mora: el MISMO motor con recargo diario 0. Robusto aunque
   // "Total a Pagar" venga vacío/erróneo en la fila (antes se restaba loan.totalDue y, si
   // faltaba, principalDue=0 y la mora absorbía el capital → duplicaba el "monto a pagar hoy").
-  const principalDue = computeOutstanding_(loan.principal, rate, loan.loanDate, pays, effAsOf, far, 0, undefined, undefined, sched);
+  const principalDue = computeOutstanding_(loan.principal, rate, loan.loanDate, pays, effAsOf, far, 0, grc, undefined, sched);
   const m = Math.max(0, round2_(withMora - principalDue));
   const cap = moraCapAmount_(loan);                 // tope = % × capital (nunca más que el capital al 100%)
   return cap > 0 ? Math.min(m, cap) : m;
@@ -4997,9 +5074,12 @@ function chargedMora_(loan, asOf) {
   // CONGELAMIENTO: si está congelado (o quedan días saltados), recorta el reloj a la fecha efectiva.
   const effAsOf = effectiveMoraAsOf_(loan.loanId, asOf);
   if (effAsOf.getTime() < endDate.getTime()) endDate = effAsOf;
-  const effDays = Math.max(0, daysLate_(loan.dueDate, endDate) - moraGraceDays_());
+  // Condonación de interés: la gracia del préstamo reemplaza la global y la base es SOLO el capital.
+  const wg = effWaiverGrace_(loan);
+  const grace = (typeof wg === 'number') ? wg : moraGraceDays_();
+  const effDays = Math.max(0, daysLate_(loan.dueDate, endDate) - grace);
   if (effDays <= 0) return 0;
-  const base = round2_(loan.totalDue);
+  const base = loan.condonado ? round2_(loan.principal) : round2_(loan.totalDue);
   return Math.max(0, Math.min(round2_(base * lateFeeRate_() * effDays), round2_(base * moraCapFrac_())));
 }
 /**
@@ -5078,7 +5158,8 @@ function writeOutstandingRow_(bs, row) {
   const disFbCol = colByAny_(H, ['Mora deshabilitada']);
   bs.getRange(row, moraCol).setFormula(borrowerMoraFormula_(row, disFbCol ? colL_(disFbCol) : ''));
   bs.getRange(row, balMoraCol).setFormula(borrowerBalanceWithMoraFormula_(row));
-  bs.getRange(row, stateCol).setFormula(borrowerStateFormula_(row));
+  const wStCol = colByAny_(H, ['Interés condonado']), gStCol = colByAny_(H, ['Gracia (días)']);
+  bs.getRange(row, stateCol).setFormula(borrowerStateFormula_(row, wStCol ? colL_(wStCol) : '', gStCol ? colL_(gStCol) : ''));
 }
 
 /**
@@ -5765,7 +5846,7 @@ function restructurarPrestamo_(loanId, nCuotas, primeraFecha, opts) {
     const today = new Date();
     const rate = loanRateForTerm_(loan.term);
     const pays = loanPayments_(loanId);
-    const owed = computeOutstanding_(loan.principal, rate, loan.loanDate, pays, today, new Date(9999, 0, 1), undefined, undefined, undefined, loanSchedule_(loan));
+    const owed = computeOutstanding_(loan.principal, rate, loan.loanDate, pays, today, new Date(9999, 0, 1), undefined, effWaiverGrace_(loan), undefined, waiverSchedule_(loan));
     if (owed <= 0) throw new Error('El préstamo ' + loanId + ' no tiene saldo pendiente: no requiere reestructuración.');
 
     // Armar el plan: cuotas mensuales iguales; la última absorbe el redondeo.
@@ -6174,10 +6255,445 @@ function statementData_(loan) {
   // que los "días de atraso" mostrados coincidan con el recargo congelado.
   const effAsOf = effectiveMoraAsOf_(loan.loanId, new Date());
   if (effAsOf.getTime() < endDate.getTime()) endDate = effAsOf;
-  const dLate = daysLate_(loan.dueDate, endDate);
+  // Condonación de interés: la gracia del préstamo posterga la detección de atraso/mora (igual que
+  // en la hoja). Para préstamos NO condonados la gracia efectiva es 0 → el display no cambia.
+  const wg = effWaiverGrace_(loan), wGrace = (typeof wg === 'number') ? wg : 0;
+  const dLate = Math.max(0, daysLate_(loan.dueDate, endDate) - wGrace);
   const feeAccum = chargedMora_(loan);
-  const overdue = !paid && (loan.dueDate instanceof Date) && new Date().getTime() > loan.dueDate.getTime();
+  const overdue = !paid && (loan.dueDate instanceof Date) && new Date().getTime() > (loan.dueDate.getTime() + wGrace * 86400000);
   return { pays, out, totalPaid, paid, overdue, dLate, feeAccum };
+}
+
+/**
+ * Avisa al prestatario que se CONDONÓ el interés de su préstamo (repaga solo el capital) y que entra
+ * en una gracia sin mora. Respeta al cliente sin recordatorios (Clientes). El interruptor por préstamo
+ * "Avisar por correo (SÍ/NO)" lo evalúa quien llama (onEdit). En TEST_MODE, sendBrandedEmail_ captura
+ * el correo en _emailOutbox (no envía).
+ */
+function sendWaiverNoticeEmail_(bsh, row) {
+  const bhm = headerMap_(bsh);
+  const loanIdCol = bhm['ID Préstamo'] || bhm['ID Prestamo'] || PB.LOAN_ID;
+  const loanId = String(bsh.getRange(row, loanIdCol).getValue()).trim();
+  if (!loanId) return;
+  const loan = findLoanById_(loanId);
+  if (!loan || !loan.email || loan.sinRecordatorios) return;
+  const graceCol = bhm['Gracia (días)'] || 0;
+  const graceDays = graceCol ? (Number(bsh.getRange(row, graceCol).getValue()) || 0) : 0;
+  const dueStr = (loan.dueDate instanceof Date) ? fmtDate_(loan.dueDate) : '';
+  const html = '<p>Hola <b>' + esc_(loan.name || '') + '</b>,</p>' +
+    '<p>Te avisamos que se <b>condonó (eximió) el interés</b> de tu préstamo <b>' + esc_(loanId) + '</b>.</p>' +
+    '<ul>' +
+      '<li>Ahora repagás <b>solo el capital</b> (' + fmtMoney_(loan.principal) + '), sin interés.</li>' +
+      (dueStr ? '<li>Tu vencimiento sigue siendo el <b>' + esc_(dueStr) + '</b> (sin cambios).</li>' : '') +
+      '<li>Tenés <b>' + graceDays + ' día(s) de gracia</b> sin mora desde el vencimiento.</li>' +
+    '</ul>' +
+    '<p>Pasado ese plazo, si queda saldo, la mora se reanuda pero <b>solo sobre el capital</b>.</p>' +
+    '<p>¡Gracias por tu confianza!</p>';
+  const subject = 'Condonación de interés — Préstamo ' + loanId;
+  const plain = 'Se condonó el interés de tu préstamo ' + loanId + '. Repagás solo el capital ' +
+    fmtMoney_(loan.principal) + '. Vencimiento: ' + dueStr + '. Gracia: ' + graceDays + ' día(s).';
+  sendBrandedEmail_(loan.email, subject, plain, html);
+}
+
+/**
+ * Instala (sin borrar datos) las columnas de la CONDONACIÓN DE INTERÉS en "Prestatarios"
+ * —"Interés condonado" (casilla), "Gracia (días)", "Motivo condonación", "Condonado el"—, siembra
+ * el ajuste "Días de gracia (condonación de interés)" (predet. 7) en "Configuración" si falta, y
+ * reinstala las fórmulas por nombre para que "Interés"/"Estado" referencien las columnas nuevas.
+ * Idempotente. Núcleo compartido por applyFeatureUpdates (7e) y la función suelta de menú. Devuelve
+ * la cantidad de columnas NUEVAS creadas (0 si ya existían todas).
+ */
+function setupCondonacionColumns_(ss) {
+  ss = ss || getSS_();
+  const bsw = ss.getSheetByName(CFG.SHEETS.BORROWERS);
+  if (!bsw) return 0;
+  const before = bsw.getLastColumn();
+  const waiverCol = clientesHeaderCol_(bsw, 'Interés condonado', true);
+  if (waiverCol > 0) {
+    bsw.getRange(2, waiverCol, CFG.MAX_ROWS, 1).insertCheckboxes();
+    bsw.setColumnWidth(waiverCol, 120);
+    bsw.getRange(1, waiverCol).setNote('Tildá para CONDONAR (eximir) el interés de este préstamo: el prestatario repaga SOLO el capital. Se sella «Condonado el» = hoy, se cargan los «Gracia (días)» desde Configuración y se avisa al prestatario por correo. Destildá para revertir por completo.');
+  }
+  const graceCol = clientesHeaderCol_(bsw, 'Gracia (días)', true);
+  if (graceCol > 0) {
+    bsw.getRange(2, graceCol, CFG.MAX_ROWS, 1).setNumberFormat('0');
+    bsw.setColumnWidth(graceCol, 100);
+    bsw.getRange(1, graceCol).setNote('Días de gracia SIN mora desde el vencimiento (solo si «Interés condonado» está tildado). Se llena automático desde Configuración al tildar; editable. Pasado vencimiento + gracia, la mora vuelve pero sobre el capital sin interés (tasa 0 %).');
+  }
+  const reasonCol = clientesHeaderCol_(bsw, 'Motivo condonación', true);
+  if (reasonCol > 0) {
+    bsw.getRange(2, reasonCol, CFG.MAX_ROWS, 1).setWrap(true);
+    bsw.setColumnWidth(reasonCol, 220);
+    bsw.getRange(1, reasonCol).setNote('Nota de auditoría: motivo de la condonación. Opcional; se conserva al tildar/destildar.');
+  }
+  const stampCol = clientesHeaderCol_(bsw, 'Condonado el', true);
+  if (stampCol > 0) {
+    bsw.getRange(2, stampCol, CFG.MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd');
+    bsw.setColumnWidth(stampCol, 110);
+    bsw.getRange(1, stampCol).setNote('Fecha en que se selló la condonación (auto al tildar; se borra al destildar). Auditoría — no editar a mano.');
+  }
+  invalidateHeaderIndexCache_();
+  // Ajuste de Configuración (si falta): días de gracia por defecto al condonar.
+  try {
+    const stsh = ss.getSheetByName(CFG.SHEETS.SETTINGS);
+    if (stsh && String(getSetting_('Días de gracia (condonación de interés)') || '').trim() === '')
+      setSettingValue_(stsh, 'Días de gracia (condonación de interés)', '7');
+  } catch (e) { logError_('setupCondonacionColumns_:cfg', e); }
+  // Reinstala las fórmulas POR NOMBRE para que "Interés"/"Estado" usen las columnas nuevas (así la
+  // condonación funciona apenas se crean las columnas, sin reactivar la hoja aparte).
+  if (typeof writeBorrowerRowFormulas_ === 'function' && bsw.getLastRow() >= 2) {
+    const ids = bsw.getRange(2, 1, bsw.getLastRow() - 1, 1).getValues();
+    for (let i = 0; i < ids.length; i++) if (String(ids[i][0]).trim()) writeBorrowerRowFormulas_(bsw, i + 2);
+  }
+  return Math.max(0, bsw.getLastColumn() - before);
+}
+/**
+ * Menú/editor: agrega SOLO las columnas de la condonación de interés (+ el ajuste de Configuración y
+ * la reinstalación de fórmulas), sin tocar el resto. Alternativa puntual a «🆕 Aplicar novedades».
+ * Idempotente. `silent` = sin diálogo (para llamarla desde otras funciones).
+ */
+function agregarColumnasCondonacionInteres(silent) {
+  return guard_('agregarColumnasCondonacionInteres', function () {
+    const n = setupCondonacionColumns_(getSS_());
+    if (!silent) {
+      const ui = SpreadsheetApp.getUi();
+      ui.alert('Condonación de interés',
+        (n > 0 ? 'Se agregaron ' + n + ' columna(s) nuevas' : 'Las columnas ya existían') +
+        ' en «Prestatarios»:\n• Interés condonado (casilla)\n• Gracia (días)\n• Motivo condonación\n• Condonado el\n\n' +
+        'También se cargó el ajuste «Días de gracia (condonación de interés)» (predet. 7) en «Configuración» si faltaba, ' +
+        'y se reinstalaron las fórmulas de «Interés»/«Estado».\n\n' +
+        'Para condonar un préstamo: tildá «Interés condonado» en su fila, o usá el menú ▸ 💳 Condonar interés (fila activa).',
+        ui.ButtonSet.OK);
+    }
+    return n;
+  });
+}
+
+/**
+ * Aplica la CONDONACIÓN DE INTERÉS a una fila de "Prestatarios": tilda "Interés condonado", sella
+ * "Condonado el", carga "Gracia (días)", guarda el "Motivo condonación" (si se pasa) y avisa al
+ * prestatario (si notify). Idempotente: si YA estaba sellada, sólo actualiza gracia/motivo recibidos
+ * (no re-sella ni re-envía). Fuente ÚNICA de la lógica, compartida por el onEdit (casilla) y el menú
+ * (fila activa). NO reconstruye "Pagos Atrasados" (lo hace quien llama). Devuelve {loanId, applied, emailed}.
+ */
+function applyInterestWaiver_(sh, row, graceDays, reason, notify) {
+  const bhm = headerMap_(sh);
+  const waiverCol = bhm['Interés condonado'] || 0, stampCol = bhm['Condonado el'] || 0;
+  const graceCol = bhm['Gracia (días)'] || 0, reasonCol = bhm['Motivo condonación'] || 0;
+  if (!waiverCol || !stampCol) throw new Error('Faltan las columnas de condonación en "Prestatarios". Ejecutá 🆕 Aplicar novedades.');
+  const loanId = String(sh.getRange(row, bhm['ID Préstamo'] || bhm['ID Prestamo'] || PB.LOAN_ID).getValue()).trim();
+  const already = String(sh.getRange(row, stampCol).getValue()).trim() !== '';
+  if (sh.getRange(row, waiverCol).getValue() !== true) sh.getRange(row, waiverCol).setValue(true);
+  if (!already) sh.getRange(row, stampCol).setValue(new Date()).setNumberFormat('yyyy-mm-dd');
+  if (graceCol) {
+    const cur = Number(sh.getRange(row, graceCol).getValue());
+    if (graceDays != null) sh.getRange(row, graceCol).setValue(Math.max(0, Math.floor(graceDays)));
+    else if (!(cur > 0)) sh.getRange(row, graceCol).setValue(waiverGraceDays_());   // sólo si está vacío (respeta lo cargado a mano)
+  }
+  if (reasonCol && reason) sh.getRange(row, reasonCol).setValue(reason);
+  let emailed = false;
+  if (!already && notify) { try { sendWaiverNoticeEmail_(sh, row); emailed = true; } catch (e) { logError_('applyInterestWaiver_:email', e); } }
+  return { loanId: loanId, applied: !already, emailed: emailed };
+}
+/** Revierte la condonación de una fila: destilda "Interés condonado", limpia "Condonado el" y
+ *  "Gracia (días)" (conserva el "Motivo condonación" como histórico). Compartida por onEdit y menú. */
+function revertInterestWaiver_(sh, row) {
+  const bhm = headerMap_(sh);
+  const waiverCol = bhm['Interés condonado'] || 0, graceCol = bhm['Gracia (días)'] || 0, stampCol = bhm['Condonado el'] || 0;
+  if (waiverCol && sh.getRange(row, waiverCol).getValue() === true) sh.getRange(row, waiverCol).setValue(false);
+  if (stampCol) sh.getRange(row, stampCol).clearContent();
+  if (graceCol) sh.getRange(row, graceCol).clearContent();
+}
+/**
+ * Menú (fila activa): CONDONA el interés del préstamo seleccionado en "Prestatarios" — repaga solo el
+ * capital. Pide los días de gracia (sin mora) y un motivo opcional; sella la fecha, avisa al
+ * prestatario (respeta "Avisar por correo (SÍ/NO)") y reconstruye "Pagos Atrasados". Es la alternativa
+ * guiada a tildar la casilla "Interés condonado".
+ */
+function condonarInteresFilaActiva() {
+  const ss = getSS_(), sh = ss.getActiveSheet(), ui = SpreadsheetApp.getUi();
+  if (sh.getName() !== CFG.SHEETS.BORROWERS) { ui.alert('Abrí la hoja "Prestatarios", seleccioná la fila del préstamo y volvé a usar esta opción.'); return; }
+  const row = sh.getActiveRange().getRow();
+  if (row < 2) { ui.alert('Seleccioná la fila de un préstamo.'); return; }
+  const bhm = headerMap_(sh);
+  if (!bhm['Interés condonado']) { ui.alert('Faltan las columnas de condonación. Ejecutá 🆕 Aplicar novedades primero.'); return; }
+  const loanId = String(sh.getRange(row, bhm['ID Préstamo'] || bhm['ID Prestamo'] || PB.LOAN_ID).getValue()).trim();
+  if (!loanId) { ui.alert('La fila seleccionada no tiene un préstamo.'); return; }
+  const def = waiverGraceDays_();
+  const resp = ui.prompt('Condonar interés — ' + loanId,
+    'El prestatario repagará SOLO el capital (interés = 0).\n\nDías de gracia SIN mora desde el vencimiento (Enter = ' + def + '):',
+    ui.ButtonSet.OK_CANCEL);
+  if (resp.getSelectedButton() !== ui.Button.OK) return;
+  const txt = String(resp.getResponseText()).replace(/[^0-9]/g, '').trim();
+  const grace = txt === '' ? def : Math.max(0, parseInt(txt, 10) || 0);
+  const rResp = ui.prompt('Motivo (opcional) — ' + loanId, 'Motivo de la condonación (queda en el historial; podés dejarlo vacío):', ui.ButtonSet.OK_CANCEL);
+  if (rResp.getSelectedButton() !== ui.Button.OK) return;
+  const reason = String(rResp.getResponseText()).trim();
+  const notifyCol = bhm['Avisar por correo (SÍ/NO)'] || 0;
+  let notify = true;
+  if (notifyCol) notify = String(sh.getRange(row, notifyCol).getValue()).trim().toUpperCase() !== 'NO';
+  let res;
+  try { res = applyInterestWaiver_(sh, row, grace, reason, notify); }
+  catch (e) { ui.alert(e.message || String(e)); return; }
+  try { rebuildLateSheet_(ss); } catch (e) { logError_('condonarInteresFilaActiva:rebuild', e); }
+  ss.toast('Interés CONDONADO en ' + loanId + ' (gracia ' + grace + ' día[s])' + (res.emailed ? ' · aviso enviado' : '') + '. Repaga solo el capital.', '✔ Condonación', 7);
+}
+/** Menú (fila activa): REVIERTE la condonación de interés del préstamo seleccionado (vuelve el interés
+ *  y la mora normal; conserva el "Motivo condonación"). Alternativa guiada a destildar la casilla. */
+function restaurarInteresFilaActiva() {
+  const ss = getSS_(), sh = ss.getActiveSheet(), ui = SpreadsheetApp.getUi();
+  if (sh.getName() !== CFG.SHEETS.BORROWERS) { ui.alert('Abrí la hoja "Prestatarios", seleccioná la fila del préstamo y volvé a usar esta opción.'); return; }
+  const row = sh.getActiveRange().getRow();
+  if (row < 2) { ui.alert('Seleccioná la fila de un préstamo.'); return; }
+  const bhm = headerMap_(sh);
+  const loanId = String(sh.getRange(row, bhm['ID Préstamo'] || bhm['ID Prestamo'] || PB.LOAN_ID).getValue()).trim();
+  if (!loanId) { ui.alert('La fila seleccionada no tiene un préstamo.'); return; }
+  revertInterestWaiver_(sh, row);
+  try { rebuildLateSheet_(ss); } catch (e) { logError_('restaurarInteresFilaActiva:rebuild', e); }
+  ss.toast('Condonación REVERTIDA en ' + loanId + '. Vuelven el interés y la mora normal.', '↩ Revertido', 6);
+}
+
+/* ===================== PROMOCIÓN / SORTEO DE BUENOS PAGADORES =====================
+ * Hoja "Promoción": lista los clientes que tomaron al menos UN préstamo y lo pagaron en tiempo y
+ * forma (a tiempo o anticipado, SIN atrasos ni mora vigente). Cada fila trae un enlace de WhatsApp
+ * con la invitación al sorteo (seguir + compartir el Instagram y enviar capturas como comprobante) y
+ * casillas para que el prestamista marque quién completó los pasos. La fecha del sorteo, el Instagram
+ * y el texto del mensaje son CONFIGURABLES (hoja "Configuración"). */
+
+const PROMO_HEADERS = ['ID Cliente', 'Nombre', 'Teléfono', 'Préstamos pagados', 'Días de anticipación (máx)',
+  'Invitar al sorteo 📲', 'Siguió + compartió IG', 'Captura recibida', 'Participa en el sorteo', 'Notas'];
+const PROMO_WA_DEFAULT = '¡Hola {nombre}! 🎉 En {empresa} premiamos a quienes pagaron su préstamo en tiempo y forma. ' +
+  'Participá de nuestro SORTEO del {fecha}. Para entrar: 1) Seguí nuestro Instagram {instagram}. ' +
+  '2) Compartí nuestra página en tu historia. 3) Envianos las capturas por este chat como comprobante. ¡Mucha suerte! 🍀';
+
+/** Fecha del sorteo (Configuración "Fecha del sorteo (promoción)"). Acepta AAAA-MM-DD, DD/MM/AAAA o
+ *  una celda de fecha. Predet. 20-dic-2026. */
+function promoRaffleDate_() {
+  const v = getSetting_('Fecha del sorteo (promoción)');
+  if (v instanceof Date && isFinite(v.getTime())) return v;
+  const s = String(v || '').trim(); let d = null, m;
+  if ((m = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/.exec(s))) d = new Date(+m[1], +m[2] - 1, +m[3]);           // AAAA-MM-DD
+  else if ((m = /^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/.exec(s))) d = new Date(+m[3], +m[2] - 1, +m[1]);      // DD/MM/AAAA
+  return (d && isFinite(d.getTime())) ? d : new Date(2026, 11, 20); // 20-dic-2026
+}
+/** Instagram de la empresa (Configuración), para el mensaje del sorteo. */
+function promoInstagram_() { return String(getSetting_('Instagram de la empresa (@usuario)') || '').trim(); }
+/** Mensaje de WhatsApp de la promoción, con los marcadores {nombre}/{empresa}/{instagram}/{fecha} resueltos. */
+function promoWaMessage_(name) {
+  const tpl = String(getSetting_('Mensaje de WhatsApp de la promoción') || '').trim() || PROMO_WA_DEFAULT;
+  return tpl.replace(/\{nombre\}/g, String(name || '').trim() || 'cliente')
+    .replace(/\{empresa\}/g, companyName_())
+    .replace(/\{instagram\}/g, promoInstagram_() || 'nuestro Instagram')
+    .replace(/\{fecha\}/g, fmtDate_(promoRaffleDate_()));
+}
+/**
+ * Contexto de la PROMOCIÓN (una sola lectura): por cliente, sus préstamos con TODAS las señales de
+ * atraso (estado VENCIDO/CONGELADO/EN PLAN, recargo por mora, ajuste de mora, congelado, plan), el
+ * último pago por préstamo, las cuotas vencidas y los préstamos archivados en "Saldados" (por DNI).
+ */
+function promoContext_(ss) {
+  ss = ss || getSS_();
+  // Último pago (máx. fecha) por préstamo.
+  const lastPay = {};
+  const pg = ss.getSheetByName(CFG.SHEETS.PAYMENTS);
+  if (pg && pg.getLastRow() >= 2) {
+    const PH = headerIndex_(pg);
+    const lC = colByAny_(PH, ['ID Préstamo', 'ID Prestamo']) || PP.LOAN_ID;
+    const dC = colByAny_(PH, ['Fecha de Pago', 'Fecha']) || PP.DATE;
+    pg.getRange(2, 1, pg.getLastRow() - 1, Math.max(lC, dC)).getValues().forEach(r => {
+      const id = String(r[lC - 1] || '').trim(); if (!id) return;
+      const d = r[dC - 1], t = (d instanceof Date) ? d.getTime() : Date.parse(d);
+      if (isFinite(t) && (!(id in lastPay) || t > lastPay[id])) lastPay[id] = t;
+    });
+  }
+  // Cuotas vencidas por préstamo (una cuota atrasada = el préstamo se atrasó).
+  const cuotaVenc = {};
+  const cu = ss.getSheetByName(CFG.SHEETS.INSTALLMENTS);
+  if (cu && cu.getLastRow() >= 2) {
+    const H = headerIndex_(cu);
+    const lC = colByAny_(H, ['ID Préstamo', 'ID Prestamo']) || CU.LOAN_ID;
+    const stC = colByAny_(H, ['Estado']) || CU.STATE;
+    cu.getRange(2, 1, cu.getLastRow() - 1, Math.max(lC, stC)).getValues().forEach(r => {
+      if (String(r[stC - 1] || '').trim().toUpperCase() === CST.OVERDUE) cuotaVenc[String(r[lC - 1] || '').trim()] = 1;
+    });
+  }
+  // Préstamos por cliente (Prestatarios) con señales de atraso.
+  const byClient = {};
+  const bs = ss.getSheetByName(CFG.SHEETS.BORROWERS);
+  if (bs && bs.getLastRow() >= 2) {
+    const H = headerIndex_(bs);
+    const idC = colByAny_(H, ['ID Préstamo', 'ID Prestamo']) || PB.LOAN_ID;
+    const cliC = colByAny_(H, ['ID Cliente']) || PB.CLIENT_ID;
+    const dueC = colByAny_(H, ['Fecha de Vencimiento', 'Vencimiento']) || PB.DUE;
+    const stC = colByAny_(H, ['Estado']) || PB.STATE;
+    const morC = colByAny_(H, ['Recargo por Mora (acum.)']);
+    const adjC = colByAny_(H, ['Mora (ajuste)']);
+    const congC = colByAny_(H, ['Congelado el']);
+    const planC = colByAny_(H, ['Plan desde']);
+    const w = Math.max(idC, cliC, dueC, stC, morC || 0, adjC || 0, congC || 0, planC || 0);
+    bs.getRange(2, 1, bs.getLastRow() - 1, w).getValues().forEach(r => {
+      const clientId = String(r[cliC - 1] || '').trim(); if (!clientId) return;
+      (byClient[clientId] = byClient[clientId] || []).push({
+        loanId: String(r[idC - 1] || '').trim(), due: r[dueC - 1], estado: String(r[stC - 1] || '').trim().toUpperCase(),
+        mora: morC ? (Number(r[morC - 1]) || 0) : 0,
+        moraAdj: adjC ? r[adjC - 1] : '',
+        congelado: !!(congC && r[congC - 1] instanceof Date),
+        plan: !!(planC && r[planC - 1] instanceof Date),
+      });
+    });
+  }
+  // "Saldados" (archivados) por DNI: cuentan como pagados; el atraso se detecta por último pago > venc.
+  const saldadosByDni = {};
+  const cs = ss.getSheetByName(CFG.SHEETS.CLEARED);
+  if (cs && cs.getLastRow() >= 2) {
+    const H = headerIndex_(cs);
+    const idC = colByAny_(H, ['ID Préstamo', 'ID Prestamo']) || 1;
+    const dniC = colByAny_(H, ['DNI']) || 3;
+    const dueC = colByAny_(H, ['Fecha de Vencimiento', 'Vencimiento']) || 12;
+    const morC = colByAny_(H, ['Recargo por Mora (acum.)', 'Recargo por Mora']);
+    const w = Math.max(idC, dniC, dueC, morC || 0);
+    cs.getRange(2, 1, cs.getLastRow() - 1, w).getValues().forEach(r => {
+      const dn = normDni_(r[dniC - 1]); if (!dn) return;
+      (saldadosByDni[dn] = saldadosByDni[dn] || []).push({
+        loanId: String(r[idC - 1] || '').trim(), due: r[dueC - 1], mora: morC ? (Number(r[morC - 1]) || 0) : 0,
+      });
+    });
+  }
+  return { lastPay: lastPay, cuotaVenc: cuotaVenc, byClient: byClient, saldadosByDni: saldadosByDni };
+}
+/**
+ * Elegibilidad de UN cliente para la promoción: pagó al menos UN préstamo y NUNCA tuvo un préstamo con
+ * atraso (ni actual ni pasado). CUALQUIER señal de atraso en CUALQUIER préstamo del cliente lo
+ * descalifica: estado VENCIDO/CONGELADO/EN PLAN, recargo por mora > 0, ajuste de mora cargado, fue
+ * congelado o pasó a plan, una cuota vencida, o un préstamo saldado pagado DESPUÉS del vencimiento.
+ * Devuelve { eligible, settledCount, maxDaysEarly }.
+ */
+function promoClientStats_(ctx, clientId, dniN) {
+  const seen = {};
+  let settled = 0, maxEarly = 0, everLate = false;
+  const consider = (L, archived) => {
+    const id = String(L.loanId || '').trim(); if (!id || seen[id]) return; seen[id] = true;
+    const estado = String(L.estado || '').toUpperCase();
+    const isSettled = archived || estado === ST.PAID || estado === ST.CLEARED;
+    // Señales de atraso (presente o pasado) — cualquiera descalifica al cliente.
+    if (estado === ST.OVERDUE || estado === ST.FROZEN || estado === ST.PLAN) everLate = true;
+    if ((Number(L.mora) || 0) > 0.009) everLate = true;
+    if (typeof L.moraAdj === 'number' && isFinite(L.moraAdj)) everLate = true; // mora fijada/condonada a mano = hubo mora
+    if (L.congelado || L.plan) everLate = true;                                // se congeló / pasó a plan = se atrasó
+    if (ctx.cuotaVenc[id]) everLate = true;
+    if (isSettled) {
+      settled++;
+      const due = (L.due instanceof Date) ? L.due : (L.due ? new Date(L.due) : null);
+      const pay = ctx.lastPay[id];
+      if (due && isFinite(due.getTime()) && pay != null) {
+        const early = Math.floor((due.getTime() - pay) / 86400000);
+        if (early < 0) everLate = true;                 // se pagó DESPUÉS del vencimiento → tarde
+        else if (early > maxEarly) maxEarly = early;
+      }
+    }
+  };
+  (ctx.byClient[clientId] || []).forEach(L => consider(L, false));
+  (ctx.saldadosByDni[dniN] || []).forEach(L => consider(L, true));
+  return { eligible: settled >= 1 && !everLate, settledCount: settled, maxDaysEarly: Math.max(0, maxEarly) };
+}
+/** Crea/formatea la hoja "Promoción" (encabezados, anchos, notas). No escribe datos. */
+function setupPromoSheet_(ss) {
+  ss = ss || getSS_();
+  const sh = getOrCreate_(ss, CFG.SHEETS.PROMO);
+  sh.getRange(1, 1, 1, PROMO_HEADERS.length).setValues([PROMO_HEADERS])
+    .setFontWeight('bold').setBackground('#38761d').setFontColor('#fff').setWrap(true);
+  sh.setFrozenRows(1);
+  [110, 220, 130, 120, 160, 150, 160, 140, 160, 240].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  sh.getRange(1, 6).setNote('Abre WhatsApp con la invitación al sorteo: seguir + compartir el Instagram y enviar capturas. El texto, el Instagram y la fecha salen de «Configuración».');
+  sh.getRange(1, 9).setNote('Tildá cuando el cliente completó los pasos (siguió, compartió y envió las capturas): queda habilitado para el sorteo del ' + fmtDate_(promoRaffleDate_()) + '.');
+  return sh;
+}
+/**
+ * Arma/actualiza la hoja "Promoción": clientes que pagaron ≥1 préstamo sin atrasos, con el enlace de
+ * WhatsApp de invitación al sorteo. Reconstruye las filas (no acumula). Devuelve la cantidad de elegibles.
+ */
+function buildPromo_(silent) {
+  return guard_('buildPromo_', function () {
+    const ss = getSS_(), sh = setupPromoSheet_(ss);
+    // Limpia datos + casillas previas (conserva encabezados).
+    const clearH = Math.max(sh.getMaxRows() - 1, 1);
+    sh.getRange(2, 1, clearH, PROMO_HEADERS.length).clearContent().clearDataValidations();
+    const ctx = promoContext_(ss);
+    const elegibles = [];
+    clientesRows_().forEach(c => {
+      if (!c.id) return;
+      const st = promoClientStats_(ctx, c.id, c.dniNorm);
+      if (st.eligible) elegibles.push({ c: c, st: st });
+    });
+    // Orden: más préstamos pagados primero; a igualdad, mayor anticipación.
+    elegibles.sort((a, b) => (b.st.settledCount - a.st.settledCount) || (b.st.maxDaysEarly - a.st.maxDaysEarly));
+    if (elegibles.length) {
+      const vals = elegibles.map(({ c, st }) => [c.id, safeCell_(c.name), c.phone, st.settledCount, st.maxDaysEarly, '', false, false, false, '']);
+      sh.getRange(2, 1, vals.length, PROMO_HEADERS.length).setValues(vals);
+      const cb = SpreadsheetApp.newDataValidation().requireCheckbox().build();
+      sh.getRange(2, 7, vals.length, 3).setDataValidation(cb);   // casillas: siguió+compartió · captura · participa
+      elegibles.forEach(({ c }, i) => {
+        const num = waNumberAR_(c.phone);
+        if (num) sh.getRange(i + 2, 6).setFormula('=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(promoWaMessage_(c.name)) + '","📲 Invitar")');
+        else sh.getRange(i + 2, 6).setValue('(sin teléfono válido)');
+      });
+    }
+    if (!silent) {
+      try {
+        ss.toast(elegibles.length + ' cliente(s) elegibles (pagaron sin atrasos). Sorteo: ' + fmtDate_(promoRaffleDate_()) +
+          (promoInstagram_() ? '' : ' · ⚠ cargá el Instagram en Configuración'), '🎉 Promoción', 8);
+      } catch (e) { }
+      try { ss.setActiveSheet(sh); } catch (e) { }
+    }
+    return elegibles.length;
+  });
+}
+/** Menú: arma/actualiza la hoja "Promoción" (sorteo de buenos pagadores). */
+function refrescarPromocion() { return buildPromo_(false); }
+/**
+ * Menú/editor: agrega la CONFIGURACIÓN de la Promoción en «Configuración» —"Fecha del sorteo
+ * (promoción)", "Instagram de la empresa (@usuario)" y "Mensaje de WhatsApp de la promoción"— sin pisar
+ * lo ya cargado, pide la fecha y el Instagram en el momento (opcional) y crea la hoja "Promoción" si
+ * falta. Idempotente. Alternativa puntual a «🆕 Aplicar novedades» / «① Configurar».
+ */
+function configurarPromocion() {
+  return guard_('configurarPromocion', function () {
+    const ss = getSS_(), ui = SpreadsheetApp.getUi();
+    const stsh = ss.getSheetByName(CFG.SHEETS.SETTINGS);
+    if (!stsh) { ui.alert('Falta la hoja «Configuración». Ejecutá ① Configurar primero.'); return; }
+    // 1) Garantiza las 3 claves y siembra los valores por defecto (sin pisar los existentes).
+    ensureSettingsKeys_(ss, ['Fecha del sorteo (promoción)', 'Instagram de la empresa (@usuario)', 'Mensaje de WhatsApp de la promoción']);
+    const seed = (key, val) => { if (String(getSetting_(key) || '').trim() === '') setSettingValue_(stsh, key, val); };
+    seed('Fecha del sorteo (promoción)', '2026-12-20');
+    seed('Mensaje de WhatsApp de la promoción', PROMO_WA_DEFAULT);
+    // 2) Fecha del sorteo (prompt opcional; Enter/Cancelar = mantiene la actual).
+    const curDate = fmtDate_(promoRaffleDate_());
+    const dResp = ui.prompt('Promoción — fecha del sorteo', 'Fecha del sorteo (AAAA-MM-DD o DD/MM/AAAA).\nEnter o Cancelar = mantener ' + curDate + ':', ui.ButtonSet.OK_CANCEL);
+    if (dResp.getSelectedButton() === ui.Button.OK) {
+      const t = String(dResp.getResponseText()).trim();
+      if (t) {
+        const d = parseFreezeDate_(t);   // reutiliza el parser AAAA-MM-DD / DD/MM/AAAA
+        if (d) setSettingValue_(stsh, 'Fecha del sorteo (promoción)', Utilities.formatDate(d, Session.getScriptTimeZone(), 'yyyy-MM-dd'));
+        else ui.alert('Fecha inválida; se mantuvo ' + curDate + '. Usá AAAA-MM-DD o DD/MM/AAAA.');
+      }
+    }
+    // 3) Instagram (prompt opcional).
+    const curIg = promoInstagram_();
+    const iResp = ui.prompt('Promoción — Instagram', 'Usuario o enlace de Instagram (ej.: @impulsocredito o https://instagram.com/impulsocredito).\nEnter o Cancelar = mantener ' + (curIg || '(vacío)') + ':', ui.ButtonSet.OK_CANCEL);
+    if (iResp.getSelectedButton() === ui.Button.OK) {
+      const t = String(iResp.getResponseText()).trim();
+      if (t) setSettingValue_(stsh, 'Instagram de la empresa (@usuario)', t);
+    }
+    // 4) Crea/forma la hoja "Promoción" si falta.
+    try { setupPromoSheet_(ss); } catch (e) { logError_('configurarPromocion:sheet', e); }
+    ui.alert('Promoción configurada',
+      'En «Configuración» quedaron:\n' +
+      '• Fecha del sorteo: ' + fmtDate_(promoRaffleDate_()) + '\n' +
+      '• Instagram: ' + (promoInstagram_() || '(vacío — cargalo para que aparezca en el mensaje)') + '\n' +
+      '• Mensaje de WhatsApp de la promoción (editable).\n\n' +
+      'Ahora usá el menú ▸ 🎉 Armar/actualizar Promoción para generar la lista de clientes y los enlaces de WhatsApp.',
+      ui.ButtonSet.OK);
+  });
 }
 
 /** PDF del estado de cuenta, guardado en la carpeta del prestatario. */
@@ -6803,7 +7319,8 @@ function lookupBalance(loanId, dni) {
     // Si la mora está deshabilitada o condonada (casilla "Mora deshabilitada" o "Mora (ajuste)"=0),
     // el saldo informado NO incluye mora (feeRate 0).
     const moraOff = moraOverrideValue_(loan.loanId) === 0;
-    const out = computeOutstanding_(loan.principal, rate, loan.loanDate, loanPayments_(loan.loanId), new Date(), new Date(9999, 0, 1), moraOff ? 0 : undefined, undefined, undefined, loanSchedule_(loan));
+    // Condonación de interés: base de capital (waiverSchedule_) + gracia del préstamo (effWaiverGrace_).
+    const out = computeOutstanding_(loan.principal, rate, loan.loanDate, loanPayments_(loan.loanId), new Date(), new Date(9999, 0, 1), moraOff ? 0 : undefined, effWaiverGrace_(loan), undefined, waiverSchedule_(loan));
     return {
       ok: true, html: '<b>' + esc_(loan.name) + '</b><br>Préstamo: ' + esc_(loan.loanId) +
         '<br>Total a pagar: <b>' + fmtMoney_(loan.totalDue) + '</b><br>Vencimiento: <b>' + fmtDate_(loan.dueDate) + '</b>' +
@@ -8657,6 +9174,37 @@ function onEditInstallable(e) {
             getSS_().toast('Enlace de firma de ' + loanId + ': ' + link, '🔗 Enlace generado', 10);
           } catch (err) { logError_('onEdit:BORROWERS:genEnlace', err); getSS_().toast(err.message || String(err), '⚠ No se pudo generar', 8); }
         }
+      }
+      // Casilla "Interés condonado": sella/limpia "Condonado el", llena "Gracia (días)" desde
+      // Configuración si está vacío, avisa al prestatario (respeta "Avisar por correo (SÍ/NO)") y es
+      // REVERSIBLE (destildar limpia el sello + la gracia; conserva el "Motivo condonación").
+      const waiverCol = bhm['Interés condonado'] || 0;
+      const graceCol = bhm['Gracia (días)'] || 0;
+      const stampCol = bhm['Condonado el'] || 0;
+      const notifyCol = bhm['Avisar por correo (SÍ/NO)'] || 0;
+      let waiverChanged = false;
+      if (waiverCol && stampCol && waiverCol >= c0 && waiverCol <= cN) {
+        for (let row = rN; row >= r0; row--) {
+          const isWaived = sh.getRange(row, waiverCol).getValue() === true;
+          const hasStamp = String(sh.getRange(row, stampCol).getValue()).trim() !== '';
+          if (isWaived && !hasStamp) {
+            // Casilla recién tildada: misma lógica que el menú (gracia por defecto si está vacía, sin
+            // tocar el motivo). "Motivo condonación" se conserva (histórico) en la reversa.
+            let avisar = true;
+            if (notifyCol) avisar = String(sh.getRange(row, notifyCol).getValue()).trim().toUpperCase() !== 'NO';
+            try { applyInterestWaiver_(sh, row, null, '', avisar); }
+            catch (err) { logError_('onEdit:BORROWERS:condonacion', err); getSS_().toast(err.message || String(err), '⚠ Condonación', 8); continue; }
+            waiverChanged = true;
+            getSS_().toast('Interés CONDONADO en la fila ' + row + '. El prestatario repaga solo el capital; se cargó la gracia.', '✔ Condonación', 6);
+          } else if (!isWaived && hasStamp) {
+            revertInterestWaiver_(sh, row);   // reversa silenciosa (sin correo); las fórmulas restauran interés + mora normal
+            waiverChanged = true;
+            getSS_().toast('Condonación REVERTIDA en la fila ' + row + '. Vuelven el interés y la mora normal.', '↩ Revertido', 6);
+          }
+        }
+        // Reconstruí "Pagos Atrasados" para que el "Recargo por Mora" refleje la condonación/reversa
+        // de inmediato (si no, el VLOOKUP mostraría la mora previa hasta el próximo recálculo diario).
+        if (waiverChanged) { try { rebuildLateSheet_(getSS_()); } catch (err) { logError_('onEdit:BORROWERS:condonacion:rebuild', err); } }
       }
       if ([PB.LOAN_ID, PB.PRINCIPAL, PB.TERM, PB.LOAN_DATE].some(c => c >= c0 && c <= cN)) for (let row = r0; row <= rN; row++) writeOutstandingRow_(sh, row);
     } else if (name === CFG.SHEETS.AGREEMENT) {
@@ -11401,6 +11949,9 @@ function borrowerLoanCols_(H) {
     // Token de acceso por préstamo (seguridad de enlaces): opcionales (0 si la columna no existe).
     tokC: col(['Token de acceso'], 0),
     tokIssC: col(['Token emitido'], 0),
+    // Condonación de interés + gracia (opcionales; 0 si la columna no existe).
+    waivC: col(['Interés condonado'], 0),
+    grcC: col(['Gracia (días)'], 0),
   };
 }
 // Igual que readLoan_, pero sobre una FILA YA leída (v = valores de la fila completa, columna c → v[c-1]).
@@ -11417,6 +11968,11 @@ function parseLoanRow_(v, H, cols) {
   let rate = Number(g(cols.tasC)) || 0; if (!rate) rate = loanRateForTerm_(term);
   let interest = Number(g(cols.intC)) || 0; if (!interest) interest = round2_(principal * rate);
   let totalDue = Number(g(cols.totC)) || 0; if (!totalDue) totalDue = round2_(principal + interest);
+  // Condonación de interés: el prestatario repaga SOLO el capital. Se fuerza interés=0 y
+  // total=capital EN EL OBJETO (si no, el respaldo "if(!interest)" lo recalcularía desde la celda 0).
+  const condonado = !!(cols.waivC && cols.waivC <= v.length && g(cols.waivC) === true);
+  const graceDias = (cols.grcC && cols.grcC <= v.length) ? (Number(g(cols.grcC)) || 0) : 0;
+  if (condonado) { interest = 0; totalDue = round2_(principal); }
   const gh = cc => (cc && cc <= v.length) ? String(g(cc) || '').trim() : '';
   const thirdParty = /tercero|^no\b/i.test(gh(cols.propC));
   return {
@@ -11424,6 +11980,7 @@ function parseLoanRow_(v, H, cols) {
     name: c.name || '', email: c.email || '', dni: c.dni || '', phone: c.phone || '',
     cuil: c.cuil || '', direccion: c.direccion || '', payMethod: c.payMethod || '',
     sinRecordatorios: !!c.sinRecordatorios,   // cliente con recordatorios desactivados (Clientes)
+    condonado: condonado, graceDias: graceDias,  // condonación de interés + gracia (por préstamo)
     principal: principal, term: term,
     loanDate: ld,
     dueDate: g(cols.venC) instanceof Date ? g(cols.venC) : dueDateForTerm_(term || 1, ld),
@@ -11441,7 +11998,8 @@ function readLoan_(sh, row) {
   const H = headerIndex_(sh);
   const cols = borrowerLoanCols_(H);
   const lastCol = Math.max(cols.idC, cols.cliC, cols.capC, cols.plzC, cols.tasC, cols.fecC, cols.venC, cols.intC, cols.totC,
-    cols.propC || 0, cols.titC || 0, cols.tdniC || 0, cols.temailC || 0, cols.tphoneC || 0, cols.tokC || 0, cols.tokIssC || 0);
+    cols.propC || 0, cols.titC || 0, cols.tdniC || 0, cols.temailC || 0, cols.tphoneC || 0, cols.tokC || 0, cols.tokIssC || 0,
+    cols.waivC || 0, cols.grcC || 0);
   const v = sh.getRange(row, 1, 1, lastCol).getValues()[0];
   return parseLoanRow_(v, H, cols);
 }
@@ -11964,7 +12522,7 @@ function sendOverdueNotice_(loanId) {
     const today = new Date();
     const rate = termRate_(loan.term);
     const pays = loanPayments_(loanId);
-    const outstanding = computeOutstanding_(loan.principal, rate, loan.loanDate, pays, today, new Date(9999, 0, 1), undefined, undefined, undefined, loanSchedule_(loan));
+    const outstanding = computeOutstanding_(loan.principal, rate, loan.loanDate, pays, today, new Date(9999, 0, 1), undefined, effWaiverGrace_(loan), undefined, waiverSchedule_(loan));
     const days = daysLate_(loan.dueDate, today);
     const feeDay = round2_(loan.totalDue * lateFeeRate_());
     const subject = 'Aviso de mora — préstamo ' + loan.loanId;
@@ -12190,7 +12748,8 @@ function crearPrestamoPruebaMora100(clienteId, capital, plazoDias) {
     // Estado con reconocimiento de CONGELADO/EN PLAN si ya existen esas columnas
     // (las agrega «🆕 Aplicar novedades»): así el estado vira a EN PLAN al activar el plan.
     if (colByAny_(H, ['Plan desde']) && colByAny_(H, ['Congelado el'])) {
-      bs.getRange(tRow, colByAny_(H, ['Estado']) || PB.STATE).setFormula(borrowerStateFormula_(tRow));
+      const wC = colByAny_(H, ['Interés condonado']), gC = colByAny_(H, ['Gracia (días)']);
+      bs.getRange(tRow, colByAny_(H, ['Estado']) || PB.STATE).setFormula(borrowerStateFormula_(tRow, wC ? colL_(wC) : '', gC ? colL_(gC) : ''));
     }
     // Nombre/DNI resueltos de "Clientes" por ID Cliente (modelo normalizado).
     if ((nameCol || dniCol) && cl) {
@@ -12340,7 +12899,7 @@ function seedScenarioLoan_(ss, opts) {
   if (opts.moraAjuste != null && adjCol) bs.getRange(tRow, adjCol).setValue(opts.moraAjuste);
 
   writeBorrowerRowFormulas_(bs, tRow);
-  if (congCol && planCol) bs.getRange(tRow, colByAny_(H, ['Estado']) || PB.STATE).setFormula(borrowerStateFormula_(tRow));
+  if (congCol && planCol) { const wC2 = colByAny_(H, ['Interés condonado']), gC2 = colByAny_(H, ['Gracia (días)']); bs.getRange(tRow, colByAny_(H, ['Estado']) || PB.STATE).setFormula(borrowerStateFormula_(tRow, wC2 ? colL_(wC2) : '', gC2 ? colL_(gC2) : '')); }
 
   if ((nameCol || dniCol) && cl) {
     const CH = headerIndex_(cl), cliL = a1col_(cliCol), CSN = CFG.SHEETS.CLIENTS;
