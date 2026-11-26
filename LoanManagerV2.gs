@@ -185,6 +185,7 @@ function onOpen() {
       .addItem('🚩 Instalar marcado de fraude (casilla «Fraude» + alerta V-41)', 'instalarMarcadoFraude')
       .addItem('📅 Instalar alertas de feriado + recuento ⚠ (V-42 + badge)', 'instalarAlertasFeriado')
       .addItem('🧩 Instalar validaciones adicionales (V-43/44/46/47/49: columna + ajustes)', 'instalarValidacionesAdicionales')
+      .addItem('🔺 Instalar marcado de ALTO RIESGO (diario 3am + V-54)', 'instalarMarcadoAltoRiesgo')
       .addItem('➕ Crear hoja de Recordatorios de pago', 'createRemindersSheet_')
       .addItem('📄 Crear hoja de Estudio de Contratos', 'createAgreementSheet_')
       .addItem('📄 Crear/actualizar hoja de Estudio de Estados', 'createStatementsSheet_')

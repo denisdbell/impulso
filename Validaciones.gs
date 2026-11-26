@@ -116,6 +116,7 @@ const VALIDATION_RULES = [
   ['V-46', 'Formulario', 'Cuenta destino', 'Integridad de la cuenta destino (acompaña a V-37): valida el dígito verificador del CBU/CVU (22 dígitos) y el formato del alias. Advierte (no bloquea) si la cuenta parece mal copiada, para evitar transferencias a una cuenta equivocada.', '—', 'ADVIERTE', 'MEDIA'],
   ['V-47', 'Formulario', 'Correo', 'Reputación del dominio de correo: advierte si el correo usa un dominio desechable/temporal conocido (configurable en «Dominios desechables») o si el dominio se parece por un carácter a un proveedor conocido (posible typo, p. ej. gmial.com). No bloquea.', '—', 'ADVIERTE', 'MEDIA'],
   ['V-49', 'Formulario', 'Anti-fraude', 'Nombre casi idéntico: advierte si el nombre del solicitante coincide o se parece (distancia ≤ 2) al de otro cliente con OTRO DNI, o a un cliente bloqueado/fraudulento (posible fraccionamiento de identidad o evasión por cambio mínimo de grafía). Informativo para el prestamista; no bloquea.', '—', 'ADVIERTE', 'MEDIA'],
+  ['V-54', 'Formulario y Aprobación', 'Riesgo', 'Cliente marcado ALTO RIESGO por el marcado diario (3am): historial de pago (préstamo vencido/en plan/congelado, impago previo o atraso crónico) y BCRA cuando «BCRA (comprimido)» está cargado. Al solicitar, se informa al prestamista y suma al recuento «⚠ Alertas». ADVISORIA — nunca bloquea. La casilla «Alto riesgo» en «Clientes» la gestiona el disparador (menú ▸ Instalar marcado de ALTO RIESGO); no editar a mano.', '—', 'ADVIERTE', 'ALTA'],
 ];
 
 /* ==================== VALIDADORES DE CAMPO ==================== */
@@ -412,9 +413,10 @@ function clientesRows_() {
     cR3N = ccol_('Ref 3 Nombre', 0), cR3R = ccol_('Ref 3 Vínculo', 0), cR3P = ccol_('Ref 3 Teléfono', 0),
     cBloq = ccol_('Bloqueado', 0), cBloqM = ccol_('Motivo de bloqueo', 0),
     cNoRec = ccol_('Recordatorios desactivados', 0),
-    cFraude = ccol_('Fraude', 0), cFraudeM = ccol_('Motivo de fraude', 0);
+    cFraude = ccol_('Fraude', 0), cFraudeM = ccol_('Motivo de fraude', 0),
+    cAlto = ccol_('Alto riesgo', 0), cAltoM = ccol_('Motivo alto riesgo', 0);
   const width = Math.max(cId, cName, cEmail, cDni, cPhone, cDniN, cEmailN, cPhoneN, cCuil, cAddr,
-    cR1N, cR1R, cR1P, cR2N, cR2R, cR2P, cR3N, cR3R, cR3P, cBloq, cBloqM, cNoRec, cFraude, cFraudeM);
+    cR1N, cR1R, cR1P, cR2N, cR2R, cR2P, cR3N, cR3R, cR3P, cBloq, cBloqM, cNoRec, cFraude, cFraudeM, cAlto, cAltoM);
   const cell = (r, c) => c ? String(r[c - 1] || '').trim() : '';
   const data = sh.getRange(2, 1, sh.getLastRow() - 1, width).getValues();
   _clientesRowsCache = data.map((r, i) => ({
@@ -436,6 +438,8 @@ function clientesRows_() {
     sinRecordatorios: (function () { const v = cNoRec ? r[cNoRec - 1] : ''; return v === true || /^(sí|si|true|verdadero)$/i.test(String(v == null ? '' : v).trim()); })(),
     fraude: (function () { const v = cFraude ? r[cFraude - 1] : ''; return v === true || /^(sí|si|true|verdadero)$/i.test(String(v == null ? '' : v).trim()); })(),
     fraudeMotivo: cell(r, cFraudeM),
+    altoRiesgo: (function () { const v = cAlto ? r[cAlto - 1] : ''; return v === true || /^(sí|si|true|verdadero)$/i.test(String(v == null ? '' : v).trim()); })(),
+    altoRiesgoMotivo: cell(r, cAltoM),
     row: i + 2,
   })).filter(o => o.id || o.dniNorm || o.emailNorm);
   return _clientesRowsCache;
@@ -1476,6 +1480,8 @@ function submitIntakeSmart(form) {
       if (v47 && v47.msg) { extraAlertas.push('✉ ' + v47.msg); nExtra++; }
       const v49 = nombreCasiIgual_(name, dnV.norm);
       if (v49 && v49.texts.length) { extraAlertas.push('👥 ' + v49.texts.join(' · ')); nExtra++; }
+      // V-54 — cliente marcado ALTO RIESGO por el marcado diario (historial de pago + BCRA).
+      if (existing && existing.altoRiesgo) { extraAlertas.push('🔺 Cliente ALTO RIESGO' + (existing.altoRiesgoMotivo ? ': ' + existing.altoRiesgoMotivo : '')); nExtra++; }
     } catch (e) { logError_('submitIntakeSmart:extraAlertas', e); }
 
     // Registro en "Nuevos Prestatarios" (mismo orden de columnas que NB).
@@ -2345,6 +2351,157 @@ function ensureSettingRow_(stsh, key, defaultVal) {
   stsh.appendRow([key, defaultVal]);
   if (typeof invalidateSettingsCache_ === 'function') invalidateSettingsCache_();
   return true;
+}
+
+/* ================= V-54 — MARCADO DE ALTO RIESGO (diario) ================= */
+// Marca clientes como «Alto riesgo» según su HISTORIAL DE PAGO (y el BCRA cuando está cargado en
+// «BCRA (comprimido)»): préstamos vencidos vigentes, en plan, congelados, impago previo o atrasos
+// crónicos. ADVISORIO: la casilla suma al recuento «⚠ Alertas» y se informa al prestamista al
+// solicitar (V-54); NUNCA bloquea. Lo corre un disparador diario (3am) o el ítem de menú.
+
+/** Evalúa el riesgo de un cliente a partir de datos de la hoja. Devuelve {flag, reasons:[...]}.
+ *  PERFORMANCE: usa el ctx de historial ya cargado + prestamosPorCliente_ memoizado; la lectura
+ *  del BCRA comprimido es por cliente (sólo si la celda está completa) y tolerante a errores. */
+function evaluarAltoRiesgo_(ctx, o, bcraComprimido) {
+  const reasons = [];
+  // 1) Estado actual de los préstamos (vencido / en plan / congelado).
+  const loans = (typeof prestamosPorCliente_ === 'function') ? (prestamosPorCliente_()[o.id] || []) : [];
+  const venc = loans.filter(l => l.estado === ST.OVERDUE).length;
+  const plan = loans.filter(l => l.estado === ST.PLAN).length;
+  const cong = loans.filter(l => l.estado === ST.FROZEN).length;
+  if (venc) reasons.push(venc + ' préstamo(s) VENCIDO(s)');
+  if (plan) reasons.push('en plan de pago (reestructurado)');
+  if (cong) reasons.push('préstamo congelado (mora detenida)');
+  // 2) Historial de repago (impago previo / atrasos crónicos).
+  let h = null;
+  try { h = computeRepaymentHistory_(ctx, o.id, o.dniNorm); } catch (e) { h = null; }
+  if (h) {
+    if (h.everDefaulted && !venc) reasons.push('historial con impago/mora');
+    if (h.settledCount >= 2 && h.lateCount >= 2 && (h.lateCount / h.settledCount) >= 0.5)
+      reasons.push('pagador crónicamente atrasado (' + h.lateCount + '/' + h.settledCount + ' tarde)');
+  }
+  // 3) BCRA (sólo si «BCRA (comprimido)» está completo) — mejor esfuerzo, no bloquea nada.
+  const comp = String(bcraComprimido || '').trim();
+  if (comp) {
+    try {
+      const obj = bcraDecompress_(comp);
+      const r = bcraResultFromPeriodos_(obj.snapshot, obj.periodos, obj.nombre, obj.cuil);
+      const worst = Number(r.peorSituacion) || 0;
+      if (worst >= 3) reasons.push('BCRA: situación ' + worst + ' (' + bcraSituLabel_(worst) + ')');
+    } catch (e) { /* comprimido ilegible → se ignora (fail-open) */ }
+  }
+  return { flag: reasons.length > 0, reasons: reasons };
+}
+
+/**
+ * Recorre «Clientes», marca/actualiza «Alto riesgo» + «Motivo alto riesgo» según evaluarAltoRiesgo_,
+ * y envía al prestamista un resumen por correo de los marcados (destacando los NUEVOS). Lecturas y
+ * escrituras por LOTE (no por celda). Lo invoca el disparador diario y el instalador.
+ */
+function marcarAltoRiesgo_() {
+  const ss = getSS_();
+  const cl = ss.getSheetByName(CFG.SHEETS.CLIENTS);
+  if (!cl || cl.getLastRow() < 2) return 'Sin clientes.';
+  let H = headerMap_(cl);
+  if (!H['Alto riesgo'] || !H['Motivo alto riesgo']) { ensureAltoRiesgoColumns_(ss); H = headerMap_(cl); }
+  const cAlto = H['Alto riesgo'], cMot = H['Motivo alto riesgo'], cUpd = H['Alto riesgo (actualizado)'] || 0;
+  const cComp = H[CLIENTE_BCRA_COMP_COL] || 0;
+  const n = cl.getLastRow() - 1;
+  // Estado previo de la casilla (para detectar NUEVOS) + BCRA comprimido (una lectura por lote).
+  const prevFlags = cl.getRange(2, cAlto, n, 1).getValues();
+  const compVals = cComp ? cl.getRange(2, cComp, n, 1).getValues() : null;
+  const ctx = repaymentContext_(ss);
+  const byRow = {}; clientesRows_().forEach(o => { byRow[o.row] = o; });
+  const outFlag = new Array(n), outMot = new Array(n), outUpd = new Array(n);
+  const now = new Date();
+  const flaggedNow = [], newlyFlagged = [];
+  for (let i = 0; i < n; i++) {
+    const wasFlagged = prevFlags[i][0] === true;
+    const o = byRow[i + 2];
+    if (!o || !o.id) { outFlag[i] = [prevFlags[i][0] === true]; outMot[i] = ['']; outUpd[i] = [cUpd ? now : '']; continue; }
+    const ev = evaluarAltoRiesgo_(ctx, o, compVals ? compVals[i][0] : '');
+    outFlag[i] = [ev.flag];
+    outMot[i] = [ev.flag ? ev.reasons.join(' · ') : ''];
+    outUpd[i] = [cUpd ? now : ''];
+    if (ev.flag) {
+      const rec = { id: o.id, name: o.name, dni: o.dni, reasons: ev.reasons,
+        loans: (typeof resumenPrestamos_ === 'function') ? resumenPrestamos_(o.id) : '' };
+      flaggedNow.push(rec);
+      if (!wasFlagged) newlyFlagged.push(rec);
+    }
+  }
+  cl.getRange(2, cAlto, n, 1).setValues(outFlag);
+  cl.getRange(2, cMot, n, 1).setValues(outMot);
+  if (cUpd) cl.getRange(2, cUpd, n, 1).setValues(outUpd);
+  invalidateClientesRows_();
+  if (typeof invalidateClientesCache_ === 'function') invalidateClientesCache_();
+  try { enviarResumenAltoRiesgo_(flaggedNow, newlyFlagged); } catch (e) { logError_('marcarAltoRiesgo_:email', e); }
+  return flaggedNow.length + ' cliente(s) de alto riesgo (' + newlyFlagged.length + ' nuevo(s)).';
+}
+
+/** Correo-resumen al prestamista con los clientes marcados ALTO RIESGO (destaca los nuevos). */
+function enviarResumenAltoRiesgo_(flagged, nuevos) {
+  const to = String(getSetting_('Correo del Prestamista') || '').trim();
+  if (!to || !flagged.length) return;
+  const hoy = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  const nuevosIds = {}; (nuevos || []).forEach(r => { nuevosIds[r.id] = 1; });
+  const rowHtml = r => '<tr>' +
+    '<td style="padding:6px 8px;border-bottom:1px solid #eee">' + (nuevosIds[r.id] ? '🆕 ' : '') + esc_(r.name || r.id) + '</td>' +
+    '<td style="padding:6px 8px;border-bottom:1px solid #eee">' + esc_(r.id) + (r.dni ? ' · DNI ' + esc_(String(r.dni)) : '') + '</td>' +
+    '<td style="padding:6px 8px;border-bottom:1px solid #eee">' + esc_(r.reasons.join(' · ')) + '</td>' +
+    '<td style="padding:6px 8px;border-bottom:1px solid #eee">' + esc_(r.loans || '') + '</td></tr>';
+  const inner =
+    '<h2 style="color:#b45309">🔺 Clientes de ALTO RIESGO — ' + hoy + '</h2>' +
+    '<p>' + flagged.length + ' cliente(s) marcados por historial de pago' +
+    (nuevos && nuevos.length ? ' · <b>' + nuevos.length + ' nuevo(s)</b>' : '') + '. Señal ADVISORIA (no bloquea).</p>' +
+    '<table style="border-collapse:collapse;width:100%;font-size:13px">' +
+    '<tr style="background:#fff7ed"><th align="left" style="padding:6px 8px">Cliente</th>' +
+    '<th align="left" style="padding:6px 8px">ID / DNI</th><th align="left" style="padding:6px 8px">Motivo</th>' +
+    '<th align="left" style="padding:6px 8px">Préstamos</th></tr>' + flagged.map(rowHtml).join('') + '</table>';
+  const plain = 'Clientes de alto riesgo (' + hoy + '): ' +
+    flagged.map(r => (r.name || r.id) + ' — ' + r.reasons.join('; ')).join(' | ');
+  sendBrandedEmail_(to, '🔺 Alto riesgo — ' + flagged.length + ' cliente(s) (' + hoy + ')', plain, inner);
+}
+
+/** Disparador diario (3am): marca el alto riesgo y envía el resumen. */
+function marcarAltoRiesgoDiario() {
+  return guard_('marcarAltoRiesgoDiario', function () { return marcarAltoRiesgo_(); });
+}
+
+/** Crea (si faltan) «Alto riesgo» (casilla) + «Motivo alto riesgo» + «Alto riesgo (actualizado)»
+ *  en «Clientes». Idempotente. */
+function ensureAltoRiesgoColumns_(ss) {
+  ss = ss || getSS_();
+  const cl = ss.getSheetByName(CFG.SHEETS.CLIENTS);
+  if (!cl) return 'sin hoja Clientes';
+  const c = clientesHeaderCol_(cl, 'Alto riesgo', true);
+  if (c) {
+    cl.getRange(2, c, CFG.MAX_ROWS, 1).insertCheckboxes();
+    cl.getRange(1, c).setNote('ALTO RIESGO (V-54). Lo gestiona el marcado diario (3am) según historial de pago y BCRA. Al solicitar, el cliente marcado se informa al prestamista y suma al recuento «⚠ Alertas». No bloquea. No editar a mano: el marcado diario lo recalcula.');
+  }
+  clientesHeaderCol_(cl, 'Motivo alto riesgo', true);
+  clientesHeaderCol_(cl, 'Alto riesgo (actualizado)', true);
+  if (typeof invalidateClientesHdrCache_ === 'function') invalidateClientesHdrCache_();
+  invalidateClientesRows_();
+  if (typeof invalidateClientesCache_ === 'function') invalidateClientesCache_();
+  return 'OK';
+}
+
+/** Punto de entrada manual (menú): instala columnas + disparador diario (3am) + corre una vez. */
+function instalarMarcadoAltoRiesgo() {
+  return guard_('instalarMarcadoAltoRiesgo', function () {
+    const ss = getSS_();
+    ensureAltoRiesgoColumns_(ss);
+    if (!String(getSetting_('Hora de marcado de alto riesgo') || '').trim()) setSetting_('Hora de marcado de alto riesgo', '3');
+    let hora = parseInt(String(getSetting_('Hora de marcado de alto riesgo') || '3'), 10);
+    if (!isFinite(hora) || hora < 0 || hora > 23) hora = 3;
+    ScriptApp.getProjectTriggers().forEach(t => { if (t.getHandlerFunction() === 'marcarAltoRiesgoDiario') ScriptApp.deleteTrigger(t); });
+    ScriptApp.newTrigger('marcarAltoRiesgoDiario').timeBased().everyDays(1).atHour(hora).create();
+    let res = '';
+    try { res = marcarAltoRiesgo_(); } catch (e) { logError_('instalarMarcadoAltoRiesgo:run', e); res = '(no se pudo correr ahora: ' + (e && e.message) + ')'; }
+    try { getSS_().toast('Marcado de ALTO RIESGO instalado (diario ~' + hora + ':00). ' + res, '🔺 Listo', 8); } catch (e) { }
+    return res;
+  });
 }
 
 /** Instala validaciones de datos (listas / casillas) consistentes con el catálogo. */
