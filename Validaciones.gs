@@ -1308,7 +1308,7 @@ function submitIntakeSmart(form) {
       const empresa = (typeof companyName_ === 'function') ? companyName_() : 'Impulso Crédito';
       const waMsg = 'Buenos días ' + holderName + '. ' + name + ' quiere solicitar un préstamo de ' + fmtMoney_(amount) +
         ' y pidió que el dinero se transfiera a tu cuenta. ¿Estás de acuerdo? Te avisamos que el contrato del préstamo se enviará al correo ' + holderEmailN + ' que nos indicaron. — ' + empresa;
-      if (waNum) holderWaUrl = 'https://wa.me/' + waNum + '?text=' + encodeURIComponent(waMsg);
+      if (waNum) holderWaUrl = 'https://web.whatsapp.com/send?phone=' + waNum + '&text=' + encodeURIComponent(waMsg);
     }
     if (!address) throw new Error('La dirección es obligatoria.');   // obligatoria para nuevos y existentes
     if (!amount) throw new Error('Ingresá un monto de préstamo válido.');
@@ -1604,7 +1604,7 @@ function submitIntakeSmart(form) {
           totalTxt: fmtMoney_(total),
           cuotasTxt: term === 90 ? '3 cuotas mensuales de aprox. ' + fmtMoney_(round2_(total / 3)) : 'pago único al vencimiento',
           moraDiaTxt: fmtMoney_(round2_(total * lateFeeRate_())),
-        }));
+        }), { cc: ccSolicitudesFirmas_() });
     } catch (e) { logError_('submitIntakeSmart:email', e); }
 
     // Aviso al prestamista con los datos de la solicitud.
@@ -4291,7 +4291,7 @@ function submitProspecto(form) {
       const recipients = noticeRecipients_();
       if (recipients.length) {
         const waNum = (typeof waNumberAR_ === 'function') ? waNumberAR_(phV.norm) : '';
-        const waContact = waNum ? 'https://wa.me/' + waNum : '';
+        const waContact = waNum ? 'https://web.whatsapp.com/send?phone=' + waNum : '';
         sendBrandedEmail_(recipients.join(','), 'Nuevo prospecto — ' + name,
           'Nuevo prospecto: ' + name + ' · CUIL ' + cuV.norm + ' · Tel ' + phV.norm + '.',
           '<p>Se registró un <b>nuevo prospecto</b> (interesado) desde el formulario público.</p>' +

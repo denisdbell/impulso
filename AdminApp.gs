@@ -572,7 +572,7 @@ function aprobarProspectoWeb_(sh, row) {
     '¡Buenas noticias! Ya tenemos cupo disponible y te invitamos a solicitar tu préstamo. 🎉' + nl +
     'Completá tu solicitud acá:' + nl + (url || '(falta configurar la URL de la app web en Configuración)') + nl +
     'Cualquier duda, respondé este mensaje. ¡Gracias por tu paciencia! 💛';
-  const waUrl = 'https://wa.me/' + num + '?text=' + encodeURIComponent(msg);
+  const waUrl = 'https://web.whatsapp.com/send?phone=' + num + '&text=' + encodeURIComponent(msg);
   if (waColC) sh.getRange(row, waColC).setFormula('=HYPERLINK("' + waUrl + '","📲 Enviar solicitud")');
   return { name: name, waUrl: waUrl };
 }

@@ -186,6 +186,7 @@ function onOpen() {
       .addItem('📅 Instalar alertas de feriado + recuento ⚠ (V-42 + badge)', 'instalarAlertasFeriado')
       .addItem('🧩 Instalar validaciones adicionales (V-43/44/46/47/49: columna + ajustes)', 'instalarValidacionesAdicionales')
       .addItem('🔺 Instalar marcado de ALTO RIESGO (diario 3am + V-54)', 'instalarMarcadoAltoRiesgo')
+      .addItem('✉ Configurar CC de solicitudes y firmas (correo en copia)', 'instalarCcSolicitudesFirmas')
       .addItem('➕ Crear hoja de Recordatorios de pago', 'createRemindersSheet_')
       .addItem('📄 Crear hoja de Estudio de Contratos', 'createAgreementSheet_')
       .addItem('📄 Crear/actualizar hoja de Estudio de Estados', 'createStatementsSheet_')
@@ -472,7 +473,42 @@ function sendBrandedEmail_(to, subject, plainBody, htmlInner, opts) {
   if (opts.attachments) o.attachments = opts.attachments;
   if (opts.from) o.from = opts.from;           // remitente (debe ser un alias verificado de la cuenta)
   if (opts.replyTo) o.replyTo = opts.replyTo;  // las respuestas van a esta dirección
+  if (opts.cc) o.cc = opts.cc;                 // copia (CC)
+  if (opts.bcc) o.bcc = opts.bcc;              // copia oculta (CCO)
   GmailApp.sendEmail(to, subject, plainBody, o);
+}
+/** Ajuste y valor por defecto del CC de los correos de SOLICITUD (acuse) y FIRMA (contrato firmado). */
+const CC_SOLICITUDES_FIRMAS_KEY = 'Correo CC de solicitudes y firmas';
+const CC_SOLICITUDES_FIRMAS_DEFAULT = 'xoanaberon69@gmail.com';
+/** CC fijo para los correos de solicitud y firma. Configurable en «Configuración»
+ *  («Correo CC de solicitudes y firmas», varias direcciones separadas por coma); por defecto
+ *  xoanaberon69@gmail.com. */
+function ccSolicitudesFirmas_() {
+  const v = getSetting_(CC_SOLICITUDES_FIRMAS_KEY);
+  return (v == null || String(v).trim() === '') ? CC_SOLICITUDES_FIRMAS_DEFAULT : String(v).trim();
+}
+/** Punto de entrada manual (menú): crea el ajuste «Correo CC de solicitudes y firmas» en
+ *  «Configuración» (con la dirección por defecto si está vacío) y le pone una nota. Sirve para
+ *  poner en copia (CC) los correos al APLICAR (acuse «Solicitud recibida») y al FIRMAR
+ *  («Contrato firmado»). Idempotente: no pisa un valor ya cargado. */
+function instalarCcSolicitudesFirmas() {
+  return guard_('instalarCcSolicitudesFirmas', function () {
+    const ss = getSS_();
+    if (!ss.getSheetByName(CFG.SHEETS.SETTINGS) && typeof setupSettings_ === 'function') setupSettings_(ss);
+    if (!String(getSetting_(CC_SOLICITUDES_FIRMAS_KEY) || '').trim())
+      setSetting_(CC_SOLICITUDES_FIRMAS_KEY, CC_SOLICITUDES_FIRMAS_DEFAULT);
+    const val = String(getSetting_(CC_SOLICITUDES_FIRMAS_KEY) || '').trim();
+    try {
+      const sh = ss.getSheetByName(CFG.SHEETS.SETTINGS), last = sh.getLastRow();
+      const col = sh.getRange(1, 1, last, 1).getValues();
+      for (let i = 0; i < col.length; i++) if (hkey_(col[i][0]) === hkey_(CC_SOLICITUDES_FIRMAS_KEY)) {
+        sh.getRange(i + 1, 2).setNote('Dirección(es) en copia (CC) de los correos al APLICAR (acuse «Solicitud recibida») y al FIRMAR («Contrato firmado»). Varias separadas por coma. Vacío = usa la dirección por defecto.');
+        break;
+      }
+    } catch (e) { logError_('instalarCcSolicitudesFirmas:note', e); }
+    try { getSS_().toast('CC de solicitudes y firmas: ' + (val || '(vacío)'), '✉ Configurado', 6); } catch (e) { }
+    return val;
+  });
 }
 /** Cabecera de marca para PDF y páginas web (data URI, o monograma CSS). */
 function brandHeaderHtml_() {
@@ -2102,7 +2138,7 @@ function aprobarProspecto_(sh, row) {
     '¡Buenas noticias! Ya tenemos cupo disponible y te invitamos a solicitar tu préstamo. 🎉' + nl +
     'Completá tu solicitud acá:' + nl + (url || '(falta configurar la URL de la app web en Configuración)') + nl +
     'Cualquier duda, respondé este mensaje. ¡Gracias por tu paciencia! 💛';
-  const waUrl = 'https://wa.me/' + num + '?text=' + encodeURIComponent(msg);
+  const waUrl = 'https://web.whatsapp.com/send?phone=' + num + '&text=' + encodeURIComponent(msg);
   if (waColC) sh.getRange(row, waColC).setFormula('=HYPERLINK("' + waUrl + '","📲 Enviar solicitud")');
   try { openWhatsAppDialog_(waUrl, firstName); } catch (e) { logError_('aprobarProspecto_:dialog', e); }
   try { getSS_().toast('Prospecto «' + (name || firstName) + '» aprobado. Se abrió WhatsApp (o tocá «WhatsApp 📲»).', '✅ Prospecto aprobado', 6); } catch (e) { }
@@ -3140,7 +3176,7 @@ function remWhatsappFormula_(loan, dueDate, amount, daysUntil, fin) {
       'Total a pagar hoy: ' + fmtMoney_(toClear) + nl +
       'Por favor regularizá tu pago. ' + empresa;
   }
-  return '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📲 WhatsApp")';
+  return '=HYPERLINK("https://web.whatsapp.com/send?phone=' + num + '&text=' + encodeURIComponent(msg) + '","📲 WhatsApp")';
 }
 
 /** Fórmula «=HYPERLINK» que abre WhatsApp al prestatario con el ENLACE al formulario de
@@ -3153,7 +3189,7 @@ function freezeFormWaFormula_(loan) {
   const url = base + '?page=congelar&loan=' + encodeURIComponent(loan.loanId) + (loan.token ? '&t=' + encodeURIComponent(loan.token) : '');
   const msg = 'Hola ' + name + ' 👋 Tu préstamo ' + loan.loanId + ' está vencido. Si no podés pagar ahora, ' +
     'podés pedir CONGELAR la mora (que deje de crecer) acá, con un plazo de hasta 2 semanas: ' + url + ' — ' + companyName_();
-  return '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📲 Congelar")';
+  return '=HYPERLINK("https://web.whatsapp.com/send?phone=' + num + '&text=' + encodeURIComponent(msg) + '","📲 Congelar")';
 }
 
 /** Fórmula «=HYPERLINK» que abre WhatsApp con el ENLACE al formulario de PLAN DE PAGO (?page=plan).
@@ -3166,7 +3202,7 @@ function planFormWaFormula_(loan) {
   const url = base + '?page=plan&loan=' + encodeURIComponent(loan.loanId) + (loan.token ? '&t=' + encodeURIComponent(loan.token) : '');
   const msg = 'Hola ' + name + ' 👋 Tu préstamo ' + loan.loanId + ' llegó al tope de mora. Podés pedir un ' +
     'PLAN DE PAGO (pago único, 4 o 6 cuotas) y frenar la mora acá: ' + url + ' — ' + companyName_();
-  return '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📋 Plan de pago")';
+  return '=HYPERLINK("https://web.whatsapp.com/send?phone=' + num + '&text=' + encodeURIComponent(msg) + '","📋 Plan de pago")';
 }
 
 /** Días de la semana en español (0=domingo) para los textos de fecha límite de cobranza. */
@@ -3410,7 +3446,7 @@ function paymentWaFormula_(loan, payDate, amount, status) {
   const s = status || loanWaStatus_(loan);
   const msg = paymentWaMsg_(loan, s, payDate, amount);
   const label = s.paidOff ? '📲 Avisar saldado' : '📲 Avisar pago';
-  return '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","' + label + '")';
+  return '=HYPERLINK("https://web.whatsapp.com/send?phone=' + num + '&text=' + encodeURIComponent(msg) + '","' + label + '")';
 }
 
 /** Encabezado de la casilla por fila que RE-GENERA el enlace "Avisar pago 📲" de esa fila en "Pagos". */
@@ -3485,7 +3521,7 @@ function refWaFormula_(refName, refPhone, refRel, applicantName) {
   const msg = '¡Hola ' + r + '! 👋 Te escribimos de ' + companyName_() + '. ' + who +
     ' te dio como referencia para pedir un préstamo' + (rel ? ' (vínculo: ' + rel + ')' : '') +
     '. ¿Lo/la conocés y nos confirmás que es una persona de confianza? ¡Gracias por tu ayuda! 🙌';
-  return '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📲 Preguntar")';
+  return '=HYPERLINK("https://web.whatsapp.com/send?phone=' + num + '&text=' + encodeURIComponent(msg) + '","📲 Preguntar")';
 }
 
 /** (Re)completa «Avisar Ref 1/2/3 📲» de TODA la hoja Nuevos Prestatarios con el enlace de WhatsApp a
@@ -4723,7 +4759,7 @@ function rebuildLateSheet_(ss) {
       todayStr: fmtDate_(today), loanDateStr: (loan.loanDate instanceof Date ? fmtDate_(loan.loanDate) : ''),
       feePctText: lateFeePctText_(), alias: cobAlias, contact: cobContact, sig1: cobSig1, sig2: cobSig2 });
     const cobWaNum = waNumberAR_(loan.phone);
-    const cobWa = cobWaNum ? ('=HYPERLINK("https://wa.me/' + cobWaNum + '?text=' + encodeURIComponent(cm.body) + '","📲 Cobranza")') : 'sin teléfono';
+    const cobWa = cobWaNum ? ('=HYPERLINK("https://web.whatsapp.com/send?phone=' + cobWaNum + '&text=' + encodeURIComponent(cm.body) + '","📲 Cobranza")') : 'sin teléfono';
     const cobMail = loan.email ? ('=HYPERLINK("mailto:' + encodeURIComponent(loan.email) + '?subject=' + encodeURIComponent(cm.subject) + '&body=' + encodeURIComponent(cm.body) + '","✉ Cobranza")') : 'sin correo';
     // Correo genérico de PLAN DE PAGO: abre GMAIL (no envía) con los pasos + el enlace del plan.
     const pm = planEmailMessage_(loan, planUrl, cobPlanPctInt);
@@ -6481,21 +6517,21 @@ function restaurarInteresFilaActiva() {
  * y el texto del mensaje son CONFIGURABLES (hoja "Configuración"). */
 
 const PROMO_HEADERS = ['ID Cliente', 'Nombre', 'Teléfono', 'Préstamos pagados', 'Días de anticipación (máx)',
-  'Premio', 'Invitar al sorteo 📲', 'Siguió + compartió IG', 'Captura recibida', 'Participa en el sorteo', 'Notas'];
-const PROMO_WA_DEFAULT = '¡Hola {nombre}! 🎉🎁\n\n' +
-  'En {empresa} premiamos a quienes pagan sus préstamos SIEMPRE en fecha… ¡como vos! 🏆👏\n\n' +
-  '🎊 Participás por {premio}.\n\n' +
-  '🗓️ El sorteo se realiza el {fecha}.\n\n' +
-  '¿Cómo participar? ¡Es muy fácil! 👇\n' +
-  '1️⃣ Seguinos en Instagram {instagram} 📲\n' +
-  '2️⃣ Compartí nuestra página en tu historia 📸\n' +
-  '3️⃣ Enviános las capturas por este chat como comprobante ✅\n\n' +
-  '¡Mucha suerte! 🍀💚 {empresa}';
+  'Premio', 'Invitar al sorteo \u{1F4F2}', 'Siguió + compartió IG', 'Captura recibida', 'Participa en el sorteo', 'Notas'];
+const PROMO_WA_DEFAULT = '¡Hola {nombre}! \u{1F389}\u{1F381}\n\n' +
+  'En {empresa} premiamos a quienes pagan sus préstamos SIEMPRE en fecha… ¡como vos! \u{1F3C6}\u{1F44F}\n\n' +
+  '\u{1F38A} Participás por {premio}.\n\n' +
+  '\u{1F5D3}\u{FE0F} El sorteo se realiza el {fecha}.\n\n' +
+  '¿Cómo participar? ¡Es muy fácil! \u{1F447}\n' +
+  '1\u{FE0F}\u{20E3} Seguinos en Instagram {instagram} \u{1F4F2}\n' +
+  '2\u{FE0F}\u{20E3} Compartí nuestra página en tu historia \u{1F4F8}\n' +
+  '3\u{FE0F}\u{20E3} Enviános las capturas por este chat como comprobante \u{2705}\n\n' +
+  '¡Mucha suerte! \u{1F340}\u{1F49A} {empresa}';
 // Plantillas ANTIGUAS autogeneradas (sin {premio}): si la guardada en «Configuración» coincide con
 // alguna de estas, se considera "sin personalizar" y se actualiza a PROMO_WA_DEFAULT (ver
 // promoMessageTemplate_). NO se pisa un mensaje realmente editado por el prestamista.
 const PROMO_WA_OLD_DEFAULTS = [
-  '¡Hola {nombre}! 🎉 En {empresa} premiamos a quienes pagaron su préstamo en tiempo y forma. Participá de nuestro SORTEO del {fecha}. Para entrar: 1) Seguí nuestro Instagram {instagram}. 2) Compartí nuestra página en tu historia. 3) Envianos las capturas por este chat como comprobante. ¡Mucha suerte! 🍀',
+  '¡Hola {nombre}! \u{1F389} En {empresa} premiamos a quienes pagaron su préstamo en tiempo y forma. Participá de nuestro SORTEO del {fecha}. Para entrar: 1) Seguí nuestro Instagram {instagram}. 2) Compartí nuestra página en tu historia. 3) Envianos las capturas por este chat como comprobante. ¡Mucha suerte! \u{1F340}',
 ];
 
 /** Fecha del sorteo (Configuración "Fecha del sorteo (promoción)"). Acepta AAAA-MM-DD, DD/MM/AAAA o
@@ -6515,7 +6551,11 @@ function promoInstagram_() { return String(getSetting_('Instagram de la empresa 
  *  "pisa" la nueva, pero se respeta cualquier texto realmente personalizado por el prestamista. */
 function promoMessageTemplate_() {
   const cur = String(getSetting_('Mensaje de WhatsApp de la promoción') || '').trim();
-  return (!cur || PROMO_WA_OLD_DEFAULTS.indexOf(cur) >= 0) ? PROMO_WA_DEFAULT : cur;
+  // Auto-reparación: una plantilla vacía, una versión antigua autogenerada, o una con emojis
+  // CORRUPTOS (carácter de reemplazo «�» U+FFFD, de un guardado con codificación rota) se descarta
+  // y se usa la limpia PROMO_WA_DEFAULT. Solo se respeta un texto realmente personalizado y sano.
+  if (!cur || cur.indexOf('�') >= 0 || PROMO_WA_OLD_DEFAULTS.indexOf(cur) >= 0) return PROMO_WA_DEFAULT;
+  return cur;
 }
 /** Mensaje de WhatsApp de la promoción, con los marcadores {nombre}/{empresa}/{instagram}/{fecha}/{premio}
  *  resueltos. `premio` es la frase del premio de ESE cliente (ver promoPrizeInfo_). */
@@ -6523,12 +6563,12 @@ function promoWaMessage_(name, premio) {
   let tpl = promoMessageTemplate_();
   // Compatibilidad: si una plantilla personalizada NO incluye {premio}, se agrega al final para que
   // el premio (préstamo sin interés / condonación de interés) SIEMPRE aparezca.
-  if (tpl.indexOf('{premio}') < 0 && String(premio || '').trim()) tpl += '\n\n🎁 Tu premio: {premio}.';
+  if (tpl.indexOf('{premio}') < 0 && String(premio || '').trim()) tpl += '\n\n\u{1F381} Tu premio: {premio}.';
   return tpl.replace(/\{nombre\}/g, String(name || '').trim() || 'cliente')
     .replace(/\{empresa\}/g, companyName_())
     .replace(/\{instagram\}/g, promoInstagram_() || 'nuestro Instagram')
     .replace(/\{fecha\}/g, fmtDate_(promoRaffleDate_()))
-    .replace(/\{premio\}/g, String(premio || '').trim() || 'un premio especial 🎁');
+    .replace(/\{premio\}/g, String(premio || '').trim() || 'un premio especial \u{1F381}');
 }
 /**
  * Premio que le corresponde a un cliente de la promoción:
@@ -6539,14 +6579,14 @@ function promoWaMessage_(name, premio) {
 function promoPrizeInfo_(hasActive, lvl) {
   if (hasActive) return {
     sheet: 'Condonación de interés (préstamo actual)',
-    wa: 'la CONDONACIÓN TOTAL del interés de tu préstamo actual 🤑 (¡pagás SOLO el capital! 💰)',
+    wa: 'la CONDONACIÓN TOTAL del interés de tu préstamo actual \u{1F911} (¡pagás SOLO el capital! \u{1F4B0})',
   };
   // Si no se pudo calcular el nivel, cae al "Límite inicial" configurado (nunca $0).
   const fallback = (typeof settingMoney_ === 'function') ? settingMoney_('Límite inicial (préstamo nuevo)', 150000) : 150000;
   const monto = fmtMoney_((lvl && lvl.max) || fallback), nivel = (lvl && lvl.level) || 'tu nivel';
   return {
     sheet: 'Préstamo SIN interés hasta ' + monto + ' (' + nivel + ')',
-    wa: 'un PRÉSTAMO SIN INTERÉS 🤑 de hasta ' + monto + ' 💵 (' + nivel + ' 🏆)',
+    wa: 'un PRÉSTAMO SIN INTERÉS \u{1F911} de hasta ' + monto + ' \u{1F4B5} (' + nivel + ' \u{1F3C6})',
   };
 }
 /**
@@ -6720,7 +6760,7 @@ function buildPromo_(silent) {
         const num = waNumberAR_(c.phone), cell = sh.getRange(i + 2, 7);
         if (num) {
           const msg = promoWaMessage_(c.name, prize.wa);
-          cell.setFormula('=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📲 Invitar")');
+          cell.setFormula('=HYPERLINK("https://web.whatsapp.com/send?phone=' + num + '&text=' + encodeURIComponent(msg) + '","📲 Invitar")');
           try { cell.setNote(msg); } catch (e) { }   // el mensaje COMPLETO queda visible al pasar el mouse
         } else { cell.setValue('(sin teléfono válido)'); try { cell.clearNote(); } catch (e) { } }
       });
@@ -7333,7 +7373,7 @@ function submitIntake(form) {
       sendBrandedEmail_(email, 'Solicitud recibida',
         'Estimado/a ' + name + ', recibimos su solicitud de préstamo por ' + fmtMoney_(amount) + '. La revisaremos y nos pondremos en contacto.',
         // Formulario clásico (legado, plazos en meses): solo monto + plazo, sin recomputar tasas.
-        acuseSolicitudHtml_({ nombre: name, montoTxt: fmtMoney_(amount), plazoTxt: termLabel_(term) }));
+        acuseSolicitudHtml_({ nombre: name, montoTxt: fmtMoney_(amount), plazoTxt: termLabel_(term) }), { cc: ccSolicitudesFirmas_() });
     } catch (e) { logError_('submitIntake:email', e); }
     // Aviso al prestamista (Correo del Prestamista) con los datos de la nueva solicitud.
     try {
@@ -7948,7 +7988,7 @@ function approveFreezeRequest_(sh, row) {
     const msg = 'Hola ' + (loan.name || 'cliente') + ' 👋 Aprobamos tu congelamiento del préstamo ' + loanId +
       '. El ' + amt.pctInt + '% requerido ya está cubierto. Resta pagar el saldo (' + fmtMoney_(amt.remaining) + ') antes del ' + fechaTxt +
       '. Para que tenga efecto, firmá el nuevo contrato acá: ' + url + ' — ' + companyName_();
-    setf('WhatsApp', '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📲 Avisar aprobación")');
+    setf('WhatsApp', '=HYPERLINK("https://web.whatsapp.com/send?phone=' + num + '&text=' + encodeURIComponent(msg) + '","📲 Avisar aprobación")');
   }
   const lender = getSetting_('Correo del Prestamista');
   const btn = url ? '<p><a href="' + url + '" style="background:#0b5394;color:#fff;padding:10px 16px;border-radius:6px;text-decoration:none;font-weight:bold">✍ Firmar el congelamiento</a></p>' : '';
@@ -7989,7 +8029,7 @@ function denyFreezeRequest_(sh, row) {
   if (num) {
     const msg = 'Hola ' + (name || 'cliente') + ' 👋 Revisamos tu pedido de congelamiento del préstamo ' + loanId +
       ' y, por ahora, no podemos aprobarlo. Motivo: ' + reason + '. — ' + companyName_();
-    setf('WhatsApp', '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📲 Avisar rechazo")');
+    setf('WhatsApp', '=HYPERLINK("https://web.whatsapp.com/send?phone=' + num + '&text=' + encodeURIComponent(msg) + '","📲 Avisar rechazo")');
   }
   const lender = getSetting_('Correo del Prestamista');
   try {
@@ -8049,7 +8089,7 @@ function approvePlanRequest_(sh, row) {
   if (num && url) {
     const msg = 'Hola ' + (loan.name || 'cliente') + ' 👋 Aprobamos tu plan de pago (' + optTxt + ') del préstamo ' + loanId +
       '. ' + downTxt + ' Firmá el Acuerdo acá: ' + url + ' — ' + companyName_();
-    setf('WhatsApp', '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📲 Avisar aprobación")');
+    setf('WhatsApp', '=HYPERLINK("https://web.whatsapp.com/send?phone=' + num + '&text=' + encodeURIComponent(msg) + '","📲 Avisar aprobación")');
   }
   const lender = getSetting_('Correo del Prestamista');
   const btn = url ? '<p><a href="' + url + '" style="background:#674ea7;color:#fff;padding:10px 16px;border-radius:6px;text-decoration:none;font-weight:bold">✍ Firmar el Acuerdo</a></p>' : '';
@@ -8084,7 +8124,7 @@ function denyPlanRequest_(sh, row) {
   if (num) {
     const msg = 'Hola ' + (name || 'cliente') + ' 👋 Revisamos tu pedido de plan de pago del préstamo ' + loanId +
       ' y, por ahora, no podemos aprobarlo. Motivo: ' + reason + '. — ' + companyName_();
-    setf('WhatsApp', '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📲 Avisar rechazo")');
+    setf('WhatsApp', '=HYPERLINK("https://web.whatsapp.com/send?phone=' + num + '&text=' + encodeURIComponent(msg) + '","📲 Avisar rechazo")');
   }
   const lender = getSetting_('Correo del Prestamista');
   try {
@@ -8610,7 +8650,7 @@ function emailSignedContract_(loan, file) {
   if (loan.email) {
     sendBrandedEmail_(loan.email, 'Contrato firmado — ' + loan.loanId,
       'Estimado/a ' + loan.name + ', adjuntamos su contrato de préstamo ' + loan.loanId + ' ya firmado. ' + planTxt + '.',
-      contratoFirmadoClienteHtml_(d), { attachments: [pdf] });
+      contratoFirmadoClienteHtml_(d), { attachments: [pdf], cc: ccSolicitudesFirmas_() });
   }
   const rec = noticeRecipients_();
   if (rec.length) {
@@ -9604,9 +9644,12 @@ function sendWhatsAppTemplate_(toDigits, templateName, langCode, bodyParams) {
   };
   const opts = {
     method: 'post',
-    contentType: 'application/json',
+    contentType: 'application/json; charset=UTF-8',
     headers: { Authorization: 'Bearer ' + wa.token },
-    payload: JSON.stringify(payload),
+    // Los emojis (caracteres de 4 bytes) se corrompen a «�» si el payload va como String:
+    // UrlFetchApp lo serializa con una codificación que rompe el plano astral. Enviarlo como
+    // BYTES UTF-8 (Utilities.newBlob) los preserva.
+    payload: Utilities.newBlob(JSON.stringify(payload), 'application/json').getBytes(),
     muteHttpExceptions: true
   };
   let res = UrlFetchApp.fetch(url, opts);
@@ -10515,7 +10558,7 @@ function cobranzaWaUrl_(loanId, nombre) {
   if (!num) return '';
   let msg = String(getSetting_('Mensaje de WhatsApp de cobranza') || '').trim() || 'Hola, quiero coordinar un plan de pago de mi préstamo {loan}.';
   msg = msg.replace(/\{loan\}/g, loanId || '').replace(/\{nombre\}/g, nombre || '');
-  return 'https://wa.me/' + num + '?text=' + encodeURIComponent(msg);
+  return 'https://web.whatsapp.com/send?phone=' + num + '&text=' + encodeURIComponent(msg);
 }
 /** Enlace tel: de cobranza (mismo número normalizado). '' si no hay número. */
 function cobranzaTelUrl_() {
@@ -11343,7 +11386,7 @@ function bienvenidaHtml_(nombre) {
     '</td></tr></table>';
   const waNum = (typeof waNumberAR_ === 'function') ? waNumberAR_(cobranzaTel_()) : '';
   const waMsg = 'Hola, soy ' + nice + '. Acabo de tomar mi primer préstamo con ' + company + ' y quería saludar.';
-  const waUrl = waNum ? ('https://wa.me/' + waNum + '?text=' + encodeURIComponent(waMsg)) : '';
+  const waUrl = waNum ? ('https://web.whatsapp.com/send?phone=' + waNum + '&text=' + encodeURIComponent(waMsg)) : '';
   const cta = waUrl ? '<table role="presentation" border="0" cellspacing="0" cellpadding="0" style="margin:20px 0 4px"><tr>' +
     '<td align="center" bgcolor="#25D366" style="border-radius:8px">' +
     '<a href="' + esc_(waUrl) + '" target="_blank" style="display:inline-block;padding:12px 22px;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;color:#ffffff;text-decoration:none;border-radius:8px">💬 Escribinos por WhatsApp</a>' +
