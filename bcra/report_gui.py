@@ -26,11 +26,16 @@ with fetch_impulso.py, or File ▸ Open workbook…).
 """
 
 import datetime
+import json
 import math
 import queue
 import re
+import socket
+import ssl
 import threading
 import traceback
+import urllib.error
+import urllib.request
 import webbrowser
 from pathlib import Path
 
@@ -109,6 +114,76 @@ def rating_letter(rating):
 
 def money(x):
     return analyze_impulso.money(x)
+
+
+def _usable_iploc(s):
+    """True when an «Ubicación (IP)» value is a real place, not a 'N/D'-style
+    placeholder (the form writes 'N/D' when IP geolocation wasn't captured)."""
+    t = (s or "").strip()
+    return bool(t) and t.upper() not in ("N/D", "ND", "S/D", "N/A", "-", "—")
+
+
+_GPS_RE = re.compile(r"^\s*(-?\d{1,3}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)\s*$")
+
+
+def _gps_latlon(s):
+    """(lat, lon) floats from a 'lat,long' «GPS» value, or None (skips
+    'GPS: no disponible' / 'no consentida' placeholders)."""
+    m = _GPS_RE.match(s or "")
+    return (float(m.group(1)), float(m.group(2))) if m else None
+
+
+_GEOCODE_CACHE = {}
+_GEOCODE_UA = "impulso-credit-dashboard/1.0 (contacto: denisdbell@gmail.com)"
+
+
+def _nominatim_area(data):
+    """Compact 'neighbourhood, city, state, country' area name from a Nominatim
+    reverse-geocode result; falls back to its display_name."""
+    a = (data or {}).get("address") or {}
+
+    def pick(*keys):
+        for k in keys:
+            if a.get(k):
+                return str(a[k]).strip()
+        return ""
+    parts = [pick("neighbourhood", "suburb", "quarter", "city_district", "residential", "hamlet"),
+             pick("city", "town", "village", "municipality", "county"),
+             pick("state", "province", "region"),
+             pick("country")]
+    seen, out = set(), []
+    for p in parts:
+        if p and p.lower() not in seen:
+            seen.add(p.lower())
+            out.append(p)
+    return ", ".join(out) or str((data or {}).get("display_name", "")).strip()
+
+
+def reverse_geocode(lat, lon, insecure=False, timeout=6):
+    """Area name for a GPS fix via OpenStreetMap Nominatim (stdlib urllib, no key,
+    no extra deps). Returns 'Barrio, City, State, Country'-style text, or '' on any
+    failure. Cached per ~1 m (5 decimals) so repeated opens don't re-hit the API."""
+    key = (round(lat, 5), round(lon, 5))
+    if key in _GEOCODE_CACHE:
+        return _GEOCODE_CACHE[key]
+    area = ""
+    try:
+        ctx = ssl.create_default_context()
+        if insecure:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        url = ("https://nominatim.openstreetmap.org/reverse?format=jsonv2"
+               "&lat=%f&lon=%f&zoom=16&accept-language=es" % (lat, lon))
+        req = urllib.request.Request(
+            url, headers={"User-Agent": _GEOCODE_UA, "Accept": "application/json"})
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+        with opener.open(req, timeout=timeout) as resp:
+            area = _nominatim_area(json.loads(resp.read().decode("utf-8", "replace")))
+    except (urllib.error.URLError, ssl.SSLError, socket.timeout,
+            TimeoutError, ValueError, OSError):
+        area = ""
+    _GEOCODE_CACHE[key] = area
+    return area
 
 
 # --------------------------------------------------------------------------- #
@@ -333,6 +408,71 @@ class DataService:
             })
         return out
 
+    def latest_device(self, cuil="", dni="", kind="any"):
+        """Newest «Dispositivos» row for this person — the log is already sorted
+        newest-first, so the first match is the latest submission. Matches by DNI,
+        then by token (CUIL-or-DNI). `kind` filters what counts:
+          'any' — newest match; 'gps' — newest with a real GPS fix;
+          'ip'  — newest with a usable (non-'N/D') IP geolocation.
+        Returns the row dict (ip/iploc/gps/when) or None."""
+        cuil, dni = (cuil or "").strip(), (dni or "").strip()
+        for e in (self.devices or {}).get("log", []):
+            tok = (e.get("token") or "").strip()
+            if not ((dni and e.get("dni") == dni) or (tok and (tok == cuil or tok == dni))):
+                continue
+            if kind == "gps" and not _gps_latlon(e.get("gps")):
+                continue
+            if kind == "ip" and not _usable_iploc(e.get("iploc")):
+                continue
+            return e
+        return None
+
+    def resolve_location(self, cuil="", dni="", fetch=False, insecure=False):
+        """Best human-readable area for a person, from «Dispositivos»: PREFER a real
+        GPS fix (reverse-geocoded to an area name when fetch is on), and FALL BACK to
+        the IP geolocation when GPS isn't available. Returns a dict for the card /
+        dossier — {source, area, coords, mismatch, ip, when, loan, isp, note} — or
+        None when the person has no located submission."""
+        gps_dev = self.latest_device(cuil, dni, kind="gps")
+        ip_dev = self.latest_device(cuil, dni, kind="ip")
+
+        # IP area name (ISP split off, "revisar vs domicilio" review note stripped).
+        ip_area = isp = ""
+        mismatch = False
+        if ip_dev:
+            iploc = (ip_dev.get("iploc") or "").strip()
+            mismatch = "revisar" in iploc.lower()
+            cleaned = re.sub(r"^.*?revisar vs domicilio\)\s*", "", iploc, flags=re.I).strip() if mismatch else iploc
+            if _usable_iploc(iploc):
+                bits = cleaned.split(" · ", 1)
+                ip_area = bits[0].strip()
+                isp = bits[1].strip() if len(bits) > 1 else ""
+
+        def out(source, area, dev, **extra):
+            dev = dev or {}
+            d = {"source": source, "area": area, "mismatch": False, "coords": "",
+                 "ip": dev.get("ip") or "", "when": dev.get("when") or "",
+                 "loan": dev.get("loan") or "", "isp": "", "note": ""}
+            d.update(extra)
+            return d
+
+        if gps_dev:
+            lat, lon = _gps_latlon(gps_dev.get("gps"))
+            coords = "%.5f, %.5f" % (lat, lon)
+            area = reverse_geocode(lat, lon, insecure=insecure) if fetch else ""
+            if area:  # GPS reverse-geocoded to an area name — the precise, preferred answer
+                return out("GPS", area, gps_dev, coords=coords)
+            if ip_area:  # GPS fix present but no name resolved → use the IP area (still a name)
+                return out("IP", ip_area, ip_dev, mismatch=mismatch, coords=coords, isp=isp,
+                           note="GPS fix %s captured; area name unresolved%s." % (
+                               coords, "" if fetch else " (enable Fetch to look it up)"))
+            return out("GPS", coords, gps_dev, coords=coords,
+                       note=("Enable Fetch to resolve the area name from these coordinates."
+                             if not fetch else "Area name could not be resolved for these coordinates."))
+        if ip_area:
+            return out("IP", ip_area, ip_dev, mismatch=mismatch, isp=isp)
+        return None
+
     # ---- repayment likelihood ----
     def likelihood_rows(self):
         lk = self.likelihood or {}
@@ -498,8 +638,13 @@ class DataService:
                                   a_imp["client_id"] if a_imp else "")
         rules = analyze_rules.find_person(self.rules, cuil, a_imp["dni"] if a_imp else "",
                                           a_imp["client_id"] if a_imp else "")
+        # Location: prefer a GPS fix (reverse-geocoded to an area name), fall back to
+        # the IP geolocation. `device` keeps the newest submission for IP/when context.
+        dni = (a_imp["dni"] if a_imp and a_imp.get("dni") else "") or (digits if 7 <= len(digits) <= 8 else "")
+        location = self.resolve_location(cuil, dni, fetch=fetch, insecure=insecure)
+        device = self.latest_device(cuil, dni)
         return {"token": token, "name": name, "cuil": cuil,
-                "a_bcra": a_bcra, "bcra_rank": bcra_rank,
+                "a_bcra": a_bcra, "bcra_rank": bcra_rank, "device": device, "location": location,
                 "a_imp": a_imp, "imp_rank": imp_rank, "rec": rec, "lk": lk, "rules": rules}
 
 
@@ -1747,8 +1892,9 @@ class App(tk.Tk):
         self._section_impulso(body, a_imp, payload["imp_rank"])
         # BCRA section
         self._section_bcra(body, a_bcra, payload["bcra_rank"])
-        # Fraud signals + DNI verification
+        # Fraud signals + address-by-IP + DNI verification
         self._section_fraud(body, payload)
+        self._section_address(body, payload)
         self._section_dni(body, payload)
         self.set_status("Showing %s%s" % (payload["name"], "  ·  CUIL " + payload["cuil"] if payload["cuil"] else ""))
 
@@ -1834,6 +1980,55 @@ class App(tk.Tk):
                              wraplength=700, justify="left").pack(anchor="w", padx=(52, 16))
         tk.Label(c, text="Indicative — review manually; the blocking itself happens in Apps Script.",
                  bg=SURFACE, fg=MUTED, font=f["hint"]).pack(anchor="w", padx=16, pady=(6, 14))
+
+    def _section_address(self, body, payload):
+        """One card: the person's area — from a GPS fix (reverse-geocoded to a place
+        name) when available, otherwise from the IP geolocation — of their latest
+        «Dispositivos» submission."""
+        f = self.fonts
+        c = self._card_frame(body, "📍  Location / area")
+        loc = payload.get("location")
+        if not loc:
+            tk.Label(c, text="No located «Dispositivos» submission on record for this person "
+                             "(no GPS fix and no IP geolocation).",
+                     bg=SURFACE, fg=MUTED, font=f["base"]).pack(anchor="w", padx=16, pady=(0, 14))
+            return
+        # area name (headline)
+        tk.Label(c, text=loc["area"] or "(location unavailable)", bg=SURFACE,
+                 fg=INK if loc["area"] else MUTED, font=f["bold"], anchor="w",
+                 wraplength=760, justify="left").pack(anchor="w", padx=16, pady=(0, 2))
+        # source + capture context
+        src = {"GPS": "GPS (device, precise)", "IP": "IP geolocation (approx.)"}.get(loc["source"], loc["source"])
+        meta = "Source: %s   ·   captured %s" % (src, loc.get("when") or "—")
+        if loc.get("ip"):
+            meta += "   ·   IP %s" % loc["ip"]
+        if loc.get("loan"):
+            meta += "   ·   loan %s" % loc["loan"]
+        tk.Label(c, text=meta, bg=SURFACE, fg=MUTED, font=f["small"], anchor="w").pack(anchor="w", padx=16)
+        if loc.get("isp"):
+            tk.Label(c, text="ISP: %s" % loc["isp"], bg=SURFACE, fg=MUTED, font=f["small"],
+                     anchor="w").pack(anchor="w", padx=16)
+        # coordinates + map link (whenever we have a GPS fix)
+        if loc.get("coords"):
+            line = tk.Frame(c, bg=SURFACE)
+            line.pack(fill="x", padx=16, pady=(2, 0))
+            tk.Label(line, text="GPS: %s" % loc["coords"], bg=SURFACE, fg=MUTED,
+                     font=f["small"], anchor="w").pack(side="left")
+            url = "https://www.google.com/maps?q=" + loc["coords"].replace(" ", "")
+            link = tk.Label(line, text="  (open map)", bg=SURFACE, fg="#2563eb",
+                            font=f["small"], anchor="w", cursor="hand2")
+            link.pack(side="left")
+            link.bind("<Button-1>", lambda _e, u=url: webbrowser.open(u))
+        if loc.get("mismatch"):
+            tk.Label(c, text="⚠ IP location differs from the declared address — review.",
+                     bg=SURFACE, fg=DECISION_COLOR["REVIEW"], font=f["base"],
+                     anchor="w").pack(anchor="w", padx=16, pady=(4, 0))
+        if loc.get("note"):
+            tk.Label(c, text=loc["note"], bg=SURFACE, fg=MUTED, font=f["small"], anchor="w",
+                     wraplength=760, justify="left").pack(anchor="w", padx=16, pady=(2, 0))
+        tk.Label(c, text="GPS is the device's own fix; IP geolocation is approximate (city / ISP "
+                         "level) and can be masked by VPN or NAT.", bg=SURFACE, fg=MUTED,
+                 font=f["hint"], anchor="w", wraplength=760, justify="left").pack(anchor="w", padx=16, pady=(4, 14))
 
     def _section_dni(self, body, payload):
         f = self.fonts
@@ -2263,6 +2458,21 @@ class App(tk.Tk):
         if p.get("lk"):
             parts += ["", "---", "", analyze_likelihood.render_person_md(p["lk"]), "",
                       "_%s_" % analyze_likelihood.quality_line(self.data.likelihood)]
+        loc = p.get("location")
+        if loc:
+            src = {"GPS": "GPS (device, precise)", "IP": "IP geolocation (approx.)"}.get(loc["source"], loc["source"])
+            parts += ["", "---", "", "## Location / area (latest device)", "",
+                      "- **Area:** %s" % (loc["area"] or "—"),
+                      "- **Source:** %s" % src,
+                      "- **Captured:** %s" % (loc.get("when") or "—")]
+            if loc.get("ip"):
+                parts.append("- **IP:** %s" % loc["ip"])
+            if loc.get("isp"):
+                parts.append("- **ISP:** %s" % loc["isp"])
+            if loc.get("coords"):
+                parts.append("- **GPS:** %s" % loc["coords"])
+            if loc.get("mismatch"):
+                parts.append("- **⚠ IP location differs from the declared address.**")
         stem = p["cuil"] or (p["a_imp"]["dni"] if p["a_imp"] else "") or "person"
         path = filedialog.asksaveasfilename(title="Export dossier", defaultextension=".md",
                                             initialfile="%s.full.report.md" % stem)
