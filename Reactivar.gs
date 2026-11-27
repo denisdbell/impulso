@@ -54,6 +54,10 @@ function hkey_(s) {
 // leer un mapa obsoleto. El mapa es de solo lectura para quien lo consume.
 const _headerIndexCache = {};
 function invalidateHeaderIndexCache_() { for (const k in _headerIndexCache) delete _headerIndexCache[k]; }
+// Suprime el pop-up de WhatsApp de aprobación durante el procesamiento POR LOTE (menú «Procesar
+// nuevos»): ahí sí hay UI, pero no queremos un diálogo por préstamo. El enlace «Firmar 📲» de la
+// fila se escribe igual. En la aprobación individual (tilde «Verificado?») el pop-up sí aparece.
+var _approveWaSuppressDialog = false;
 function headerIndex_(sh) {
   const name = sh.getName(), last = sh.getLastColumn();
   const cached = _headerIndexCache[name];
@@ -970,17 +974,21 @@ function procesarNuevosPrestatarios() {
     const out = { aprobados: [], rechazados: [], rebotados: [] };
 
     // De abajo hacia arriba: borrar/insertar filas no corre los índices pendientes.
-    for (let row = last; row >= 2; row--) {
-      const idCell = String(sh.getRange(row, m['Nombre completo'] || 2).getValue()).trim();
-      const verOn = verCol && sh.getRange(row, verCol).getValue() === true;
-      const rejOn = rejCol && sh.getRange(row, rejCol).getValue() === true;
-      if (!verOn && !rejOn) continue;
-      if (rejOn) { rejectApplicant_(sh, row); out.rechazados.push(idCell); continue; }
-      const override = ovrCol ? (sh.getRange(row, ovrCol).getValue() === true) : false;
-      const res = approveApplicantV2_(ss, bs, sh, row, m, override);
-      if (res.ok) out.aprobados.push(res.loanId + ' ' + res.name);
-      else out.rebotados.push((idCell || 'fila ' + row) + ': ' + res.msg);
-    }
+    // Por LOTE: sin pop-up de WhatsApp por préstamo (el enlace «Firmar 📲» queda en la fila igual).
+    _approveWaSuppressDialog = true;
+    try {
+      for (let row = last; row >= 2; row--) {
+        const idCell = String(sh.getRange(row, m['Nombre completo'] || 2).getValue()).trim();
+        const verOn = verCol && sh.getRange(row, verCol).getValue() === true;
+        const rejOn = rejCol && sh.getRange(row, rejCol).getValue() === true;
+        if (!verOn && !rejOn) continue;
+        if (rejOn) { rejectApplicant_(sh, row); out.rechazados.push(idCell); continue; }
+        const override = ovrCol ? (sh.getRange(row, ovrCol).getValue() === true) : false;
+        const res = approveApplicantV2_(ss, bs, sh, row, m, override);
+        if (res.ok) out.aprobados.push(res.loanId + ' ' + res.name);
+        else out.rebotados.push((idCell || 'fila ' + row) + ': ' + res.msg);
+      }
+    } finally { _approveWaSuppressDialog = false; }
 
     // Si se aprobó algo, reinstala fórmulas/formatos sobre el bloque ampliado.
     if (out.aprobados.length) { try { reactivateBorrowers_(ss); } catch (e) { logError_('procesarNuevos:reactivar', e); } }
@@ -1308,6 +1316,22 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
       try { ss.toast('Préstamo ' + loanId + ' aprobado, pero NO se pudo enviar el correo de firma. Revisá la hoja "Errores" o reenvialo.', '⚠ Correo no enviado', 8); } catch (e2) { }
     }
   }
+
+  // WhatsApp de APROBACIÓN (tap-to-send): enlace de firma + pasos simples + aviso de que el dinero se
+  // acredita SOLO DESPUÉS de firmar. Deja un enlace «Firmar 📲» en la fila (sirve para lotes/web sin UI)
+  // e intenta abrir el pop-up de WhatsApp (como la aprobación de prospectos). Nunca aborta la aprobación.
+  try {
+    const firmaLink = (typeof signingLink_ === 'function') ? signingLink_(loanId) : '';
+    const waUrl = approveWaUrl_(phone, name, loanId, firmaLink);
+    try {
+      const firmarCol = ensureHeaderColumn_(bs, 'Firmar 📲', '#1c4587');
+      if (firmarCol) {
+        if (waUrl) bs.getRange(tRow, firmarCol).setFormula('=HYPERLINK("' + waUrl + '","📲 Firmar")');
+        else bs.getRange(tRow, firmarCol).setValue('sin teléfono');
+      }
+    } catch (e) { logError_('approveApplicantV2_:firmarCol', e); }
+    if (waUrl && !_approveWaSuppressDialog) { try { openWhatsAppDialog_(waUrl, String(name || '').split(/\s+/)[0] || name); } catch (e) { logError_('approveApplicantV2_:waDialog', e); } }
+  } catch (e) { logError_('approveApplicantV2_:wa', e); }
 
   // V-41 (ADVIERTE) — alerta de fraude por conexión, re-evaluada al aprobar (las referencias y el
   // estado «Fraude» pueden cambiar tras el envío). Warn-only: nunca bloquea ni pasa por fail().

@@ -1051,6 +1051,8 @@ function setupSettings_(ss) {
     ['Fecha del sorteo (promoción)', '2026-12-20'],
     ['Instagram de la empresa (@usuario)', ''],
     ['Mensaje de WhatsApp de la promoción', PROMO_WA_DEFAULT],
+    ['Mensaje de WhatsApp de aprobación', APPROVE_WA_DEFAULT],
+    ['WhatsApp — Plantilla de contrato firmado', 'contrato_firmado'],
     ['Límite inicial (préstamo nuevo)', '150000'],
     ['Incremento de graduación', '50000'],
     ['Límite máximo por historial (graduación)', '500000'],
@@ -3458,7 +3460,7 @@ function paymentWaFormula_(loan, payDate, amount, status) {
   const s = status || loanWaStatus_(loan);
   const msg = paymentWaMsg_(loan, s, payDate, amount);
   const label = s.paidOff ? '📲 Avisar saldado' : '📲 Avisar pago';
-  return '=HYPERLINK("https://web.whatsapp.com/send?phone=' + num + '&text=' + encodeURIComponent(msg) + '","' + label + '")';
+  return '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","' + label + '")';
 }
 
 /** Encabezado de la casilla por fila que RE-GENERA el enlace "Avisar pago 📲" de esa fila en "Pagos". */
@@ -4861,6 +4863,22 @@ function loanSchedule_(loan) {
     });
   }
   return out;
+}
+/** Parámetros {{1}}…{{6}} de la plantilla de WhatsApp "contrato firmado" (Cloud API). Cada uno en UNA
+ *  línea (Meta rechaza saltos/tabs; sendWhatsAppTemplate_ igual los sanea). Orden: nombre · n.º préstamo ·
+ *  modalidad de pago · total a devolver · fecha de pago · recargo por mora diario. */
+function signedWaParams_(loan) {
+  const sched = loanSchedule_(loan);
+  const total = round2_(Number(loan.totalDue) || 0);
+  const nombre = (typeof titleCaseName_ === 'function') ? (titleCaseName_(loan.name) || 'cliente') : (String(loan.name || '').trim() || 'cliente');
+  return [
+    nombre,
+    String(loan.loanId || ''),
+    sched ? (sched.length + ' cuotas mensuales de aprox. ' + fmtMoney_(sched[0].amount)) : '1 pago',
+    fmtMoney_(total),
+    sched ? fmtDate_(sched[sched.length - 1].due) : fmtDate_(loan.dueDate),
+    fmtMoney_(round2_(total * lateFeeRate_())),
+  ];
 }
 /**
  * Cronograma para el MOTOR DE MORA, con la CONDONACIÓN DE INTERÉS aplicada. Igual que
@@ -6545,6 +6563,47 @@ const PROMO_WA_DEFAULT = '¡Hola {nombre}! \u{1F389}\u{1F381}\n\n' +
 const PROMO_WA_OLD_DEFAULTS = [
   '¡Hola {nombre}! \u{1F389} En {empresa} premiamos a quienes pagaron su préstamo en tiempo y forma. Participá de nuestro SORTEO del {fecha}. Para entrar: 1) Seguí nuestro Instagram {instagram}. 2) Compartí nuestra página en tu historia. 3) Envianos las capturas por este chat como comprobante. ¡Mucha suerte! \u{1F340}',
 ];
+
+/* ===================== WHATSAPP: ENLACE DE FIRMA (APROBACIÓN) =====================
+ * Mensaje tap-to-send que se abre en un pop-up al APROBAR: lleva el enlace de firma, pasos simples y
+ * aclara que el dinero se acredita SOLO DESPUÉS de firmar. Texto CONFIGURABLE («Configuración» →
+ * "Mensaje de WhatsApp de aprobación»); emojis como \u{…} para que no se corrompan a «�». */
+const APPROVE_WA_DEFAULT = '¡Hola {nombre}! \u{1F389} Tu préstamo {loanId} fue APROBADO \u{2705}\n\n' +
+  'Para recibir la plata, primero firmá tu contrato. Es fácil y rápido \u{1F447}\n\n' +
+  '1\u{FE0F}\u{20E3} Tocá este link \u{1F449} {link}\n' +
+  '2\u{FE0F}\u{20E3} Leé el contrato \u{1F4C4}\n' +
+  '3\u{FE0F}\u{20E3} Firmá con tu dedo \u{270D}\u{FE0F}\n\n' +
+  '\u{26A0}\u{FE0F} IMPORTANTE: la plata se envía SOLO DESPUÉS de que firmás \u{1F4B8}\n\n' +
+  '¿Dudas? Respondé este mensaje \u{1F4AC}\n' +
+  '{empresa} \u{1F49B}';
+const APPROVE_WA_OLD_DEFAULTS = [];
+/** Plantilla EFECTIVA del mensaje de WhatsApp de APROBACIÓN: la guardada en «Configuración», salvo que
+ *  esté vacía, sea una versión antigua, o tenga emojis corruptos («�») → usa APPROVE_WA_DEFAULT. Se
+ *  respeta cualquier texto realmente personalizado y sano (igual que promoMessageTemplate_). */
+function approveWaTemplate_() {
+  const cur = String(getSetting_('Mensaje de WhatsApp de aprobación') || '').trim();
+  if (!cur || cur.indexOf('�') >= 0 || APPROVE_WA_OLD_DEFAULTS.indexOf(cur) >= 0) return APPROVE_WA_DEFAULT;
+  return cur;
+}
+/** Mensaje de aprobación con {nombre}/{loanId}/{link}/{empresa} resueltos. Si la plantilla no incluye
+ *  {link}, se agrega al final (el enlace de firma SIEMPRE debe aparecer). */
+function approveWaMessage_(name, loanId, link) {
+  let tpl = approveWaTemplate_();
+  if (tpl.indexOf('{link}') < 0 && String(link || '').trim()) tpl += '\n\n\u{1F449} {link}';
+  const nice = (typeof titleCaseName_ === 'function') ? titleCaseName_(name) : String(name || '').trim();
+  const first = nice.split(/\s+/)[0] || 'Hola';
+  return tpl.replace(/\{nombre\}/g, first)
+    .replace(/\{loanId\}/g, String(loanId || '').trim())
+    .replace(/\{link\}/g, String(link || '').trim() || '(falta configurar la URL de la app web)')
+    .replace(/\{empresa\}/g, companyName_());
+}
+/** URL de WhatsApp Web (web.whatsapp.com/send) con el mensaje de aprobación ya armado; '' si no hay
+ *  teléfono válido. */
+function approveWaUrl_(phone, name, loanId, link) {
+  const num = (typeof waNumberAR_ === 'function') ? waNumberAR_(phone) : '';
+  if (!num) return '';
+  return 'https://web.whatsapp.com/send?phone=' + num + '&text=' + encodeURIComponent(approveWaMessage_(name, loanId, link));
+}
 
 /** Fecha del sorteo (Configuración "Fecha del sorteo (promoción)"). Acepta AAAA-MM-DD, DD/MM/AAAA o
  *  una celda de fecha. Predet. 20-dic-2026. */
@@ -8271,6 +8330,19 @@ function submitSignature(loanId, dni, signatureDataUrl, agree, meta, token) {
     } catch (e) { logError_('submitSignature:dispositivos', e); }
     let emailOk = true;
     try { emailSignedContract_(freshLoan, signedFile); } catch (e) { emailOk = false; logError_('submitSignature:email', e); }
+    // WhatsApp al FIRMAR (Cloud API, automático): el dinero llega en breve + datos del préstamo + puntos
+    // de repago (pagar en fecha; el mal cumplimiento puede dejar sin otro préstamo). Gated por «WhatsApp
+    // activo» + configuración; se envía UNA vez (la firma ya cortó por duplicado arriba) y un fallo
+    // NUNCA rompe la firma (ya quedó guardada y notificada por correo).
+    try {
+      if (whatsAppActivo_() && waConfig_()) {
+        const toWa = (typeof waNumberAR_ === 'function') ? waNumberAR_(freshLoan.phone) : '';
+        if (toWa) {
+          const tplFirmado = String(getSetting_('WhatsApp — Plantilla de contrato firmado') || '').trim() || 'contrato_firmado';
+          sendWhatsAppTemplate_(toWa, tplFirmado, waConfig_().lang, signedWaParams_(freshLoan));
+        } else { logError_('submitSignature:whatsapp', new Error('firmado sin teléfono válido: ' + loanId)); }
+      }
+    } catch (e) { logError_('submitSignature:whatsapp', e); }
     try { getSS_().toast('Contrato firmado: ' + loan.name + ' → ' + loanId + (emailOk ? '' : ' (⚠ no se pudo enviar el correo)'), 'Firma recibida ✍', 6); } catch (e) {}
     return { ok: true, message: emailOk
       ? '¡Contrato firmado! Gracias, ' + loan.name + '. Le enviamos una copia por correo.'
@@ -11084,6 +11156,8 @@ function instalarAvisosVencimiento() {
       ['WhatsApp — Nombre de plantilla', 'recordatorio'],
       ['WhatsApp — Idioma de plantilla', 'es_AR'],
       ['WhatsApp — Días de aviso antes del vencimiento', '3'],
+      ['WhatsApp — Plantilla de contrato firmado', 'contrato_firmado'],
+      ['Mensaje de WhatsApp de aprobación', APPROVE_WA_DEFAULT],
     ];
     defs.forEach(function (d) { if (!String(getSetting_(d[0]) || '').trim()) setSetting_(d[0], d[1]); });
     ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'enviarAvisosVencimiento') ScriptApp.deleteTrigger(t); });
