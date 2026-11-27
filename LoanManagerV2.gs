@@ -461,11 +461,23 @@ function instagramFollowHtml_(prominent) {
   }
   return '<div style="text-align:center;margin:14px 0 2px"><a href="' + url + '" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:7px;color:var(--brand,#1c4587);text-decoration:none;font-weight:600;font-size:13.5px">' + ig(17) + 'Seguinos en Instagram</a></div>';
 }
+/**
+ * Convierte los EMOJIS del cuerpo HTML de un correo a ENTIDADES HTML (&#N;). GmailApp (y algunos
+ * clientes) rompen los caracteres de 4 bytes al enviar/mostrar: llegan como «�». Como entidad ASCII
+ * se renderizan SIEMPRE. Solo toca símbolos/emoji (flechas, dingbats, pictogramas y el plano astral);
+ * NO altera letras acentuadas, «¡¿», «—», «…», «·» ni el texto normal. El selector de variación
+ * (U+FE0F) se descarta (innecesario con la entidad). Idempotente: no re-codifica entidades ya puestas.
+ */
+function emailHtmlEmojis_(html) {
+  return String(html).replace(
+    /\uFE0F|[\u2190-\u27BF\u2900-\u297F\u2B00-\u2BFF\u20E3]|[\uD800-\uDBFF][\uDC00-\uDFFF]/g,
+    function (ch) { return ch === '\uFE0F' ? '' : ('&#' + ch.codePointAt(0) + ';'); });
+}
 /** Envía un correo con la cabecera/pie de marca y el logo en línea. opts.attachments opcional. */
 function sendBrandedEmail_(to, subject, plainBody, htmlInner, opts) {
   opts = opts || {};
-  const html = '<div style="font-family:Arial,Helvetica,sans-serif;color:#222;max-width:640px">' +
-    brandHeaderEmail_() + htmlInner + brandFooterEmail_() + '</div>';
+  const html = emailHtmlEmojis_('<div style="font-family:Arial,Helvetica,sans-serif;color:#222;max-width:640px">' +
+    brandHeaderEmail_() + htmlInner + brandFooterEmail_() + '</div>');
   // Modo prueba: captura el correo en vez de enviarlo (sin efectos reales).
   if (TEST_MODE) { _emailOutbox.push({ to: to, subject: subject, plainBody: plainBody, htmlInner: htmlInner, html: html, opts: opts }); return; }
   const o = { name: companyName_(), htmlBody: html };
@@ -8623,7 +8635,7 @@ function emailSigningRequest_(loan, file) {
       moraDiaTxt: fmtMoney_(round2_((Number(loan.totalDue) || 0) * lateFeeRate_())),
       urlFirma: link,
     }),
-    file ? { attachments: [file.getAs('application/pdf')] } : {});
+    { cc: ccSolicitudesFirmas_(), attachments: file ? [file.getAs('application/pdf')] : undefined });
 }
 
 /** Correo con el PDF firmado, al prestatario y a Impulso Crédito (prestamista). */
@@ -9558,8 +9570,9 @@ function rejectApplicant_(nb, row) {
   if (email) {
     try {
       sendBrandedEmail_(email, 'Actualización de su solicitud',
-        'Estimado/a ' + name + ', gracias por su solicitud. Lamentamos informarle que no podemos avanzar en este momento.',
-        '<p>Estimado/a ' + esc_(name) + ',</p><p>Gracias por su solicitud. Lamentamos informarle que no podemos avanzar en este momento.</p>');
+        'Estimado/a ' + name + ', gracias por su solicitud. Lamentamos informarle que no podemos avanzar en este momento. ' +
+        'Podés volver a presentarla más adelante.',
+        rechazoSolicitudHtml_({ nombre: name }));
     } catch (e) { logError_('rejectApplicant_:email', e); }
   }
   nb.deleteRow(row);
@@ -10333,6 +10346,33 @@ function acuseSolicitudHtml_(d) {
     '<p style="font-size:15px;color:#444;line-height:1.5;margin:0 0 4px">Gracias por elegirnos. Este es el detalle de lo que pediste:</p>' +
     box + pasos + mora + beneficio +
     '<p style="font-size:14px;color:#444;margin:18px 0 0">Gracias por tu confianza.<br>' + esc_(companyName_()) + '</p>';
+}
+
+/**
+ * SOLICITUD NO APROBADA — correo al cliente (mismo formato branded que el acuse/contrato).
+ * PURA: `d` = {nombre, motivo?}. El motivo es opcional; si no viene, no se muestra.
+ */
+function rechazoSolicitudHtml_(d) {
+  const acc = BRAND.navy;
+  const hero = '<table role="presentation" width="100%" style="border-collapse:collapse;background:' + acc + ';border-radius:8px"><tr>' +
+    '<td style="padding:24px 18px;text-align:center;color:#fff">' +
+    '<div style="font-size:32px;line-height:1">&#128196;</div>' +
+    '<div style="font-size:26px;font-weight:bold;margin-top:8px">Sobre tu solicitud</div>' +
+    '<div style="font-size:13px;opacity:.92;margin-top:4px">Gracias por confiar en ' + esc_(companyName_()) + '</div>' +
+    '</td></tr></table>';
+  const box = '<table role="presentation" width="100%" style="border-collapse:collapse;background:#f6f8fa;border-left:4px solid ' + acc + ';border-radius:6px;margin-top:18px"><tr>' +
+    '<td style="padding:16px 18px;font-size:15px;color:#444;line-height:1.6">' +
+    'Analizamos tu pedido con atención y, <b>por el momento</b>, no podemos avanzar con esta solicitud. ' +
+    'Esta decisión depende de varios factores y puede cambiar más adelante.' +
+    (d.motivo ? '<br><br><b>Motivo:</b> ' + esc_(d.motivo) : '') +
+    '</td></tr></table>';
+  const futuro = '<p style="font-size:14px;color:#1c4587;background:#eef3fb;border:1px solid #c9d8ef;border-radius:6px;padding:10px 12px;margin:16px 0 0">' +
+    'Podés volver a presentar tu solicitud más adelante. Mantener un buen historial de pagos ayuda a que tu próximo pedido sea aprobado.</p>';
+  return hero +
+    '<p style="font-size:16px;margin:16px 0 10px">Hola ' + esc_(d.nombre) + ',</p>' +
+    '<p style="font-size:15px;color:#444;line-height:1.5;margin:0 0 4px">Gracias por tu interés en ' + esc_(companyName_()) + '.</p>' +
+    box + futuro +
+    '<p style="font-size:14px;color:#444;margin:18px 0 0">Quedamos a disposición.<br>' + esc_(companyName_()) + '</p>';
 }
 
 /**

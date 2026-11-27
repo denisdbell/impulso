@@ -1282,7 +1282,7 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
           moraDiaTxt: fmtMoney_(round2_(total * lateFeeRate_())),
           urlFirma: link,
         }),
-        contractFile ? { attachments: [contractFile.getAs('application/pdf')] } : {});
+        { cc: ccSolicitudesFirmas_(), attachments: contractFile ? [contractFile.getAs('application/pdf')] : undefined });
       // Cuenta de terceros (V-36): se notifica al TITULAR de la cuenta y se le envía una copia
       // del contrato para su conocimiento. En su propio try/catch: un fallo acá NO debe abortar
       // la aprobación ni afectar el correo al prestatario (que ya se envió).
@@ -1296,7 +1296,7 @@ function approveApplicantV2_(ss, bs, nb, row, m, override) {
             row_('Solicitante', esc_(name)) + row_('Capital', fmtMoney_(amount)) +
             row_('Total a devolver', '<b>' + fmtMoney_(total) + '</b>') + '</table>' +
             '<p style="font-size:12px;color:#888">Si no reconocés esta solicitud, respondé este correo de inmediato.</p>',
-            contractFile ? { attachments: [contractFile.getAs('application/pdf')] } : {});
+            { cc: ccSolicitudesFirmas_(), attachments: contractFile ? [contractFile.getAs('application/pdf')] : undefined });
         } catch (e) { logError_('approveApplicantV2_:holderEmail', e); }
       }
     } catch (e) {
