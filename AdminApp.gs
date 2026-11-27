@@ -567,13 +567,23 @@ function aprobarProspectoWeb_(sh, row) {
   const num = waNumberAR_(phone), waColC = H['WhatsApp 📲'];
   if (!num) { if (waColC) sh.getRange(row, waColC).setValue('sin teléfono'); return { name: name, waUrl: '' }; }
   const firstName = name.split(/\s+/)[0] || name || 'Hola';
-  const empresa = companyName_(), url = webAppBaseUrl_(), nl = '\n';
-  const msg = '¡Hola ' + firstName + '! 👋 Te escribimos de ' + empresa + '.' + nl +
-    '¡Buenas noticias! Ya tenemos cupo disponible y te invitamos a solicitar tu préstamo. 🎉' + nl +
-    'Completá tu solicitud acá:' + nl + (url || '(falta configurar la URL de la app web en Configuración)') + nl +
-    'Cualquier duda, respondé este mensaje. ¡Gracias por tu paciencia! 💛';
-  const waUrl = 'https://web.whatsapp.com/send?phone=' + num + '&text=' + encodeURIComponent(msg);
-  if (waColC) sh.getRange(row, waColC).setFormula('=HYPERLINK("' + waUrl + '","📲 Enviar solicitud")');
+  // Oferta pre-aprobada (monto + plazo fijos) si está cargada en la fila; si no, mensaje genérico.
+  const off = (typeof prospectOfferParams_ === 'function') ? prospectOfferParams_(H, sh, row) : null;
+  let waUrl, label;
+  if (off) {
+    const link = offerLink_(off.amount, off.term);
+    waUrl = 'https://wa.me/' + num + '?text=' + encodeURIComponent(offerWaMessage_(name, off.amount, off.term, link));
+    label = '📲 Enviar oferta';
+  } else {
+    const empresa = companyName_(), url = webAppBaseUrl_(), nl = '\n';
+    const msg = '¡Hola ' + firstName + '! 👋 Te escribimos de ' + empresa + '.' + nl +
+      '¡Buenas noticias! Ya tenemos cupo disponible y te invitamos a solicitar tu préstamo. 🎉' + nl +
+      'Completá tu solicitud acá:' + nl + (url || '(falta configurar la URL de la app web en Configuración)') + nl +
+      'Cualquier duda, respondé este mensaje. ¡Gracias por tu paciencia! 💛';
+    waUrl = 'https://web.whatsapp.com/send?phone=' + num + '&text=' + encodeURIComponent(msg);
+    label = '📲 Enviar solicitud';
+  }
+  if (waColC) sh.getRange(row, waColC).setFormula('=HYPERLINK("' + waUrl + '","' + label + '")');
   return { name: name, waUrl: waUrl };
 }
 
@@ -603,10 +613,11 @@ function adminRejectProspect(session, prospectKey) {
       const row = adminResolveProspectRow_(sh, prospectKey);
       if (!row) return { ok: false, msg: 'El prospecto cambió o ya no está. Recargá la lista.' };
       const m = headerMap_(sh);
-      if (m['Estado']) sh.getRange(row, m['Estado']).setValue('RECHAZADO');
       const nm = m['Nombre'] ? String(sh.getRange(row, m['Nombre']).getValue() || '').trim() : '';
+      // Marca RECHAZADO y arma el enlace de WhatsApp (mensaje amable) para que el panel lo abra. Sin UI.
+      const waUrl = rechazarProspecto_(sh, row, false);
       adminInvalidateCaches_();
-      return { ok: true, msg: 'Prospecto' + (nm ? ' «' + nm + '»' : '') + ' marcado RECHAZADO.' };
+      return { ok: true, msg: 'Prospecto' + (nm ? ' «' + nm + '»' : '') + ' marcado RECHAZADO.', waUrl: waUrl || '' };
     } finally { try { lock.releaseLock(); } catch (e) {} }
   });
 }

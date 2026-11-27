@@ -127,6 +127,7 @@ function onOpen() {
     .addItem('💵 Retiro disponible (sin frenar crecimiento)', 'showWithdrawable')
     .addItem('🔎 Análisis de deuda de prospectos (BCRA)', 'abrirAnalisisDeuda')
     .addItem('🔄 Refrescar lista de prospectos (análisis)', 'refrescarListaProspectos')
+    .addItem('🎁 Enviar oferta pre-aprobada (link con monto/plazo fijos)', 'abrirDialogoOferta')
     .addItem('🎉 Armar/actualizar Promoción (sorteo de buenos pagadores)', 'refrescarPromocion')
     .addSeparator()
     // — Gestión de préstamos (fila activa) —
@@ -187,6 +188,7 @@ function onOpen() {
       .addItem('🧩 Instalar validaciones adicionales (V-43/44/46/47/49: columna + ajustes)', 'instalarValidacionesAdicionales')
       .addItem('🔺 Instalar marcado de ALTO RIESGO (diario 3am + V-54)', 'instalarMarcadoAltoRiesgo')
       .addItem('✉ Configurar CC de solicitudes y firmas (correo en copia)', 'instalarCcSolicitudesFirmas')
+      .addItem('🎁 Instalar ofertas pre-aprobadas + aviso final de cobranza (columnas + ajustes)', 'instalarOfertasYCobranza')
       .addItem('➕ Crear hoja de Recordatorios de pago', 'createRemindersSheet_')
       .addItem('📄 Crear hoja de Estudio de Contratos', 'createAgreementSheet_')
       .addItem('📄 Crear/actualizar hoja de Estudio de Estados', 'createStatementsSheet_')
@@ -520,6 +522,48 @@ function instalarCcSolicitudesFirmas() {
     } catch (e) { logError_('instalarCcSolicitudesFirmas:note', e); }
     try { getSS_().toast('CC de solicitudes y firmas: ' + (val || '(vacío)'), '✉ Configurado', 6); } catch (e) { }
     return val;
+  });
+}
+
+/** Menú: instala de una vez TODO lo nuevo de "ofertas pre-aprobadas + aviso final de cobranza":
+ *  1) columnas «Monto oferta» + «Plazo oferta (días)» en «Prospectos»;
+ *  2) ajustes nuevos en «Configuración» (mensajes de oferta/rechazo + «Días para plazo final de
+ *     cobranza»), sin pisar lo ya cargado;
+ *  3) columna «Cobranza final 📲» en «Estudio de Recordatorios» (reconstruye la lista);
+ *  4) crea el secreto HMAC de las ofertas si falta.
+ *  Idempotente: se puede correr varias veces. NO re-publica la app web (eso es manual). */
+function instalarOfertasYCobranza() {
+  return guard_('instalarOfertasYCobranza', function () {
+    const ss = getSS_(), done = [];
+    // 1) Columnas de oferta en «Prospectos» (no destructivo; resuelve por nombre de encabezado).
+    try { setupProspectos_(ss); done.push('columnas «Monto oferta» + «Plazo oferta (días)» en «Prospectos»'); }
+    catch (e) { logError_('instalarOfertasYCobranza:prospectos', e); }
+    // 2) Ajustes nuevos (sólo si faltan): mensajes de oferta/rechazo + plazo final de cobranza.
+    try {
+      if (!ss.getSheetByName(CFG.SHEETS.SETTINGS) && typeof setupSettings_ === 'function') setupSettings_(ss);
+      const seed = (k, v) => { if (String(getSetting_(k) || '').trim() === '') setSetting_(k, v); };
+      seed('Mensaje de WhatsApp de oferta', OFFER_WA_DEFAULT);
+      seed('Mensaje de WhatsApp de rechazo', REJECT_WA_DEFAULT);
+      seed('Días para plazo final de cobranza', '7');
+      done.push('ajustes «Mensaje de WhatsApp de oferta/rechazo» + «Días para plazo final de cobranza»');
+    } catch (e) { logError_('instalarOfertasYCobranza:settings', e); }
+    // 3) Columna «Cobranza final 📲» en «Estudio de Recordatorios» (reconstruye la lista si existe).
+    try {
+      if (ss.getSheetByName(CFG.SHEETS.REMINDER)) rebuildRemindersSheet_(ss); else setupReminders_(ss);
+      done.push('columna «Cobranza final 📲» en «Estudio de Recordatorios»');
+    } catch (e) { logError_('instalarOfertasYCobranza:reminders', e); }
+    // 4) Secreto HMAC de las ofertas (se crea si falta; no expone nada).
+    try { offerSecret_(); } catch (e) { logError_('instalarOfertasYCobranza:secret', e); }
+    const detalle = done.length ? ('• ' + done.join('\n• ')) : 'No se aplicó ningún cambio.';
+    try { ss.toast(done.length + ' novedad(es) aplicada(s).', '🎁 Ofertas + cobranza', 8); } catch (e) { }
+    try {
+      SpreadsheetApp.getUi().alert('Ofertas pre-aprobadas + aviso final de cobranza',
+        detalle + '\n\nIMPORTANTE: volvé a PUBLICAR la app web para que el formulario de oferta tome efecto ' +
+        '(Implementar ▸ Gestionar implementaciones ▸ ✏️ ▸ Versión: Nueva versión ▸ Implementar). ' +
+        'Completá en «Configuración» el alias/titular de Mercado Pago para el aviso final.',
+        SpreadsheetApp.getUi().ButtonSet.OK);
+    } catch (e) { }
+    return detalle;
   });
 }
 /** Cabecera de marca para PDF y páginas web (data URI, o monograma CSS). */
@@ -1052,6 +1096,9 @@ function setupSettings_(ss) {
     ['Instagram de la empresa (@usuario)', ''],
     ['Mensaje de WhatsApp de la promoción', PROMO_WA_DEFAULT],
     ['Mensaje de WhatsApp de aprobación', APPROVE_WA_DEFAULT],
+    ['Mensaje de WhatsApp de oferta', OFFER_WA_DEFAULT],
+    ['Mensaje de WhatsApp de rechazo', REJECT_WA_DEFAULT],
+    ['Días para plazo final de cobranza', '7'],
     ['WhatsApp — Plantilla de contrato firmado', 'contrato_firmado'],
     ['Límite inicial (préstamo nuevo)', '150000'],
     ['Incremento de graduación', '50000'],
@@ -1612,7 +1659,7 @@ const CLIENTE_BCRA_COMP_COL = 'BCRA (comprimido)';
 const ANALISIS_NAME_CELL = 'B3';   // selector del prospecto (desplegable)
 const ANALISIS_MODE_CELL = 'B4';   // «Solo no aprobados» / «Todos»
 const ANALISIS_OUT_ROW = 7;        // primera fila de la salida del análisis
-const PROSPECTOS_HEADERS = ['Fecha de Captura', 'Nombre', 'CUIL', 'Teléfono', 'Estado', 'Contactado?', 'Nota', 'Aprobar y avisar 📲', 'Rechazar?', 'WhatsApp 📲', PROSPECTO_JSON_COL, PROSPECTO_SCORE_COL, PROSPECTO_DECISION_COL, 'Alertas (V-39/V-40)'];
+const PROSPECTOS_HEADERS = ['Fecha de Captura', 'Nombre', 'CUIL', 'Teléfono', 'Estado', 'Contactado?', 'Nota', 'Aprobar y avisar 📲', 'Rechazar?', 'WhatsApp 📲', PROSPECTO_JSON_COL, PROSPECTO_SCORE_COL, PROSPECTO_DECISION_COL, 'Alertas (V-39/V-40)', 'Monto oferta', 'Plazo oferta (días)'];
 function setupProspectos_(ss) {
   ss = ss || getSS_();
   const sh = getOrCreate_(ss, CFG.SHEETS.PROSPECTS);
@@ -1621,8 +1668,18 @@ function setupProspectos_(ss) {
   if (head.join('|') !== PROSPECTOS_HEADERS.join('|')) {
     sh.getRange(1, 1, 1, PROSPECTOS_HEADERS.length).setValues([PROSPECTOS_HEADERS])
       .setFontWeight('bold').setBackground('#1c4587').setFontColor('#fff').setWrap(true);
-    [150, 220, 140, 140, 110, 110, 260, 160, 110, 180, 320, 100, 120, 260].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+    [150, 220, 140, 140, 110, 110, 260, 160, 110, 180, 320, 100, 120, 260, 130, 140].forEach((w, i) => sh.setColumnWidth(i + 1, w));
     sh.getRange(2, 1, CFG.MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd hh:mm');
+    // OFERTA pre-aprobada (opcional): monto + plazo fijos. Si los completás, al aprobar se envía el
+    // enlace con esos valores BLOQUEADOS; en blanco → se envía el formulario normal.
+    const moC = PROSPECTOS_HEADERS.indexOf('Monto oferta') + 1;
+    if (moC > 0) { sh.getRange(2, moC, CFG.MAX_ROWS, 1).setNumberFormat('"$"#,##0'); sh.getRange(1, moC).setNote('Opcional. Monto pre-aprobado para este prospecto. Si lo completás (junto con el plazo), el enlace enviado fija el monto (no editable). En blanco → formulario normal.'); }
+    const poC = PROSPECTOS_HEADERS.indexOf('Plazo oferta (días)') + 1;
+    if (poC > 0) {
+      sh.getRange(2, poC, CFG.MAX_ROWS, 1).setDataValidation(
+        SpreadsheetApp.newDataValidation().requireValueInList(['15', '30', '90'], true).setAllowInvalid(true).build());
+      sh.getRange(1, poC).setNote('Opcional. Plazo pre-aprobado: 15, 30 o 90 días. Se usa junto con «Monto oferta» para fijar la oferta en el enlace.');
+    }
     const jc = PROSPECTOS_HEADERS.indexOf(PROSPECTO_JSON_COL) + 1;
     if (jc > 0) sh.getRange(1, jc).setNote('Pegá acá el JSON de la Central de Deudores del BCRA de este prospecto (respuesta de /Deudas o /Deudas/Historicas). Después, en «Análisis de Deuda», elegí su nombre para correr el análisis.');
     const ac = PROSPECTOS_HEADERS.indexOf('Alertas (V-39/V-40)') + 1;
@@ -2135,6 +2192,14 @@ function crearColumnaAvisarPorCorreo() {
  * enlace clickeable en «WhatsApp 📲» y abre WhatsApp en un diálogo. El número sale del teléfono
  * del prospecto (wa.me con el 9 móvil, vía waNumberAR_). Lanza error si no hay teléfono válido.
  */
+/** Lee la oferta pre-aprobada de una fila de «Prospectos» («Monto oferta» + «Plazo oferta (días)»).
+ *  Devuelve {amount, term} si ambos son válidos (plazo 15/30/90 y monto ≤ tope), o null. */
+function prospectOfferParams_(H, sh, row) {
+  const mC = H['Monto oferta'], pC = H['Plazo oferta (días)'];
+  const amount = mC ? (Number(String(sh.getRange(row, mC).getValue()).replace(/\D/g, '')) || 0) : 0;
+  const term = pC ? (Number(String(sh.getRange(row, pC).getValue()).replace(/\D/g, '')) || 0) : 0;
+  return offerValidParams_(amount, term) ? { amount: amount, term: term } : null;
+}
 function aprobarProspecto_(sh, row) {
   const H = headerMap_(sh);
   const name = String((H['Nombre'] ? sh.getRange(row, H['Nombre']).getValue() : '') || '').trim();
@@ -2147,15 +2212,42 @@ function aprobarProspecto_(sh, row) {
     throw new Error('Prospecto marcado APROBADO, pero no tiene un teléfono válido para WhatsApp.');
   }
   const firstName = name.split(/\s+/)[0] || name || 'Hola';
-  const empresa = companyName_(), url = webAppBaseUrl_(), nl = '\n';
-  const msg = '¡Hola ' + firstName + '! 👋 Te escribimos de ' + empresa + '.' + nl +
-    '¡Buenas noticias! Ya tenemos cupo disponible y te invitamos a solicitar tu préstamo. 🎉' + nl +
-    'Completá tu solicitud acá:' + nl + (url || '(falta configurar la URL de la app web en Configuración)') + nl +
-    'Cualquier duda, respondé este mensaje. ¡Gracias por tu paciencia! 💛';
-  const waUrl = 'https://web.whatsapp.com/send?phone=' + num + '&text=' + encodeURIComponent(msg);
-  if (waColC) sh.getRange(row, waColC).setFormula('=HYPERLINK("' + waUrl + '","📲 Enviar solicitud")');
+  // Si el prospecto tiene una OFERTA (monto + plazo), se envía el enlace con esos valores FIJOS y un
+  // mensaje que la enuncia; si no, el mensaje genérico con el formulario normal.
+  const off = prospectOfferParams_(H, sh, row);
+  let waUrl, label;
+  if (off) {
+    const link = offerLink_(off.amount, off.term);
+    waUrl = 'https://wa.me/' + num + '?text=' + encodeURIComponent(offerWaMessage_(name, off.amount, off.term, link));
+    label = '📲 Enviar oferta';
+  } else {
+    const empresa = companyName_(), url = webAppBaseUrl_(), nl = '\n';
+    const msg = '¡Hola ' + firstName + '! 👋 Te escribimos de ' + empresa + '.' + nl +
+      '¡Buenas noticias! Ya tenemos cupo disponible y te invitamos a solicitar tu préstamo. 🎉' + nl +
+      'Completá tu solicitud acá:' + nl + (url || '(falta configurar la URL de la app web en Configuración)') + nl +
+      'Cualquier duda, respondé este mensaje. ¡Gracias por tu paciencia! 💛';
+    waUrl = 'https://web.whatsapp.com/send?phone=' + num + '&text=' + encodeURIComponent(msg);
+    label = '📲 Enviar solicitud';
+  }
+  if (waColC) sh.getRange(row, waColC).setFormula('=HYPERLINK("' + waUrl + '","' + label + '")');
   try { openWhatsAppDialog_(waUrl, firstName); } catch (e) { logError_('aprobarProspecto_:dialog', e); }
   try { getSS_().toast('Prospecto «' + (name || firstName) + '» aprobado. Se abrió WhatsApp (o tocá «WhatsApp 📲»).', '✅ Prospecto aprobado', 6); } catch (e) { }
+}
+
+/** Rechaza un prospecto: marca Estado=RECHAZADO y, si hay teléfono, deja en «WhatsApp 📲» el enlace
+ *  (wa.me) con un mensaje amable + intenta abrir el pop-up. Devuelve la waUrl (o '' si no hay teléfono).
+ *  `showDialog` false la usa el panel web (sin UI). */
+function rechazarProspecto_(sh, row, showDialog) {
+  const H = headerMap_(sh);
+  const name = String((H['Nombre'] ? sh.getRange(row, H['Nombre']).getValue() : '') || '').trim();
+  const phone = String((H['Teléfono'] ? sh.getRange(row, H['Teléfono']).getValue() : '') || '').trim();
+  if (H['Estado']) sh.getRange(row, H['Estado']).setValue('RECHAZADO');
+  const num = waNumberAR_(phone), waColC = H['WhatsApp 📲'];
+  if (!num) { if (waColC) sh.getRange(row, waColC).setValue('sin teléfono'); return ''; }
+  const waUrl = 'https://wa.me/' + num + '?text=' + encodeURIComponent(rejectWaMessage_(name));
+  if (waColC) sh.getRange(row, waColC).setFormula('=HYPERLINK("' + waUrl + '","📲 Avisar rechazo")');
+  if (showDialog !== false) { try { openWhatsAppDialog_(waUrl, name.split(/\s+/)[0] || name); } catch (e) { logError_('rechazarProspecto_:dialog', e); } }
+  return waUrl;
 }
 
 /**
@@ -2173,6 +2265,49 @@ function openWhatsAppDialog_(waUrl, name) {
     '<script>try{window.open(' + JSON.stringify(waUrl) + ',"_blank");}catch(e){}</script></body></html>';
   const out = HtmlService.createHtmlOutput(html).setWidth(360).setHeight(190);
   SpreadsheetApp.getUi().showModalDialog(out, 'Enviar solicitud por WhatsApp');
+}
+
+/** Menú: diálogo para armar una OFERTA PRE-APROBADA (monto + plazo fijos) y enviarla por WhatsApp a
+ *  cualquier teléfono. El enlace lleva el monto/plazo BLOQUEADOS (no editables en el formulario). */
+function abrirDialogoOferta() {
+  const max = (typeof loanMax_ === 'function') ? loanMax_() : 500000;
+  const html = '<!DOCTYPE html><html><head><base target="_blank"><meta charset="utf-8">' +
+    '<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;padding:16px;color:#1f2733}' +
+    'label{display:block;font-size:13px;font-weight:600;margin:10px 0 3px}input,select{width:100%;box-sizing:border-box;padding:9px;font-size:15px;border:1px solid #cbd5e1;border-radius:8px}' +
+    'button{margin-top:14px;width:100%;background:#25D366;color:#fff;border:0;font-weight:700;padding:12px;border-radius:10px;font-size:15px;cursor:pointer}' +
+    '.hint{color:#64748b;font-size:12px;margin-top:4px}#err{color:#b00020;font-size:13px;margin-top:8px;min-height:16px}</style></head><body>' +
+    '<label>Monto (ARS)</label><input id="m" type="text" inputmode="numeric" placeholder="Ej: 100000">' +
+    '<div class="hint">Máximo ' + esc_(fmtMoney_(max)) + '.</div>' +
+    '<label>Plazo</label><select id="p"><option value="15">15 días (25%)</option><option value="30">30 días (50%)</option><option value="90">90 días (100%, 3 cuotas)</option></select>' +
+    '<label>Teléfono (celular)</label><input id="ph" type="text" inputmode="numeric" placeholder="Ej: 11 2345 6789">' +
+    '<div id="err"></div>' +
+    '<button id="go">📲 Armar y abrir WhatsApp</button>' +
+    '<script>' +
+    'var b=document.getElementById("go");' +
+    'b.onclick=function(){b.disabled=true;document.getElementById("err").textContent="Generando…";' +
+    'google.script.run.withSuccessHandler(function(r){try{window.open(r.waUrl,"_blank");}catch(e){}setTimeout(google.script.host.close,400);})' +
+    '.withFailureHandler(function(e){b.disabled=false;document.getElementById("err").textContent=(e&&e.message)||e;})' +
+    '.buildOfferWaUrl(document.getElementById("m").value,document.getElementById("p").value,document.getElementById("ph").value);};' +
+    '</script></body></html>';
+  const out = HtmlService.createHtmlOutput(html).setWidth(360).setHeight(360);
+  SpreadsheetApp.getUi().showModalDialog(out, 'Oferta pre-aprobada por WhatsApp');
+}
+/** Endpoint del diálogo: valida monto/plazo/teléfono, arma el enlace de oferta firmado y devuelve la
+ *  URL de WhatsApp (wa.me) + el mensaje. Lanza errores en español para mostrarlos en el diálogo. */
+function buildOfferWaUrl(amount, term, phone) {
+  return guard_('buildOfferWaUrl', function () {
+    amount = Number(String(amount == null ? '' : amount).replace(/\D/g, '')) || 0;
+    term = Number(term) || 0;
+    if (OFFER_TERMS.indexOf(term) < 0) throw new Error('Elegí un plazo válido (15, 30 o 90 días).');
+    if (amount <= 0) throw new Error('Ingresá un monto mayor a 0.');
+    if (amount > loanMax_()) throw new Error('El monto máximo por préstamo es ' + fmtMoney_(loanMax_()) + '.');
+    const num = waNumberAR_(phone);
+    if (!num) throw new Error('Teléfono no válido (celular argentino: área + número, 10 dígitos).');
+    const link = offerLink_(amount, term);
+    if (!link) throw new Error('Falta configurar la URL de la app web en «Configuración».');
+    const msg = offerWaMessage_('', amount, term, link);
+    return { waUrl: 'https://wa.me/' + num + '?text=' + encodeURIComponent(msg), msg: msg };
+  });
 }
 
 /** ¿Capturar ubicación en la firma? Interruptor de "Configuración" (default: SÍ). */
@@ -2908,8 +3043,8 @@ function statementStudioSend_(sh) {
 /* ===================== ESTUDIO DE RECORDATORIOS (lista) ===================== */
 const REM_HEADERS = ['ID Préstamo', 'Prestatario', 'Fecha de Vencimiento', 'Días (− = atraso)',
   'Estado', 'Total a Pagar', 'Saldo Pendiente', 'Recargo por Mora diario', 'Correo',
-  'Generar PDF 👁', 'Enviar ✉', 'Último PDF', 'Recordar por WhatsApp', 'Regenerar WA 🔄', 'Pedir congelamiento 📲', 'Pedir plan de pago 📋'];
-const REM_GEN_COL = 10, REM_SEND_COL = 11, REM_LINK_COL = 12, REM_WA_COL = 13, REM_WAGEN_COL = 14, REM_FREEZE_COL = 15, REM_PLANREQ_COL = 16;
+  'Generar PDF 👁', 'Enviar ✉', 'Último PDF', 'Recordar por WhatsApp', 'Regenerar WA 🔄', 'Pedir congelamiento 📲', 'Pedir plan de pago 📋', 'Cobranza final 📲'];
+const REM_GEN_COL = 10, REM_SEND_COL = 11, REM_LINK_COL = 12, REM_WA_COL = 13, REM_WAGEN_COL = 14, REM_FREEZE_COL = 15, REM_PLANREQ_COL = 16, REM_FINAL_COL = 17;
 const REM_HEADER_ROW = 3, REM_DATA_START = 4; // fila 1 título, fila 2 control, fila 3 encabezados
 
 /** Construye la estructura (título, casilla de refresco y encabezados) y llena la lista. */
@@ -2925,6 +3060,8 @@ function setupReminders_(ss) {
     .setFontWeight('bold').setBackground('#b45f06').setFontColor('#fff').setWrap(true);
   sh.setFrozenRows(REM_HEADER_ROW);
   [110, 180, 130, 120, 110, 120, 130, 150, 210, 110, 90, 130, 170, 120].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  sh.setColumnWidth(REM_FINAL_COL, 200);
+  sh.getRange(REM_HEADER_ROW, REM_FINAL_COL).setNote('AVISO FINAL de cobranza por WhatsApp (sólo préstamos VENCIDOS): mensaje firme con el desglose (capital/interés/mora/total), un plazo límite y los datos de pago (Mercado Pago). Se arma con los datos de la fila y de «Configuración». "sin teléfono" si no hay número válido.');
   sh.getRange(REM_HEADER_ROW, 1).setNote('Se actualiza con "⑤ Actualizar", con la casilla 🔄 y automáticamente cada día. Incluye préstamos vencidos o que vencen dentro de los "Días de aviso de recordatorio" (Configuración, por defecto 7).');
   sh.getRange(REM_HEADER_ROW, REM_WAGEN_COL).setNote('Tildá para RE-GENERAR el enlace "Recordar por WhatsApp" de ESTA fila con los datos actuales (saldo, mora, pagos). Se destilda solo. Útil tras registrar un pago o cambiar la mora sin reconstruir toda la lista.');
   rebuildRemindersSheet_(ss);
@@ -2954,7 +3091,14 @@ function rebuildRemindersSheet_(ss) {
     try { setSetting_('Días de aviso de recordatorio', '7'); } catch (e) { logError_('rebuildRemindersSheet_:setting', e); }
   }
   const noticeDays = Number(getSetting_('Días de aviso de recordatorio')) || 7;
-  const feePct = lateFeeRate_(), capFrac = moraCapFrac_(), rows = [], overdueFlags = [], waCells = [], freezeCells = [], planCells = [];
+  const feePct = lateFeeRate_(), capFrac = moraCapFrac_(), rows = [], overdueFlags = [], waCells = [], freezeCells = [], planCells = [], finalCells = [];
+  // Datos de pago para el AVISO FINAL (una sola lectura de Configuración).
+  const remCfg = {
+    mpAlias: String(getSetting_('Mercado Pago — Alias/CVU') || getSetting_('Cuenta de cobro/desembolso — Alias') || '').trim(),
+    mpTitular: String(getSetting_('Mercado Pago — Titular') || lenderAccount_().titular || '').trim(),
+    email: String(getSetting_('Correo del Prestamista') || '').trim(),
+    empresa: companyName_(),
+  };
   // Cuotas en memoria: recordamos por CUOTA (la próxima impaga), no sólo por préstamo.
   const cs = ss.getSheetByName(CFG.SHEETS.INSTALLMENTS), cuotasByLoan = {};
   if (cs && cs.getLastRow() >= 2) {
@@ -2986,9 +3130,9 @@ function rebuildRemindersSheet_(ss) {
   // WhatsApp de vencidos sin un getRange por fila (mismo criterio que rebuildLateSheet_).
   const adjC = colByAny_(H, ['Mora (ajuste)']), sinceC = colByAny_(H, ['Congelado el']),
     daysAccC = colByAny_(H, ['Días congelados', 'Dias congelados']), planSinceC = colByAny_(H, ['Plan desde']),
-    disC = colByAny_(H, ['Mora deshabilitada']);
+    disC = colByAny_(H, ['Mora deshabilitada']), firmaC = colByAny_(H, ['Fecha de Firma']);
   const maxCol = Math.max(idC, cliC, capC, plzC, tasC, fecC, venC, intC, totC, balC,
-    adjC || 0, sinceC || 0, daysAccC || 0, planSinceC || 0, disC || 0);
+    adjC || 0, sinceC || 0, daysAccC || 0, planSinceC || 0, disC || 0, firmaC || 0);
   const bdata = bs.getRange(2, 1, last - 1, maxCol).getValues();
   const payMap = loanPaymentsAll_();   // todos los pagos en UNA lectura (evita O(N²) por fila)
   for (let i = 0; i < bdata.length; i++) {
@@ -3023,7 +3167,7 @@ function rebuildRemindersSheet_(ss) {
     const overdue = daysUntil < 0;
     const feeDay = round2_(totalDue * feePct);
     rows.push([loanId, loan.name + cuotaTxt, dueDate, daysUntil, overdue ? ST.OVERDUE : 'PRÓXIMO',
-      totalDue, out, feeDay, loan.email, false, false, '', '', false, '', '']);
+      totalDue, out, feeDay, loan.email, false, false, '', '', false, '', '', '']);
     overdueFlags.push(overdue);
     // Desglose financiero del WhatsApp de VENCIDOS, calculado con datos YA leídos (payMap + columnas
     // del bloque) y el motor de mora SIN leer hojas (accruedMoraFast_). Evita el loanWaStatus_ por
@@ -3048,6 +3192,8 @@ function rebuildRemindersSheet_(ss) {
     }
     // Enlace de WhatsApp con el recordatorio listo (desglose en vencidos; saldo simple en próximos).
     waCells.push(remWhatsappFormula_(loan, dueDate, out, daysUntil, fin));
+    // AVISO FINAL de cobranza (wa.me): sólo para VENCIDOS; usa el desglose `fin` + la fecha de firma.
+    finalCells.push(overdue ? (finalNoticeWaFormula_(loan, fin, remCfg, (firmaC && g(firmaC) instanceof Date) ? g(firmaC) : ld, today) || '') : '');
     // Enlace al formulario de congelamiento SOLO para filas vencidas (daysUntil < 0).
     freezeCells.push(overdue ? (freezeFormWaFormula_(loan) || '') : '');
     // Enlace al formulario de PLAN DE PAGO: sólo cuando (aprox.) llegó al 100% de mora. El formulario
@@ -3076,6 +3222,12 @@ function rebuildRemindersSheet_(ss) {
   sh.getRange(REM_DATA_START, REM_WA_COL, n, 1).setFormulas(sortedWa.map(x => [x || '']));
   sortedWa.forEach((x, i) => {
     if (!x) sh.getRange(REM_DATA_START + i, REM_WA_COL).setValue('sin teléfono').setFontColor('#999');
+  });
+  // Columna "Cobranza final 📲": aviso final (wa.me) SÓLO en filas vencidas; "sin teléfono" si no hay número.
+  const sortedFinal = order.map(i => finalCells[i]);
+  sh.getRange(REM_DATA_START, REM_FINAL_COL, n, 1).setFormulas(sortedFinal.map(x => [x || '']));
+  sortedFinal.forEach((x, i) => {
+    if (!x && sortedFlags[i]) sh.getRange(REM_DATA_START + i, REM_FINAL_COL).setValue('sin teléfono').setFontColor('#999');
   });
   // Columna "Pedir congelamiento 📲": enlace al formulario, sólo en filas vencidas.
   const sortedFreeze = order.map(i => freezeCells[i]);
@@ -3221,6 +3373,50 @@ function planFormWaFormula_(loan) {
 
 /** Días de la semana en español (0=domingo) para los textos de fecha límite de cobranza. */
 const DIAS_SEMANA_ES = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+
+/** Fecha numérica DD/MM/AAAA (para el aviso final de cobranza; ej. "27/11/2026"). '' si no es fecha. */
+function fmtDMY_(d) {
+  if (!(d instanceof Date)) d = new Date(d);
+  if (isNaN(d.getTime())) return '';
+  return Utilities.formatDate(d, Session.getScriptTimeZone(), 'dd/MM/yyyy');
+}
+/** Días hasta el plazo FINAL del aviso de cobranza (Configuración «Días para plazo final de cobranza»;
+ *  por defecto 7). El aviso final da esta cantidad de días para pagar/responder antes de acciones. */
+function finalDeadlineDays_() {
+  const n = Number(String(getSetting_('Días para plazo final de cobranza') || '').replace(/[^0-9]/g, ''));
+  return (isFinite(n) && n > 0) ? Math.floor(n) : 7;
+}
+/** AVISO FINAL de cobranza (texto). Mensaje firme con el desglose (capital/interés/mora/total), un
+ *  plazo límite y los datos de pago (Mercado Pago, de «Configuración»). `fin` = objeto del rebuild
+ *  (principal/interest/owedMora/toClear/daysLate/totalDue). `cfg` = {mpAlias,mpTitular,email,empresa}. */
+function finalNoticeMessage_(loan, fin, cfg, signDate, asOf) {
+  const f = fin || {}, c = cfg || {}, nl = '\n';
+  const nombre = String(loan.name || '').trim() || 'Hola';
+  const moraDia = round2_((Number(f.totalDue != null ? f.totalDue : loan.totalDue) || 0) * lateFeeRate_());
+  const firma = (signDate instanceof Date && !isNaN(signDate.getTime())) ? fmtDMY_(signDate) : '(fecha de firma)';
+  return nombre + ', no tuve respuesta a mis avisos anteriores por el préstamo ' + loan.loanId + '.' + nl + nl +
+    'El silencio no suspende la deuda ni detiene la mora, que sigue corriendo a ' + fmtMoney_(moraDia) + ' por día.' + nl + nl +
+    'Detalle al ' + fmtDMY_(asOf) + ':' + nl + nl +
+    'Capital: ' + fmtMoney_(Number(f.principal != null ? f.principal : loan.principal) || 0) + nl +
+    'Interés pactado: ' + fmtMoney_(Number(f.interest) || 0) + nl +
+    'Recargo por mora (' + (Number(f.daysLate) || 0) + ' días): ' + fmtMoney_(Number(f.owedMora) || 0) + nl +
+    'TOTAL A ABONAR: ' + fmtMoney_(Number(f.toClear) || 0) + nl + nl +
+    'Necesito una respuesta tuya HOY, aunque sea para decirme cuándo y cuánto vas a pagar. Si no podés abonar ' +
+    'el total, escribime y armamos un plan de pago: esa puerta sigue abierta, pero solo si me contestás.' + nl + nl +
+    'Si al ' + fmtDMY_(addDays_(asOf, finalDeadlineDays_())) + ' no tengo ni un pago ni una respuesta de tu parte, ' +
+    'cierro la instancia de arreglo privado e inicio acciones formales de cobro en base al contrato que firmaste el ' + firma + '.' + nl + nl +
+    'Datos de pago:' + nl +
+    'Mercado Pago — alias: ' + (c.mpAlias || '(configurar alias en Configuración)') + nl +
+    'Titular: ' + (c.mpTitular || c.empresa || '') + ' (cuenta de cobro de ' + (c.empresa || '') + ')' + nl + nl +
+    (c.empresa || '') + (c.email ? (nl + c.email) : '');
+}
+/** Fórmula =HYPERLINK (wa.me) del AVISO FINAL de cobranza. '' si el cliente no tiene teléfono válido. */
+function finalNoticeWaFormula_(loan, fin, cfg, signDate, asOf) {
+  const num = waNumberAR_(loan && loan.phone);
+  if (!num) return '';
+  const msg = finalNoticeMessage_(loan, fin, cfg, signDate, asOf);
+  return '=HYPERLINK("https://wa.me/' + num + '?text=' + encodeURIComponent(msg) + '","📲 Aviso final")';
+}
 
 /** Fecha en palabras (es-AR) para los mensajes de WhatsApp: "26 de noviembre de 2026" en vez de
  *  "26/11/2026" (evita la ambigüedad día/mes y se lee más natural). Reusa MESES_ES (en minúscula,
@@ -6605,6 +6801,57 @@ function approveWaUrl_(phone, name, loanId, link) {
   return 'https://web.whatsapp.com/send?phone=' + num + '&text=' + encodeURIComponent(approveWaMessage_(name, loanId, link));
 }
 
+/* ===== WhatsApp: OFERTA PRE-APROBADA (mensaje con el link de monto/plazo fijos) =====
+ * Texto CONFIGURABLE («Configuración» → "Mensaje de WhatsApp de oferta»); {nombre}/{monto}/{plazo}/
+ * {link}/{empresa}. Emojis como \u{…} para que no se corrompan. */
+const OFFER_WA_DEFAULT = '¡Hola {nombre}! \u{1F389} Tenés una OFERTA PRE-APROBADA en {empresa} \u{2705}\n\n' +
+  '\u{1F4B0} Monto: {monto}\n' +
+  '\u{1F4C5} Plazo: {plazo} días\n\n' +
+  'El monto y el plazo ya están reservados para vos. Completá tu solicitud acá \u{1F447}\n' +
+  '{link}\n\n' +
+  '\u{26A0}\u{FE0F} El dinero se acredita después de verificar tus datos y firmar.\n' +
+  '¿Dudas? Respondé este mensaje \u{1F4AC}\n' +
+  '{empresa} \u{1F49B}';
+const OFFER_WA_OLD_DEFAULTS = [];
+function offerWaTemplate_() {
+  const cur = String(getSetting_('Mensaje de WhatsApp de oferta') || '').trim();
+  if (!cur || cur.indexOf('�') >= 0 || OFFER_WA_OLD_DEFAULTS.indexOf(cur) >= 0) return OFFER_WA_DEFAULT;
+  return cur;
+}
+/** Mensaje de oferta con {nombre}/{monto}/{plazo}/{link}/{empresa} resueltos. Si la plantilla no
+ *  incluye {link}, se agrega al final (el enlace SIEMPRE debe aparecer). */
+function offerWaMessage_(name, amount, term, link) {
+  let tpl = offerWaTemplate_();
+  if (tpl.indexOf('{link}') < 0 && String(link || '').trim()) tpl += '\n\n\u{1F449} {link}';
+  const nice = (typeof titleCaseName_ === 'function') ? titleCaseName_(name) : String(name || '').trim();
+  const first = nice.split(/\s+/)[0] || 'Hola';
+  return tpl.replace(/\{nombre\}/g, first)
+    .replace(/\{monto\}/g, fmtMoney_(amount))
+    .replace(/\{plazo\}/g, String(Number(term) || ''))
+    .replace(/\{link\}/g, String(link || '').trim() || '(falta configurar la URL de la app web)')
+    .replace(/\{empresa\}/g, companyName_());
+}
+
+/* ===== WhatsApp: RECHAZO de prospecto (mensaje amable) =====
+ * Texto CONFIGURABLE («Configuración» → "Mensaje de WhatsApp de rechazo»); {nombre}/{empresa}. */
+const REJECT_WA_DEFAULT = '¡Hola {nombre}! \u{1F44B} Gracias por tu interés en {empresa}.\n\n' +
+  'Evaluamos tu solicitud con atención y, por ahora, no podemos avanzar: los niveles de deuda ' +
+  'registrados son altos. \u{1F64F}\n\n' +
+  'Esto puede cambiar: si tu situación mejora más adelante, escribinos y lo revisamos de nuevo con gusto. \u{1F4AC}\n\n' +
+  '{empresa} \u{1F49B}';
+const REJECT_WA_OLD_DEFAULTS = [];
+function rejectWaTemplate_() {
+  const cur = String(getSetting_('Mensaje de WhatsApp de rechazo') || '').trim();
+  if (!cur || cur.indexOf('�') >= 0 || REJECT_WA_OLD_DEFAULTS.indexOf(cur) >= 0) return REJECT_WA_DEFAULT;
+  return cur;
+}
+/** Mensaje de rechazo con {nombre}/{empresa} resueltos (saludo con el primer nombre, Title Case). */
+function rejectWaMessage_(name) {
+  const nice = (typeof titleCaseName_ === 'function') ? titleCaseName_(name) : String(name || '').trim();
+  const first = nice.split(/\s+/)[0] || 'Hola';
+  return rejectWaTemplate_().replace(/\{nombre\}/g, first).replace(/\{empresa\}/g, companyName_());
+}
+
 /** Fecha del sorteo (Configuración "Fecha del sorteo (promoción)"). Acepta AAAA-MM-DD, DD/MM/AAAA o
  *  una celda de fecha. Predet. 20-dic-2026. */
 function promoRaffleDate_() {
@@ -7178,6 +7425,16 @@ function doGet(e) {
   // formulario inteligente (detecta clientes existentes por Correo + DNI).
   if (page === 'clasico') return HtmlService.createHtmlOutput(acceptingApplications_() ? intakeHtml_() : closedHtml_())
     .setTitle('Solicitud de Préstamo').addMetaTag('viewport', 'width=device-width, initial-scale=1');
+  // Oferta pre-aprobada: formulario inteligente con monto/plazo FIJOS. Rama propia y aislada — la
+  // ruta por defecto y todas las demás quedan intactas. Firma inválida/ausente → formulario normal.
+  if (page === 'oferta') {
+    const om = Number(String((e && e.parameter && e.parameter.m) || '').replace(/\D/g, '')) || 0;
+    const op = Number(String((e && e.parameter && e.parameter.p) || '').replace(/\D/g, '')) || 0;
+    const os = String((e && e.parameter && e.parameter.s) || '').trim();
+    const offer = (os && offerVerify_(om, op, os)) ? { amount: om, term: op, sig: os } : null;
+    return HtmlService.createHtmlOutput(acceptingApplications_() ? intakeSmartHtml_(offer) : closedHtml_())
+      .setTitle('Solicitud de Préstamo').addMetaTag('viewport', 'width=device-width, initial-scale=1');
+  }
   const html = acceptingApplications_() ? intakeSmartHtml_() : closedHtml_();
   return HtmlService.createHtmlOutput(html).setTitle('Solicitud de Préstamo')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
@@ -8586,6 +8843,44 @@ function authLockoutSeconds_() { return Math.max(60, Math.round(settingDays_('Bl
 /** Comparación en tiempo constante (evita oráculos de temporización sobre el token). */
 function constEq_(a, b) { a = String(a); b = String(b); if (a.length !== b.length) return false; let r = 0; for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i); return r === 0; }
 
+/* ===================== OFERTA PRE-APROBADA (enlace con monto/plazo fijos) =====================
+ * Enlace ?page=oferta&m=<monto>&p=<plazo>&s=<firma> que abre el formulario con el monto y el plazo
+ * YA FIJADOS (no editables). La firma es un HMAC del par monto|plazo con un secreto propio del script:
+ * el cliente no puede cambiar monto/plazo sin invalidar la firma. Si la firma no valida, el enlace
+ * cae al formulario normal (editable) — nunca otorga nada: el alta siempre pasa por la verificación
+ * completa (KYC/BCRA/referencias). Productos reales: 15/30/90 días (termInfoForDays_). */
+const OFFER_TERMS = [15, 30, 90];
+/** ¿monto + plazo válidos para una oferta? plazo ∈ {15,30,90} y 0 < monto ≤ tope configurable. */
+function offerValidParams_(amount, term) {
+  amount = Number(amount) || 0; term = Number(term) || 0;
+  return OFFER_TERMS.indexOf(term) >= 0 && amount > 0 && amount <= loanMax_();
+}
+/** Secreto HMAC de las ofertas (Script Properties; se crea solo la primera vez). */
+function offerSecret_() {
+  const props = PropertiesService.getScriptProperties();
+  let s = props.getProperty('OFFER_HMAC_SECRET');
+  if (!s) { s = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, ''); props.setProperty('OFFER_HMAC_SECRET', s); }
+  return s;
+}
+/** Firma corta (hex) del par monto|plazo. Cadena canónica 'v1|monto|plazo' (enteros normalizados). */
+function offerSign_(amount, term) {
+  const msg = 'v1|' + (Number(amount) || 0) + '|' + (Number(term) || 0);
+  const raw = Utilities.computeHmacSha256Signature(msg, offerSecret_());
+  return raw.map(function (b) { return ('0' + (b & 0xFF).toString(16)).slice(-2); }).join('').slice(0, 20);
+}
+/** Verifica una oferta: parámetros válidos Y firma correcta (comparación en tiempo constante). */
+function offerVerify_(amount, term, sig) {
+  if (!offerValidParams_(amount, term)) return false;
+  return constEq_(offerSign_(amount, term), String(sig || '').toLowerCase().trim());
+}
+/** Enlace de oferta pre-aprobada (monto/plazo fijos). '' si faltan parámetros válidos o la URL base. */
+function offerLink_(amount, term) {
+  if (!offerValidParams_(amount, term)) return '';
+  const base = webAppBaseUrl_();
+  if (!base) return '';
+  return base + '?page=oferta&m=' + (Number(amount) || 0) + '&p=' + (Number(term) || 0) + '&s=' + offerSign_(amount, term);
+}
+
 /** Asegura (y opcionalmente ROTA) el token de acceso del préstamo; devuelve el token ('' si no se halla). */
 function ensureLoanToken_(loanId, rotate) {
   loanId = String(loanId || '').trim(); if (!loanId) return '';
@@ -9225,8 +9520,10 @@ function onEditInstallable(e) {
         for (let row = rN; row >= r0; row--) {
           if (sh.getRange(row, rjCol).getValue() !== true) continue;
           sh.getRange(row, rjCol).setValue(false); // acción: se destilda
-          if (PH['Estado']) sh.getRange(row, PH['Estado']).setValue('RECHAZADO');
           const nm = PH['Nombre'] ? String(sh.getRange(row, PH['Nombre']).getValue() || '').trim() : '';
+          // Marca RECHAZADO y abre WhatsApp con un mensaje amable (si hay teléfono).
+          try { rechazarProspecto_(sh, row); }
+          catch (err) { logError_('onEdit:PROSPECTOS:rechazar', err); if (PH['Estado']) sh.getRange(row, PH['Estado']).setValue('RECHAZADO'); }
           try { getSS_().toast('Prospecto' + (nm ? (' «' + nm + '»') : '') + ' marcado RECHAZADO.', '🚫 Prospecto', 5); } catch (e3) { }
         }
       }
@@ -11158,6 +11455,9 @@ function instalarAvisosVencimiento() {
       ['WhatsApp — Días de aviso antes del vencimiento', '3'],
       ['WhatsApp — Plantilla de contrato firmado', 'contrato_firmado'],
       ['Mensaje de WhatsApp de aprobación', APPROVE_WA_DEFAULT],
+      ['Mensaje de WhatsApp de oferta', OFFER_WA_DEFAULT],
+      ['Mensaje de WhatsApp de rechazo', REJECT_WA_DEFAULT],
+      ['Días para plazo final de cobranza', '7'],
     ];
     defs.forEach(function (d) { if (!String(getSetting_(d[0]) || '').trim()) setSetting_(d[0], d[1]); });
     ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'enviarAvisosVencimiento') ScriptApp.deleteTrigger(t); });

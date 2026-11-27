@@ -1267,11 +1267,22 @@ function submitIntakeSmart(form) {
     cuil = cuV.norm;
 
     // Datos del préstamo (obligatorios para todos).
-    const amount = Number(String(form.amount || '').replace(/\D/g, '')) || 0;
-    // V-30: el plazo/tasa/cuotas se DERIVAN del monto. Para montos chicos (≤ tramo1) el
-    // cliente puede elegir 15 o 30 días; resolveTerm_ respeta la elección si es válida.
-    const tinfo = resolveTerm_(amount, Number(form.term) || 0);
-    const term = tinfo.days;
+    // OFERTA pre-aprobada: si la solicitud trae una oferta FIRMADA válida (monto+plazo), se usan ESOS
+    // valores (ignorando lo que mande el cliente y la derivación por tramo). Firma inválida/ausente →
+    // flujo normal. La firma no saltea NINGUNA regla de negocio: abajo siguen V-29/V-30 y todo el KYC.
+    const _offM = Number(String(form.offerM || '').replace(/\D/g, '')) || 0;
+    const _offP = Number(form.offerP) || 0;
+    const _offS = String(form.offerS || '').trim();
+    let amount, term;
+    if (_offS && typeof offerVerify_ === 'function' && offerVerify_(_offM, _offP, _offS)) {
+      amount = _offM;
+      term = _offP;
+    } else {
+      amount = Number(String(form.amount || '').replace(/\D/g, '')) || 0;
+      // V-30: el plazo/tasa/cuotas se DERIVAN del monto. Para montos chicos (≤ tramo1) el
+      // cliente puede elegir 15 o 30 días; resolveTerm_ respeta la elección si es válida.
+      term = resolveTerm_(amount, Number(form.term) || 0).days;
+    }
     const notes = String(form.notes || '').trim();
     const address = String(form.address || '').trim();
     // Forma de pago elegida por el prestatario (predeterminada: Mercado Pago) + datos opcionales.
@@ -2567,7 +2578,12 @@ function buildValidacionesSheet_(ss) {
 
 /* ==================== FORMULARIO INTELIGENTE (HTML) ==================== */
 
-function intakeSmartHtml_() {
+function intakeSmartHtml_(offer) {
+  // OFERTA PRE-APROBADA (opcional): monto + plazo fijos y firmados. Sin oferta válida → formulario
+  // normal, idéntico a siempre. Solo se activa con una firma HMAC válida (ver offerVerify_).
+  offer = (offer && offerValidParams_(offer.amount, offer.term)) ? offer : null;
+  const O_M = offer ? Number(offer.amount) : 0, O_P = offer ? Number(offer.term) : 0, O_S = offer ? String(offer.sig) : '';
+  const O_RATE = offer ? termRateDays_(O_P) : 0;
   const lender = esc_(companyName_());
   const juris = esc_(getSetting_('Jurisdicción') || 'Buenos Aires, Argentina');
   const contractFooter = esc_(getSetting_('Pie del Contrato') || 'Este acuerdo es legalmente vinculante desde la firma de ambas partes.');
@@ -2808,6 +2824,7 @@ function intakeSmartHtml_() {
           <input type="hidden" name="clientId" id="clientId" value="">
           <input type="hidden" name="reuseRefs" id="reuseRefs" value="">
           <input type="hidden" name="deviceMeta" id="deviceMeta" value="">
+          ${offer ? `<input type="hidden" name="offerM" id="offerM" value="${O_M}"><input type="hidden" name="offerP" id="offerP" value="${O_P}"><input type="hidden" name="offerS" id="offerS" value="${esc_(O_S)}">` : ''}
           <div id="stepper">
             <div class="schip active" data-goto="1"><span class="snum">1</span><span class="slbl">Identificación</span></div>
             <div class="schip" data-goto="2"><span class="snum">2</span><span class="slbl">Tus datos</span></div>
@@ -2927,7 +2944,8 @@ function intakeSmartHtml_() {
               ⭐ <b>Pagá a tiempo y subís de nivel:</b> tu límite puede crecer de ${fmtMoney_(settingMoney_('Límite inicial (préstamo nuevo)', 150000))} hasta ${fmtMoney_(loanMax_())}. Muchos préstamos chicos no suben de nivel — contá con devolver a tiempo.
             </div>
           </div>
-          <label>Monto solicitado (ARS) <span class="req">*</span><input name="amount" id="amount" type="text" inputmode="numeric" autocomplete="off" placeholder="Ej: 100.000" required style="font-size:20px;font-weight:bold;height:auto;padding:12px"></label>
+          ${offer ? `<div id="offerBanner" style="margin:10px 0;padding:12px 14px;border-radius:12px;background:var(--ok-050);border:1px solid var(--ok);color:var(--ok);font-weight:600">✅ <b>Oferta pre-aprobada:</b> ${esc_(fmtMoney_(O_M))} a ${O_P} días. El monto y el plazo ya están fijados para vos.</div>` : ''}
+          <label>Monto solicitado (ARS) <span class="req">*</span><input name="amount" id="amount" type="text" inputmode="numeric" autocomplete="off" placeholder="Ej: 100.000" required ${offer ? `value="${O_M}" readonly` : ''} style="font-size:20px;font-weight:bold;height:auto;padding:12px"></label>
           <div id="amountWords" style="display:none;margin:6px 0 2px;font-size:19px;font-weight:bold;color:#f0c070;line-height:1.35"></div>
           <small class="fieldErr" id="e_amount"></small>
           <input type="hidden" name="term" id="term" value="">
@@ -3121,6 +3139,9 @@ function intakeSmartHtml_() {
       // Límite del prestatario (escalera de graduación, V-32). Arranca en el tope global y se
       // ajusta al identificarse (según su historial de repago). Nunca supera LOANMAX.
       var MAXAMT=LOANMAX;
+      // OFERTA pre-aprobada: {m:monto, p:plazo, s:firma} o null. En modo oferta el monto y el plazo
+      // quedan FIJOS (el campo monto es readonly y el plazo no se deriva ni se elige).
+      var OFFER=${offer ? `{m:${O_M},p:${O_P},s:${JSON.stringify(O_S)}}` : 'null'};
       function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
       function fmt(n){try{return n.toLocaleString('es-AR',{style:'currency',currency:'ARS'});}catch(e){return '$'+n.toFixed(2);}}
       function groupNum(d){var out='',c=0;for(var i=d.length-1;i>=0;i--){out=d.charAt(i)+out;c++;if(c%3===0&&i>0){out='.'+out;}}return out;}
@@ -3406,6 +3427,7 @@ function intakeSmartHtml_() {
 
       // Monto: agrupación de miles + cálculo.
       amountEl.addEventListener('input',function(){
+        if(OFFER)return; // monto fijo por la oferta (readonly); no recalcular ni reescribir
         var d=amountEl.value.replace(/[^0-9]/g,'').replace(/^0+/,'');
         amountEl.value=d?groupNum(d):'';recalc();updateAmountWords();
       });
@@ -3426,6 +3448,18 @@ function intakeSmartHtml_() {
         // eventos, así que su error no se limpia solo. Tras recalcular, si el error está visible lo
         // revalidamos (se limpia al corregir el monto; se actualiza si sigue inválido).
         try {
+        if(OFFER){ // monto/plazo FIJOS por la oferta: no se deriva ni se elige el plazo
+          try{ amountEl.value=groupNum(String(OFFER.m)); }catch(e){}
+          termEl.value=String(OFFER.p);
+          var tvO=el_('termView'), tcO=el_('termChoice'), tiO=infoForDays(OFFER.p,OFFER.m);
+          if(tcO) tcO.style.display='none';
+          if(tvO){ tvO.style.display='block'; tvO.style.color='#7bd389';
+            tvO.textContent='Plazo: '+OFFER.p+' días ('+Math.round(tiO.rate*100)+'% de interés) — fijado por tu oferta'; }
+          var totO=OFFER.m*(1+tiO.rate), cuoO=totO/tiO.cuotas;
+          calc.style.display='block';
+          calc.innerHTML='Interés: <b>'+fmt(OFFER.m*tiO.rate)+'</b><br>Total a devolver: <b>'+fmt(totO)+'</b><br>Repago: <b>'+(tiO.cuotas===1?('1 pago de '+fmt(totO)):(tiO.cuotas+' cuotas de '+fmt(cuoO)))+'</b>';
+          return;
+        }
         var a=parseAmount(amountEl.value), tv=el_('termView'), tc=el_('termChoice'), sel=el_('term15o30');
         var al=allowedDays(a);
         if(al&&al.length===0){ termEl.value=''; tc.style.display='none'; tv.style.display='block'; calc.style.display='none'; tv.textContent='Ingresá el monto para ver el plazo y las cuotas.'; tv.style.color='#9fb2d0'; return; }
@@ -3452,10 +3486,13 @@ function intakeSmartHtml_() {
       }
       // Al cambiar la elección de plazo (tramo chico), recalcular.
       (function(){ var s=document.getElementById('term15o30'); if(s) s.addEventListener('change',recalc); })();
+      // Oferta pre-aprobada: fija y muestra monto/plazo apenas carga (campo monto ya es readonly).
+      if(OFFER){ try{ amountEl.readOnly=true; }catch(e){} recalc(); }
 
       // V-32 — refleja el límite del prestatario (escalera de graduación) en el formulario:
       // banner con su tope actual, tarjeta de nivel explicativa, y atenúa los tramos por encima.
       function renderLimit(r){
+        if(OFFER){ recalc(); return; } // en modo oferta el tope lo fija la oferta, no la graduación
         MAXAMT=(r&&r.maxAmount>0)?r.maxAmount:LOANMAX;
         var banner=document.getElementById('maxBanner');
         if(banner){
